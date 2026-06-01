@@ -1,0 +1,384 @@
+"""
+Vibe OCTO Quant — Technical Auditor Agent
+
+Receives a validated AudienceSizingRequest from Nexus and:
+  1. Strictly rejects any payload that does not conform to AudienceSizingRequest.
+  2. Generates a BigQuery waterfall SQL query via Fuel iX Claude.
+  3. Executes the query against BigQuery using ADC credentials.
+  4. Masks customer PII in Python before returning results.
+  5. Parses the waterfall rows and computes an optimization note.
+  6. Returns a QuantAuditLog on success, or a NexusErrorPayload on any failure —
+     never raises raw exceptions to the orchestrator.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import warnings
+from pathlib import Path
+from typing import Optional, Union
+
+import requests
+from dotenv import load_dotenv
+from pydantic import ValidationError
+
+_QUANT_DIR = Path(__file__).resolve().parent
+_ROOT_DIR = _QUANT_DIR.parent
+
+for _p in [str(_QUANT_DIR), str(_ROOT_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+load_dotenv(_QUANT_DIR / ".env")
+
+from pydantic_schemas import (
+    AdHocSizingRequest,
+    AudienceSizingRequest,
+    NexusErrorPayload,
+    QuantAuditLog,
+    WaterfallLayer,
+)
+
+_FUELIX_BASE = "https://api.fuelix.ai"
+_DEFAULT_MODEL = "claude-sonnet-4"
+
+_QUANT_SYSTEM = (
+    "You are Vibe OCTO Quant, a BigQuery technical auditor for a Canadian telecom "
+    "marketing team. "
+    "You translate audience sizing requests into precise BigQuery Standard SQL waterfall "
+    "queries. "
+    "Rules:\n"
+    "- Never select customer PII (names, addresses, emails, phone numbers, IMEI)\n"
+    "- Count audiences using COUNT(DISTINCT ban) — fallback to COUNT(DISTINCT bacct_num)\n"
+    "- Always return exactly two output columns: layer_name STRING, audience_count INT64\n"
+    "- Use a WITH clause for each filter step\n"
+    "- Use Standard SQL syntax; backtick-quote all table refs as `project.dataset.table`\n"
+    "- Return ONLY the raw SQL — no markdown, no explanation, no trailing semicolon"
+)
+
+_WATERFALL_SQL_PROMPT = """Generate a BigQuery audience waterfall query for this sizing request.
+
+Campaign   : {campaign_name} ({campaign_code} / {campaign_sub_code})
+Population : {target_population}
+Filters    : {filters_json}
+Exclusions : {exclusions_json}
+BQ Project : {bq_project}
+BQ Dataset : {bq_dataset}
+
+Available schema:
+{schema_context}
+
+Waterfall structure required:
+  Row 1 : layer_name = 'Base Universe', audience_count = COUNT(DISTINCT ban) with no
+           audience-specific filters — just active customer base (e.g. sub_status = 'A').
+  Rows 2+ : label each 'After: <short filter description>', adding one filter per step.
+  Last row: label 'Final Audience' — all filters and exclusions applied.
+
+Constraints:
+- Never SELECT any customer identifier values in output — only aggregate counts
+- Apply filters cumulatively (each CTE builds on the previous WHERE clause)
+- Use ONLY the filter criteria listed above — do not add extra WHERE conditions from
+  historical campaign knowledge or assumed targeting patterns not present in Filters
+- If the schema does not contain an expected field, use the closest available field
+  and add a comment explaining the substitution
+
+Return ONLY the SQL."""
+
+_EXTREME_DROP = 0.60
+_HIGH_SCRUB_RATE = 0.80
+
+_DIRECT_COUNT_PROMPT = """Generate a single BigQuery COUNT query for this ad-hoc audience request.
+
+Population : {target_population}
+Filters    : {filters_json}
+BQ Project : {bq_project}
+BQ Dataset : {bq_dataset}
+
+Available schema:
+{schema_context}
+
+Return exactly two output columns: layer_name STRING set to the literal 'Final Audience',
+audience_count INT64.
+Apply ALL listed filters in a single WHERE clause against active subscribers (sub_status = 'A').
+No CTEs, no waterfall layers — one SELECT that returns exactly one result row.
+
+Return ONLY the SQL."""
+
+
+class QuantAgent:
+    def __init__(self) -> None:
+        self._api_key = os.getenv("FUELIX_API_KEY")
+        if not self._api_key:
+            raise RuntimeError("FUELIX_API_KEY not set in Vibe OCTO Quant/.env")
+        self._model = os.getenv("FUELIX_MODEL", _DEFAULT_MODEL)
+        self._default_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
+        self._default_dataset = os.getenv("BQ_DATASET", "adobe")
+        self._schema_cache = _QUANT_DIR / ".schema_cache.json"
+
+    # ------------------------------------------------------------------
+    # Public API — strict gateway, never raises to orchestrator
+    # ------------------------------------------------------------------
+
+    def audit(self, payload: dict) -> Union[QuantAuditLog, NexusErrorPayload]:
+        """Validate payload and run the full audit pipeline.
+
+        Returns QuantAuditLog on success, NexusErrorPayload on any failure.
+        Raw exceptions are suppressed — Nexus receives structured error context.
+        """
+        try:
+            request = AudienceSizingRequest(**payload)
+        except ValidationError as exc:
+            field_errors = "; ".join(
+                f"{'.'.join(str(l) for l in e['loc'])}: {e['msg']}"
+                for e in exc.errors()[:3]
+            )
+            return NexusErrorPayload(
+                error_type="validation_error",
+                error_summary=(
+                    f"Payload rejected — {exc.error_count()} field error(s). {field_errors}"
+                ),
+                original_request=payload,
+                retry_hint=(
+                    "Ensure all required fields are present and correctly typed. "
+                    "Required: campaign_name (str), campaign_code (str), "
+                    "campaign_sub_code (str), cadence (str), medium (str), "
+                    "target_population (str), filters (list[str] — at least one entry), "
+                    "bq_project (str), bq_dataset (str)."
+                ),
+            )
+
+        try:
+            return self._run_audit(request)
+        except Exception as exc:
+            return NexusErrorPayload(
+                error_type="database_error",
+                error_summary=str(exc)[:400],
+                original_request=payload,
+                retry_hint=(
+                    "Check that target_population and filters use standard telecom "
+                    "marketing terminology recognisable in the BQ schema. "
+                    "Verify ADC credentials are active for the BQ project."
+                ),
+            )
+
+    def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
+        """Path 2 — execute a direct single-row count query. No waterfall, no retry loop."""
+        try:
+            schema = self._fetch_schema(request.bq_project, request.bq_dataset)
+            sql = self._generate_direct_sql(request, schema)
+            raw_rows = self._execute_query(sql, request.bq_project)
+            masked_rows = _mask_pii(raw_rows)
+            waterfall = _parse_waterfall(masked_rows)
+            final_count = waterfall[-1].audience_count if waterfall else 0
+            return QuantAuditLog(
+                request=request,
+                sql=sql,
+                waterfall=waterfall,
+                final_count=final_count,
+                optimization_note=None,
+            )
+        except Exception as exc:
+            return NexusErrorPayload(
+                error_type="database_error",
+                error_summary=str(exc)[:400],
+                original_request=request.model_dump(),
+                retry_hint=(
+                    "Check that filters use valid BQ column names. "
+                    "Verify ADC credentials are active for the BQ project."
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # Audit pipeline
+    # ------------------------------------------------------------------
+
+    def _run_audit(self, request: AudienceSizingRequest) -> QuantAuditLog:
+        schema = self._fetch_schema(request.bq_project, request.bq_dataset)
+        sql = self._generate_waterfall_sql(request, schema)
+        raw_rows = self._execute_query(sql, request.bq_project)
+        masked_rows = _mask_pii(raw_rows)
+        waterfall = _parse_waterfall(masked_rows)
+        note = _optimization_note(waterfall)
+        final_count = waterfall[-1].audience_count if waterfall else 0
+
+        return QuantAuditLog(
+            request=request,
+            sql=sql,
+            waterfall=waterfall,
+            final_count=final_count,
+            optimization_note=note,
+        )
+
+    def _fetch_schema(self, project: str, dataset: str) -> str:
+        try:
+            from bq_reporter.bq_client import get_schema  # type: ignore
+
+            return get_schema(
+                project,
+                [dataset],
+                cache_path=self._schema_cache,
+            )
+        except Exception:
+            return f"-- Schema unavailable for {project}.{dataset}"
+
+    def _generate_waterfall_sql(
+        self, request: AudienceSizingRequest, schema: str
+    ) -> str:
+        prompt = _WATERFALL_SQL_PROMPT.format(
+            campaign_name=request.campaign_name,
+            campaign_code=request.campaign_code,
+            campaign_sub_code=request.campaign_sub_code,
+            target_population=request.target_population,
+            filters_json=json.dumps(request.filters, ensure_ascii=False),
+            exclusions_json=json.dumps(request.exclusion_layers or [], ensure_ascii=False),
+            bq_project=request.bq_project,
+            bq_dataset=request.bq_dataset,
+            schema_context=schema[:6000] if schema else "(not available)",
+        )
+        resp = requests.post(
+            f"{_FUELIX_BASE}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": _QUANT_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 2048,
+                "temperature": 0,
+            },
+            timeout=180,
+        )
+        resp.raise_for_status()
+        sql = resp.json()["choices"][0]["message"]["content"].strip()
+        return _clean_sql(sql)
+
+    def _generate_direct_sql(self, request: AdHocSizingRequest, schema: str) -> str:
+        prompt = _DIRECT_COUNT_PROMPT.format(
+            target_population=request.target_population or "UNSPECIFIED",
+            filters_json=json.dumps(
+                [f for f in (request.filters or []) if f is not None],
+                ensure_ascii=False,
+            ),
+            bq_project=request.bq_project or self._default_project,
+            bq_dataset=request.bq_dataset or self._default_dataset,
+            schema_context=schema[:6000] if schema else "(not available)",
+        )
+        resp = requests.post(
+            f"{_FUELIX_BASE}/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": _QUANT_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 1024,
+                "temperature": 0,
+            },
+            timeout=180,
+        )
+        resp.raise_for_status()
+        sql = resp.json()["choices"][0]["message"]["content"].strip()
+        return _clean_sql(sql)
+
+    def _execute_query(self, sql: str, project: str) -> list[dict]:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from google.cloud import bigquery  # type: ignore
+
+            client = bigquery.Client(project=project)
+
+        rows = [dict(r) for r in client.query(sql).result()]
+        return rows
+
+
+# ------------------------------------------------------------------
+# Pure functions — PII masking, waterfall parsing, audit note
+# ------------------------------------------------------------------
+
+def _mask_pii(rows: list[dict]) -> list[dict]:
+    """Remove hidden PII columns and mask filter-only PII values in-place."""
+    try:
+        from bq_reporter.bq_client import _is_pii, _is_filter_only_pii  # type: ignore
+    except ImportError:
+        return rows
+
+    out: list[dict] = []
+    for row in rows:
+        masked: dict = {}
+        for k, v in row.items():
+            if _is_pii(k):
+                continue
+            masked[k] = "***" if _is_filter_only_pii(k) else v
+        out.append(masked)
+    return out
+
+
+def _parse_waterfall(rows: list[dict]) -> list[WaterfallLayer]:
+    layers: list[WaterfallLayer] = []
+    for row in rows:
+        name = str(
+            row.get("layer_name")
+            or row.get("LAYER_NAME")
+            or ""
+        ).strip()
+        raw_count = row.get("audience_count") or row.get("AUDIENCE_COUNT") or 0
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = 0
+        if name:
+            layers.append(WaterfallLayer(layer_name=name, audience_count=count))
+    return layers
+
+
+def _optimization_note(waterfall: list[WaterfallLayer]) -> Optional[str]:
+    if len(waterfall) < 2:
+        return None
+
+    base = waterfall[0].audience_count
+    final = waterfall[-1].audience_count
+    notes: list[str] = []
+
+    for i in range(1, len(waterfall)):
+        prev = waterfall[i - 1].audience_count
+        curr = waterfall[i].audience_count
+        if prev > 0:
+            drop = (prev - curr) / prev
+            if drop > _EXTREME_DROP:
+                notes.append(
+                    f"'{waterfall[i].layer_name}' removes {drop:.0%} of upstream audience "
+                    f"({prev:,} -> {curr:,}) — verify this filter is correctly calibrated."
+                )
+
+    if base > 0:
+        total_scrub = (base - final) / base
+        if total_scrub > _HIGH_SCRUB_RATE:
+            notes.append(
+                f"Total scrub rate is {total_scrub:.0%} ({base:,} -> {final:,}). "
+                "The combined filter stack is highly restrictive — consider relaxing "
+                "criteria or phasing the campaign across multiple sends."
+            )
+
+    if not notes:
+        return "Waterfall clean — no extreme audience drops detected across filter layers."
+
+    return "Optimization Note: " + " | ".join(notes)
+
+
+def _clean_sql(sql: str) -> str:
+    if sql.startswith("```"):
+        lines = sql.splitlines()
+        start = 1 if lines[0].startswith("```") else 0
+        end = len(lines) - 1 if lines and lines[-1].strip() == "```" else len(lines)
+        sql = "\n".join(lines[start:end])
+    return sql.strip().rstrip(";").strip()

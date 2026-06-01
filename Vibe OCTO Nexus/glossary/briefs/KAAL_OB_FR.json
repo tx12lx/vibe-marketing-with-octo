@@ -1,0 +1,300 @@
+{
+  "_meta": {
+    "schema_version": "1.0",
+    "tool": "vibe-briefing",
+    "portfolio": "AAL",
+    "glossary_version": "1.0",
+    "generated_at": "2026-05-29T18:39:31.004151+00:00"
+  },
+  "campaign": {
+    "id": "KAAL OB FR",
+    "portfolio": "AAL",
+    "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+    "brand": "Koodo",
+    "purpose": "Cross-Sell",
+    "medium": [
+      "OB"
+    ],
+    "cadence": "Bi Weekly"
+  },
+  "targeting": {
+    "include": [
+      {
+        "term": "Koodo Postpaid only",
+        "logic": "Include only customers on the Koodo postpaid mobility base",
+        "threshold": null,
+        "confidence_score": 1.0,
+        "bq_mapping": null
+      },
+      {
+        "term": "AAL reco model 1-5 only",
+        "logic": "Include only customers with an AAL recommendation model score ranked 1 to 5",
+        "threshold": "rank 1-5",
+        "confidence_score": 0.3,
+        "bq_mapping": null
+      },
+      {
+        "term": "French speakers only",
+        "logic": "Include only customers whose preferred language is French",
+        "threshold": null,
+        "confidence_score": 1.0,
+        "bq_mapping": null
+      }
+    ],
+    "exclude": [
+      {
+        "term": "Exclude those added a line in the past 30 days",
+        "logic": "Exclude customers who have added a line to their account within the last 30 days",
+        "threshold": "30 days",
+        "lookback_days": 30,
+        "confidence_score": 1.0,
+        "bq_mapping": null
+      }
+    ]
+  },
+  "default_exclusions": {
+    "dnc": {
+      "applied": true,
+      "scope": "call DNC"
+    },
+    "non_primary_subscriber": true,
+    "stop_sell": true,
+    "castl_compliance": true
+  },
+  "channel": {
+    "medium": [
+      "OB"
+    ],
+    "contact_strategy_override": {
+      "allowed": false,
+      "approver": null,
+      "condition": "Contact strategy is applied as a standard rule; no override indicated"
+    },
+    "control_holdout": {
+      "applied": true,
+      "percentage": null,
+      "type": "UCG"
+    }
+  },
+  "vendor": {
+    "name": "TI Morocco",
+    "css_campaign_id": "KAALFR",
+    "css_measurement_id": null
+  },
+  "offer": {
+    "product": "Add-A-Line",
+    "sub_product": null,
+    "offer_code": null
+  },
+  "segmentation": {
+    "base": "Base 1",
+    "language": [
+      "French"
+    ],
+    "geography": "Priority communities in Quebec requested (Quebec City-Levis, Trois-Rivieres, Longueuil, Granby-Bromont, Shawinigan, Outremont, Sherbrooke-Magog, Mount-Royal, Drummond, Saguenay) but requirement was rejected — city names not aligned to CITY field in marketing database"
+  },
+  "data_brief_flags": {
+    "missing_required_fields": [
+      "css_measurement_id — vendor is TI Morocco with CSS ID provided but CSS measurement ID is absent",
+      "offer_code — no offer code stated in the brief",
+      "control_holdout percentage — UCG is requested but no percentage specified"
+    ],
+    "ambiguities": [
+      "AAL reco model 1-5 (Criteria #2) was noted as 'removed as of Oct 24 - Ben' — it is unclear whether this criterion is still active; captured with low confidence",
+      "Prioritize highest reco when cutting the list (Criteria #12) was also noted as 'removed as of Oct 24 - Ben' — status unclear",
+      "Geographic prioritization (Criteria #4) was formally rejected due to city name misalignment with the marketing database — no alternative geography logic was provided",
+      "Campaign medium in the brief header states 'EM' (email) but campaign ID and tracking system metadata indicate OB (outbound call); OB is used as the authoritative medium per the tracking system",
+      "CSS ID 'KAALFR' is provided under Criteria #14 but it is ambiguous whether TI Morocco uses the CSS dialing platform — CSS measurement ID is not provided",
+      "Quebec bilingual note references English-preferred customers in Quebec receiving bilingual creative — this is a creative/compliance instruction and does not affect audience targeting logic, but may require a language flag split",
+      "Segmentation codes and creative codes for Base 1 segments are entirely blank — no segment-level targeting differentiation is defined"
+    ],
+    "ob_vendor_missing": false,
+    "css_ids_missing": true
+  },
+  "campaign_summary": "This campaign targets Koodo postpaid mobility customers who are French speakers, scored in AAL recommendation model ranks 1-5 (note: this criterion was flagged as removed as of October 2024 and should be confirmed), to promote adding a new line to their existing account via outbound calling through TI Morocco. Customers who have added a line in the past 30 days are excluded, along with standard default exclusions including call DNC suppression, stop-sell, non-primary subscribers, and CASTL compliance. A UCG control holdout is applied, though the holdout percentage has not been specified.",
+  "connectors": {
+    "sizing_tool": {
+      "status": "pending_bq_mapping",
+      "sql_fragments": {
+        "include": [],
+        "exclude": [],
+        "default_exclusions": [
+          {
+            "rule": "dnc",
+            "scope": "call DNC",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "non_primary_subscriber",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "stop_sell",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "castl_compliance",
+            "sql_snippet": null,
+            "bq_field_required": true
+          }
+        ]
+      },
+      "unmapped_terms": [
+        "Koodo Postpaid only",
+        "AAL reco model 1-5 only",
+        "French speakers only",
+        "Exclude those added a line in the past 30 days"
+      ],
+      "note": "4 criterion/criteria need BQ field mappings before SQL can be generated. Provide config/bq_schema.json with real field names, then run: vibe-briefing map-fields --glossary <path> --bq-schema config/bq_schema.json"
+    },
+    "brief_regeneration": {
+      "status": "ready",
+      "structured_sections": {
+        "campaign_overview": {
+          "brand": "Koodo",
+          "portfolio": "AAL",
+          "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+          "purpose": "Cross-Sell",
+          "medium": [
+            "OB"
+          ],
+          "cadence": "Bi Weekly"
+        },
+        "offer": {
+          "product": "Add-A-Line",
+          "sub_product": null,
+          "offer_code": null
+        },
+        "segmentation": {
+          "base": "Base 1",
+          "language": [
+            "French"
+          ],
+          "geography": "Priority communities in Quebec requested (Quebec City-Levis, Trois-Rivieres, Longueuil, Granby-Bromont, Shawinigan, Outremont, Sherbrooke-Magog, Mount-Royal, Drummond, Saguenay) but requirement was rejected — city names not aligned to CITY field in marketing database"
+        },
+        "vendor": {
+          "name": "TI Morocco",
+          "css_campaign_id": "KAALFR",
+          "css_measurement_id": null
+        },
+        "channel_rules": {
+          "medium": [
+            "OB"
+          ],
+          "contact_strategy_override": {
+            "allowed": false,
+            "approver": null,
+            "condition": "Contact strategy is applied as a standard rule; no override indicated"
+          },
+          "control_holdout": {
+            "applied": true,
+            "percentage": null,
+            "type": "UCG"
+          }
+        },
+        "target_audience": [
+          {
+            "criterion": "Koodo Postpaid only",
+            "description": "Include only customers on the Koodo postpaid mobility base",
+            "threshold": null,
+            "confidence_score": 1.0
+          },
+          {
+            "criterion": "AAL reco model 1-5 only",
+            "description": "Include only customers with an AAL recommendation model score ranked 1 to 5",
+            "threshold": "rank 1-5",
+            "confidence_score": 0.3
+          },
+          {
+            "criterion": "French speakers only",
+            "description": "Include only customers whose preferred language is French",
+            "threshold": null,
+            "confidence_score": 1.0
+          }
+        ],
+        "campaign_exclusions": [
+          {
+            "criterion": "Exclude those added a line in the past 30 days",
+            "description": "Exclude customers who have added a line to their account within the last 30 days",
+            "threshold": "30 days",
+            "lookback_days": 30,
+            "confidence_score": 1.0
+          }
+        ],
+        "default_exclusions": {
+          "dnc": {
+            "applied": true,
+            "scope": "call DNC"
+          },
+          "non_primary_subscriber": true,
+          "stop_sell": true,
+          "castl_compliance": true
+        },
+        "quality_flags": {
+          "missing_required_fields": [
+            "css_measurement_id — vendor is TI Morocco with CSS ID provided but CSS measurement ID is absent",
+            "offer_code — no offer code stated in the brief",
+            "control_holdout percentage — UCG is requested but no percentage specified"
+          ],
+          "ambiguities": [
+            "AAL reco model 1-5 (Criteria #2) was noted as 'removed as of Oct 24 - Ben' — it is unclear whether this criterion is still active; captured with low confidence",
+            "Prioritize highest reco when cutting the list (Criteria #12) was also noted as 'removed as of Oct 24 - Ben' — status unclear",
+            "Geographic prioritization (Criteria #4) was formally rejected due to city name misalignment with the marketing database — no alternative geography logic was provided",
+            "Campaign medium in the brief header states 'EM' (email) but campaign ID and tracking system metadata indicate OB (outbound call); OB is used as the authoritative medium per the tracking system",
+            "CSS ID 'KAALFR' is provided under Criteria #14 but it is ambiguous whether TI Morocco uses the CSS dialing platform — CSS measurement ID is not provided",
+            "Quebec bilingual note references English-preferred customers in Quebec receiving bilingual creative — this is a creative/compliance instruction and does not affect audience targeting logic, but may require a language flag split",
+            "Segmentation codes and creative codes for Base 1 segments are entirely blank — no segment-level targeting differentiation is defined"
+          ],
+          "ob_vendor_missing": false,
+          "css_ids_missing": true
+        }
+      },
+      "campaign_summary": "This campaign targets Koodo postpaid mobility customers who are French speakers, scored in AAL recommendation model ranks 1-5 (note: this criterion was flagged as removed as of October 2024 and should be confirmed), to promote adding a new line to their existing account via outbound calling through TI Morocco. Customers who have added a line in the past 30 days are excluded, along with standard default exclusions including call DNC suppression, stop-sell, non-primary subscribers, and CASTL compliance. A UCG control holdout is applied, though the holdout percentage has not been specified."
+    },
+    "brief_assistant": {
+      "status": "ready",
+      "completeness_score": 100,
+      "required_fields_check": {
+        "campaign.brand": true,
+        "campaign.medium": true,
+        "campaign.cadence": true,
+        "targeting.include": true,
+        "offer.product": true,
+        "segmentation.base": true,
+        "vendor.name": true
+      },
+      "failed_checks": [],
+      "include_criteria_count": 3,
+      "exclude_criteria_count": 1,
+      "ambiguities": [
+        "AAL reco model 1-5 (Criteria #2) was noted as 'removed as of Oct 24 - Ben' — it is unclear whether this criterion is still active; captured with low confidence",
+        "Prioritize highest reco when cutting the list (Criteria #12) was also noted as 'removed as of Oct 24 - Ben' — status unclear",
+        "Geographic prioritization (Criteria #4) was formally rejected due to city name misalignment with the marketing database — no alternative geography logic was provided",
+        "Campaign medium in the brief header states 'EM' (email) but campaign ID and tracking system metadata indicate OB (outbound call); OB is used as the authoritative medium per the tracking system",
+        "CSS ID 'KAALFR' is provided under Criteria #14 but it is ambiguous whether TI Morocco uses the CSS dialing platform — CSS measurement ID is not provided",
+        "Quebec bilingual note references English-preferred customers in Quebec receiving bilingual creative — this is a creative/compliance instruction and does not affect audience targeting logic, but may require a language flag split",
+        "Segmentation codes and creative codes for Base 1 segments are entirely blank — no segment-level targeting differentiation is defined"
+      ],
+      "missing_required_fields": [
+        "css_measurement_id — vendor is TI Morocco with CSS ID provided but CSS measurement ID is absent",
+        "offer_code — no offer code stated in the brief",
+        "control_holdout percentage — UCG is requested but no percentage specified"
+      ],
+      "guidance": [
+        "Incomplete: css_measurement_id — vendor is TI Morocco with CSS ID provided but CSS measurement ID is absent",
+        "Incomplete: offer_code — no offer code stated in the brief",
+        "Incomplete: control_holdout percentage — UCG is requested but no percentage specified",
+        "CSS vendor: provide both CSS campaign ID and CSS measurement ID.",
+        "Clarify: AAL reco model 1-5 (Criteria #2) was noted as 'removed as of Oct 24 - Ben' — it is unclear whether this criterion is still active; captured with low confidence",
+        "Clarify: Prioritize highest reco when cutting the list (Criteria #12) was also noted as 'removed as of Oct 24 - Ben' — status unclear",
+        "Clarify: Geographic prioritization (Criteria #4) was formally rejected due to city name misalignment with the marketing database — no alternative geography logic was provided",
+        "Clarify: Campaign medium in the brief header states 'EM' (email) but campaign ID and tracking system metadata indicate OB (outbound call); OB is used as the authoritative medium per the tracking system",
+        "Clarify: CSS ID 'KAALFR' is provided under Criteria #14 but it is ambiguous whether TI Morocco uses the CSS dialing platform — CSS measurement ID is not provided"
+      ]
+    }
+  },
+  "feedback_log": []
+}

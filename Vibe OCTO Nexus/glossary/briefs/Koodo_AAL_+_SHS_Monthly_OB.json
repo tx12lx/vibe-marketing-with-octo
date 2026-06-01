@@ -1,0 +1,421 @@
+{
+  "_meta": {
+    "schema_version": "1.0",
+    "tool": "vibe-briefing",
+    "portfolio": "AAL",
+    "glossary_version": "1.0",
+    "generated_at": "2026-05-29T18:41:45.549277+00:00"
+  },
+  "campaign": {
+    "id": "Koodo AAL + SHS Monthly OB",
+    "portfolio": "AAL",
+    "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+    "brand": "Koodo",
+    "purpose": "Cross-Sell",
+    "medium": [
+      "OB"
+    ],
+    "cadence": "Monthly"
+  },
+  "targeting": {
+    "include": [
+      {
+        "term": "Target AAL 1-10",
+        "logic": "Include customers with an AAL propensity rank or score between 1 and 10 inclusive",
+        "threshold": "1-10",
+        "confidence_score": 0.75,
+        "bq_mapping": null
+      },
+      {
+        "term": "English only",
+        "logic": "Include only customers whose preferred language is English",
+        "threshold": null,
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Target primary line",
+        "logic": "Include only the primary subscriber line on the account",
+        "threshold": null,
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Include customers with FSAs that match FSAs (excl. AB/BC/QC) on this sheet where column C = 'Pro Install and Self Install Available' or 'Self Install Only' or 'Unknown: Please treat as Self Install Only'",
+        "logic": "Include customers whose FSA matches an FSA listed in the referenced SHS availability spreadsheet (column C) with values 'Pro Install and Self Install Available', 'Self Install Only', or 'Unknown: Please treat as Self Install Only', excluding FSAs in AB, BC, and QC",
+        "threshold": "Column C values: 'Pro Install and Self Install Available', 'Self Install Only', 'Unknown: Please treat as Self Install Only'",
+        "confidence_score": 0.7,
+        "bq_mapping": null
+      },
+      {
+        "term": "Prioritize customers with FSAs that match FSAs in column D on this sheet",
+        "logic": "Apply higher priority ranking to customers whose FSA matches an FSA listed in column D of the referenced prioritization spreadsheet",
+        "threshold": null,
+        "confidence_score": 0.65,
+        "bq_mapping": null
+      },
+      {
+        "term": "Prioritize customers that are age 30+",
+        "logic": "Apply higher priority ranking to customers aged 30 years or older",
+        "threshold": "30+",
+        "confidence_score": 0.9,
+        "bq_mapping": null
+      },
+      {
+        "term": "Prioritize RoC customers over BC/AB",
+        "logic": "Apply higher priority ranking to customers located in Rest of Canada (excluding BC and AB) over customers located in BC or AB",
+        "threshold": null,
+        "confidence_score": 0.9,
+        "bq_mapping": null
+      }
+    ],
+    "exclude": [
+      {
+        "term": "Exclude QC",
+        "logic": "Exclude all customers with a Quebec province designation",
+        "threshold": null,
+        "lookback_days": null,
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Exclude customers with FSAs in column D on this sheet",
+        "logic": "Exclude customers whose FSA matches an FSA listed in column D of the referenced exclusion spreadsheet",
+        "threshold": null,
+        "lookback_days": null,
+        "confidence_score": 0.7,
+        "bq_mapping": null
+      },
+      {
+        "term": "Remove current ADT customers, SHS customers and SHS pending orders",
+        "logic": "Exclude customers who are current ADT security customers, current SHS (Smart Home Security) customers, or have a pending SHS order",
+        "threshold": null,
+        "lookback_days": null,
+        "confidence_score": 0.9,
+        "bq_mapping": null
+      },
+      {
+        "term": "Remove ADT and TELUS DNCs",
+        "logic": "Exclude customers who are on the ADT DNC list or the TELUS DNC list, in addition to standard call DNC suppression",
+        "threshold": null,
+        "lookback_days": null,
+        "confidence_score": 0.85,
+        "bq_mapping": null
+      },
+      {
+        "term": "Remove last transaction corporate store",
+        "logic": "Exclude customers whose most recent transaction was made at a corporate store",
+        "threshold": null,
+        "lookback_days": null,
+        "confidence_score": 0.85,
+        "bq_mapping": null
+      }
+    ]
+  },
+  "default_exclusions": {
+    "dnc": {
+      "applied": true,
+      "scope": "call DNC"
+    },
+    "non_primary_subscriber": true,
+    "stop_sell": true,
+    "castl_compliance": true
+  },
+  "channel": {
+    "medium": [
+      "OB"
+    ],
+    "contact_strategy_override": {
+      "allowed": false,
+      "approver": null,
+      "condition": null
+    },
+    "control_holdout": {
+      "applied": false,
+      "percentage": null,
+      "type": null
+    }
+  },
+  "vendor": {
+    "name": null,
+    "css_campaign_id": null,
+    "css_measurement_id": null
+  },
+  "offer": {
+    "product": "Add-A-Line",
+    "sub_product": "SHS (Smart Home Security)",
+    "offer_code": "KALADS"
+  },
+  "segmentation": {
+    "base": "Base 1 — Koodo postpaid mobility customers only",
+    "language": [
+      "English"
+    ],
+    "geography": "Exclude QC; two geographic segments defined: East (excl. QC/AB/BC) with segment code KALADS, and West (AB/BC only) with segment code KALADSW; RoC customers prioritized over BC/AB"
+  },
+  "data_brief_flags": {
+    "missing_required_fields": [
+      "vendor/dialing site name — required for OB campaigns but not specified in the brief"
+    ],
+    "ambiguities": [
+      "Criteria #1 'Target AAL 1-10': unclear whether this refers to a propensity rank, decile, score band, or another AAL model output — model name and scoring methodology not specified",
+      "Criteria #5 FSA inclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+      "Criteria #6 FSA prioritization list references an external Google Sheets URL; 'prioritize' is not defined as a hard include — unclear whether non-matching FSA customers are still eligible or deprioritized only",
+      "Criteria #7 FSA exclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+      "Criteria #9 'Remove ADT and TELUS DNCs' is listed as a targeting exclusion but overlaps with default DNC suppression — it is unclear whether ADT DNC and TELUS DNC are separate suppression lists beyond the standard call DNC file, and who owns/maintains them",
+      "Campaign header lists Business Unit as 'Mobility - TELUS, Koodo, EPP, Public Mobile' and Base 5 is labelled 'Public Mobile', but only Base 1 (Koodo) has populated targeting criteria — it is unclear whether other bases are in scope for this deployment",
+      "Brief note states Quebec English-preferred customers should receive a bilingual version, but Criteria #2 specifies English only and Criteria #3 excludes QC entirely — these three rules are contradictory; QC appears to be fully excluded per Criteria #3, making the bilingual note moot",
+      "Offer code 'KALADS' appears in the sub-camp code field and in the East segmentation code; West segment uses 'KALADSW' — it is unclear whether KALADSW is a separate offer code or a geographic variant of the same offer",
+      "No control holdout or UCG percentage is specified"
+    ],
+    "ob_vendor_missing": true,
+    "css_ids_missing": false
+  },
+  "campaign_summary": "This monthly outbound call campaign targets Koodo postpaid mobility customers (Base 1 only) with an AAL propensity rank of 1–10 who are English-speaking, located outside Quebec, and whose FSA falls within SHS-serviceable areas (Pro Install, Self Install, or Unknown/Self Install) excluding AB, BC, and QC FSAs. The offer cross-sells Smart Home Security (SHS) alongside Add-A-Line, using offer code KALADS for the East segment and KALADSW for the West (AB/BC) segment, with priority given to customers aged 30+, RoC geography over BC/AB, and FSAs matching a secondary prioritization list. Key exclusions include current ADT and SHS customers, pending SHS orders, customers on ADT or TELUS DNC lists, customers whose last transaction was at a corporate store, and customers in FSAs on a designated exclusion list.",
+  "connectors": {
+    "sizing_tool": {
+      "status": "pending_bq_mapping",
+      "sql_fragments": {
+        "include": [],
+        "exclude": [],
+        "default_exclusions": [
+          {
+            "rule": "dnc",
+            "scope": "call DNC",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "non_primary_subscriber",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "stop_sell",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "castl_compliance",
+            "sql_snippet": null,
+            "bq_field_required": true
+          }
+        ]
+      },
+      "unmapped_terms": [
+        "Target AAL 1-10",
+        "English only",
+        "Target primary line",
+        "Include customers with FSAs that match FSAs (excl. AB/BC/QC) on this sheet where column C = 'Pro Install and Self Install Available' or 'Self Install Only' or 'Unknown: Please treat as Self Install Only'",
+        "Prioritize customers with FSAs that match FSAs in column D on this sheet",
+        "Prioritize customers that are age 30+",
+        "Prioritize RoC customers over BC/AB",
+        "Exclude QC",
+        "Exclude customers with FSAs in column D on this sheet",
+        "Remove current ADT customers, SHS customers and SHS pending orders",
+        "Remove ADT and TELUS DNCs",
+        "Remove last transaction corporate store"
+      ],
+      "note": "12 criterion/criteria need BQ field mappings before SQL can be generated. Provide config/bq_schema.json with real field names, then run: vibe-briefing map-fields --glossary <path> --bq-schema config/bq_schema.json"
+    },
+    "brief_regeneration": {
+      "status": "ready",
+      "structured_sections": {
+        "campaign_overview": {
+          "brand": "Koodo",
+          "portfolio": "AAL",
+          "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+          "purpose": "Cross-Sell",
+          "medium": [
+            "OB"
+          ],
+          "cadence": "Monthly"
+        },
+        "offer": {
+          "product": "Add-A-Line",
+          "sub_product": "SHS (Smart Home Security)",
+          "offer_code": "KALADS"
+        },
+        "segmentation": {
+          "base": "Base 1 — Koodo postpaid mobility customers only",
+          "language": [
+            "English"
+          ],
+          "geography": "Exclude QC; two geographic segments defined: East (excl. QC/AB/BC) with segment code KALADS, and West (AB/BC only) with segment code KALADSW; RoC customers prioritized over BC/AB"
+        },
+        "vendor": {
+          "name": null,
+          "css_campaign_id": null,
+          "css_measurement_id": null
+        },
+        "channel_rules": {
+          "medium": [
+            "OB"
+          ],
+          "contact_strategy_override": {
+            "allowed": false,
+            "approver": null,
+            "condition": null
+          },
+          "control_holdout": {
+            "applied": false,
+            "percentage": null,
+            "type": null
+          }
+        },
+        "target_audience": [
+          {
+            "criterion": "Target AAL 1-10",
+            "description": "Include customers with an AAL propensity rank or score between 1 and 10 inclusive",
+            "threshold": "1-10",
+            "confidence_score": 0.75
+          },
+          {
+            "criterion": "English only",
+            "description": "Include only customers whose preferred language is English",
+            "threshold": null,
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Target primary line",
+            "description": "Include only the primary subscriber line on the account",
+            "threshold": null,
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Include customers with FSAs that match FSAs (excl. AB/BC/QC) on this sheet where column C = 'Pro Install and Self Install Available' or 'Self Install Only' or 'Unknown: Please treat as Self Install Only'",
+            "description": "Include customers whose FSA matches an FSA listed in the referenced SHS availability spreadsheet (column C) with values 'Pro Install and Self Install Available', 'Self Install Only', or 'Unknown: Please treat as Self Install Only', excluding FSAs in AB, BC, and QC",
+            "threshold": "Column C values: 'Pro Install and Self Install Available', 'Self Install Only', 'Unknown: Please treat as Self Install Only'",
+            "confidence_score": 0.7
+          },
+          {
+            "criterion": "Prioritize customers with FSAs that match FSAs in column D on this sheet",
+            "description": "Apply higher priority ranking to customers whose FSA matches an FSA listed in column D of the referenced prioritization spreadsheet",
+            "threshold": null,
+            "confidence_score": 0.65
+          },
+          {
+            "criterion": "Prioritize customers that are age 30+",
+            "description": "Apply higher priority ranking to customers aged 30 years or older",
+            "threshold": "30+",
+            "confidence_score": 0.9
+          },
+          {
+            "criterion": "Prioritize RoC customers over BC/AB",
+            "description": "Apply higher priority ranking to customers located in Rest of Canada (excluding BC and AB) over customers located in BC or AB",
+            "threshold": null,
+            "confidence_score": 0.9
+          }
+        ],
+        "campaign_exclusions": [
+          {
+            "criterion": "Exclude QC",
+            "description": "Exclude all customers with a Quebec province designation",
+            "threshold": null,
+            "lookback_days": null,
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Exclude customers with FSAs in column D on this sheet",
+            "description": "Exclude customers whose FSA matches an FSA listed in column D of the referenced exclusion spreadsheet",
+            "threshold": null,
+            "lookback_days": null,
+            "confidence_score": 0.7
+          },
+          {
+            "criterion": "Remove current ADT customers, SHS customers and SHS pending orders",
+            "description": "Exclude customers who are current ADT security customers, current SHS (Smart Home Security) customers, or have a pending SHS order",
+            "threshold": null,
+            "lookback_days": null,
+            "confidence_score": 0.9
+          },
+          {
+            "criterion": "Remove ADT and TELUS DNCs",
+            "description": "Exclude customers who are on the ADT DNC list or the TELUS DNC list, in addition to standard call DNC suppression",
+            "threshold": null,
+            "lookback_days": null,
+            "confidence_score": 0.85
+          },
+          {
+            "criterion": "Remove last transaction corporate store",
+            "description": "Exclude customers whose most recent transaction was made at a corporate store",
+            "threshold": null,
+            "lookback_days": null,
+            "confidence_score": 0.85
+          }
+        ],
+        "default_exclusions": {
+          "dnc": {
+            "applied": true,
+            "scope": "call DNC"
+          },
+          "non_primary_subscriber": true,
+          "stop_sell": true,
+          "castl_compliance": true
+        },
+        "quality_flags": {
+          "missing_required_fields": [
+            "vendor/dialing site name — required for OB campaigns but not specified in the brief"
+          ],
+          "ambiguities": [
+            "Criteria #1 'Target AAL 1-10': unclear whether this refers to a propensity rank, decile, score band, or another AAL model output — model name and scoring methodology not specified",
+            "Criteria #5 FSA inclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+            "Criteria #6 FSA prioritization list references an external Google Sheets URL; 'prioritize' is not defined as a hard include — unclear whether non-matching FSA customers are still eligible or deprioritized only",
+            "Criteria #7 FSA exclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+            "Criteria #9 'Remove ADT and TELUS DNCs' is listed as a targeting exclusion but overlaps with default DNC suppression — it is unclear whether ADT DNC and TELUS DNC are separate suppression lists beyond the standard call DNC file, and who owns/maintains them",
+            "Campaign header lists Business Unit as 'Mobility - TELUS, Koodo, EPP, Public Mobile' and Base 5 is labelled 'Public Mobile', but only Base 1 (Koodo) has populated targeting criteria — it is unclear whether other bases are in scope for this deployment",
+            "Brief note states Quebec English-preferred customers should receive a bilingual version, but Criteria #2 specifies English only and Criteria #3 excludes QC entirely — these three rules are contradictory; QC appears to be fully excluded per Criteria #3, making the bilingual note moot",
+            "Offer code 'KALADS' appears in the sub-camp code field and in the East segmentation code; West segment uses 'KALADSW' — it is unclear whether KALADSW is a separate offer code or a geographic variant of the same offer",
+            "No control holdout or UCG percentage is specified"
+          ],
+          "ob_vendor_missing": true,
+          "css_ids_missing": false
+        }
+      },
+      "campaign_summary": "This monthly outbound call campaign targets Koodo postpaid mobility customers (Base 1 only) with an AAL propensity rank of 1–10 who are English-speaking, located outside Quebec, and whose FSA falls within SHS-serviceable areas (Pro Install, Self Install, or Unknown/Self Install) excluding AB, BC, and QC FSAs. The offer cross-sells Smart Home Security (SHS) alongside Add-A-Line, using offer code KALADS for the East segment and KALADSW for the West (AB/BC) segment, with priority given to customers aged 30+, RoC geography over BC/AB, and FSAs matching a secondary prioritization list. Key exclusions include current ADT and SHS customers, pending SHS orders, customers on ADT or TELUS DNC lists, customers whose last transaction was at a corporate store, and customers in FSAs on a designated exclusion list."
+    },
+    "brief_assistant": {
+      "status": "ready",
+      "completeness_score": 86,
+      "required_fields_check": {
+        "campaign.brand": true,
+        "campaign.medium": true,
+        "campaign.cadence": true,
+        "targeting.include": true,
+        "offer.product": true,
+        "segmentation.base": true,
+        "vendor.name": false
+      },
+      "failed_checks": [
+        "vendor.name"
+      ],
+      "include_criteria_count": 7,
+      "exclude_criteria_count": 5,
+      "ambiguities": [
+        "Criteria #1 'Target AAL 1-10': unclear whether this refers to a propensity rank, decile, score band, or another AAL model output — model name and scoring methodology not specified",
+        "Criteria #5 FSA inclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+        "Criteria #6 FSA prioritization list references an external Google Sheets URL; 'prioritize' is not defined as a hard include — unclear whether non-matching FSA customers are still eligible or deprioritized only",
+        "Criteria #7 FSA exclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+        "Criteria #9 'Remove ADT and TELUS DNCs' is listed as a targeting exclusion but overlaps with default DNC suppression — it is unclear whether ADT DNC and TELUS DNC are separate suppression lists beyond the standard call DNC file, and who owns/maintains them",
+        "Campaign header lists Business Unit as 'Mobility - TELUS, Koodo, EPP, Public Mobile' and Base 5 is labelled 'Public Mobile', but only Base 1 (Koodo) has populated targeting criteria — it is unclear whether other bases are in scope for this deployment",
+        "Brief note states Quebec English-preferred customers should receive a bilingual version, but Criteria #2 specifies English only and Criteria #3 excludes QC entirely — these three rules are contradictory; QC appears to be fully excluded per Criteria #3, making the bilingual note moot",
+        "Offer code 'KALADS' appears in the sub-camp code field and in the East segmentation code; West segment uses 'KALADSW' — it is unclear whether KALADSW is a separate offer code or a geographic variant of the same offer",
+        "No control holdout or UCG percentage is specified"
+      ],
+      "missing_required_fields": [
+        "vendor/dialing site name — required for OB campaigns but not specified in the brief"
+      ],
+      "guidance": [
+        "Required field missing: vendor.name",
+        "Incomplete: vendor/dialing site name — required for OB campaigns but not specified in the brief",
+        "OB campaign: specify the vendor/dialing site.",
+        "Clarify: Criteria #1 'Target AAL 1-10': unclear whether this refers to a propensity rank, decile, score band, or another AAL model output — model name and scoring methodology not specified",
+        "Clarify: Criteria #5 FSA inclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+        "Clarify: Criteria #6 FSA prioritization list references an external Google Sheets URL; 'prioritize' is not defined as a hard include — unclear whether non-matching FSA customers are still eligible or deprioritized only",
+        "Clarify: Criteria #7 FSA exclusion list references an external Google Sheets URL; the exact FSA list is not embedded in the brief and must be retrieved from the linked spreadsheet at extraction time",
+        "Clarify: Criteria #9 'Remove ADT and TELUS DNCs' is listed as a targeting exclusion but overlaps with default DNC suppression — it is unclear whether ADT DNC and TELUS DNC are separate suppression lists beyond the standard call DNC file, and who owns/maintains them"
+      ]
+    }
+  },
+  "feedback_log": []
+}

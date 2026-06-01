@@ -1,0 +1,447 @@
+{
+  "_meta": {
+    "schema_version": "1.0",
+    "tool": "vibe-briefing",
+    "portfolio": "AAL",
+    "glossary_version": "1.0",
+    "generated_at": "2026-05-29T18:41:01.729035+00:00"
+  },
+  "campaign": {
+    "id": "TELUS AAL + Internet",
+    "portfolio": "AAL",
+    "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+    "brand": "TELUS",
+    "purpose": "Cross-Sell",
+    "medium": [
+      "OB"
+    ],
+    "cadence": "Bi Weekly"
+  },
+  "targeting": {
+    "include": [
+      {
+        "term": "AAL 1-8 reco module (everyone TELUS postpaid)",
+        "logic": "Include customers who are scored in the AAL recommendation module with a rank between 1 and 8, scoped to all TELUS postpaid mobility customers",
+        "threshold": "rank 1-8",
+        "confidence_score": 0.85,
+        "bq_mapping": null
+      },
+      {
+        "term": "Single subscriber only (only 1 sub on the account)",
+        "logic": "Include only accounts that have exactly one subscriber (subscriber count = 1)",
+        "threshold": "1 subscriber on account",
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Include only those on plans that have shareable data - 5G+ and premium unlimited",
+        "logic": "Include only customers whose current rate plan is classified as shareable data, specifically 5G+ or premium unlimited plan tiers",
+        "threshold": "5G+ or premium unlimited plan",
+        "confidence_score": 0.85,
+        "bq_mapping": null
+      },
+      {
+        "term": "Include those in TELUS Fibre footprint (EAST first, fill with West as required)",
+        "logic": "Include customers whose service address falls within the TELUS Fibre footprint; prioritize East Canada records first, then fill remaining capacity with West Canada records",
+        "threshold": "TELUS Fibre footprint — East priority, West as fill",
+        "confidence_score": 0.8,
+        "bq_mapping": null
+      },
+      {
+        "term": "Bell Fibre (Vulcan) eligible footprint, PureFibre Recosell",
+        "logic": "Include customers who are within the Bell Fibre (Vulcan) eligible footprint and are flagged for PureFibre Recosell targeting",
+        "threshold": "Bell Fibre (Vulcan) footprint eligible; PureFibre Recosell flag active",
+        "confidence_score": 0.7,
+        "bq_mapping": null
+      }
+    ],
+    "exclude": [
+      {
+        "term": "Exclude existing Koodo Internet customers",
+        "logic": "Exclude any customer who is an active Koodo Internet subscriber",
+        "threshold": null,
+        "lookback_days": null,
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Exclude existing Altima base (use fda_altima_base to exclude)",
+        "logic": "Exclude any customer present in the fda_altima_base table, indicating they are an existing Altima internet customer",
+        "threshold": "fda_altima_base",
+        "lookback_days": null,
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Exclude existing Start base (use fda_start_ca_base to exclude)",
+        "logic": "Exclude any customer present in the fda_start_ca_base table, indicating they are an existing Start.ca internet customer",
+        "threshold": "fda_start_ca_base",
+        "lookback_days": null,
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Exclude any PRE or KI Pending orders",
+        "logic": "Exclude any customer who has a pending PRE (pre-order) or KI (keep-in) order in flight",
+        "threshold": "PRE or KI order status = pending",
+        "lookback_days": null,
+        "confidence_score": 0.8,
+        "bq_mapping": null
+      },
+      {
+        "term": "Exclude EPP",
+        "logic": "Exclude any customer who is on an Employee Purchase Program (EPP) rate plan or account type",
+        "threshold": null,
+        "lookback_days": null,
+        "confidence_score": 0.9,
+        "bq_mapping": null
+      },
+      {
+        "term": "Exclude anyone with last transaction corporate stores",
+        "logic": "Exclude any customer whose most recent transaction was made through a corporate store channel",
+        "threshold": "last transaction channel = corporate store",
+        "lookback_days": null,
+        "confidence_score": 0.85,
+        "bq_mapping": null
+      },
+      {
+        "term": "Dialing team does not want QC records",
+        "logic": "Exclude all customers with a Quebec province address or billing province code of QC from the dialing list",
+        "threshold": "province = QC",
+        "lookback_days": null,
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      }
+    ]
+  },
+  "default_exclusions": {
+    "dnc": {
+      "applied": true,
+      "scope": "call DNC"
+    },
+    "non_primary_subscriber": true,
+    "stop_sell": true,
+    "castl_compliance": true
+  },
+  "channel": {
+    "medium": [
+      "OB"
+    ],
+    "contact_strategy_override": {
+      "allowed": false,
+      "approver": null,
+      "condition": null
+    },
+    "control_holdout": {
+      "applied": false,
+      "percentage": null,
+      "type": null
+    }
+  },
+  "vendor": {
+    "name": "TIIN",
+    "css_campaign_id": "AALVUL",
+    "css_measurement_id": "AAL"
+  },
+  "offer": {
+    "product": "Add-A-Line",
+    "sub_product": "Internet (TELUS PureFibre / Bell Fibre Vulcan cross-sell)",
+    "offer_code": null
+  },
+  "segmentation": {
+    "base": "Base 1 — TELUS Mobility postpaid",
+    "language": [
+      "English"
+    ],
+    "geography": "Canada excluding Quebec (QC suppressed from dialing); within TELUS Fibre or Bell Fibre (Vulcan) eligible footprint; prioritization order: ON in fibre footprint > ON not in fibre footprint > other East provinces > AB/BC"
+  },
+  "data_brief_flags": {
+    "missing_required_fields": [
+      "offer_code — no offer or campaign code provided in the brief",
+      "css_measurement_id — value 'AAL' captured from Criteria #14 labelled 'Measurement' but field label is ambiguous; confirm this maps to CSS Measurement ID"
+    ],
+    "ambiguities": [
+      "Medium conflict: brief header states 'Medium/Channels = EM' (email) but campaign metadata and file drop path (CSS_INDIA/Outbound_lists) and site/CSS criteria clearly indicate OB (outbound call); OB has been applied based on metadata and vendor criteria — confirm correct medium with requestor",
+      "Criteria #5 and #6 overlap: both TELUS Fibre footprint and Bell Fibre (Vulcan) footprint are listed as include criteria — it is unclear whether these are additive (OR) or sequential (fill logic); relationship between the two footprint criteria should be confirmed",
+      "AAL reco module rank 1-8 threshold: brief states 'everyone TELUS postpaid' alongside rank 1-8, which may mean the rank filter is aspirational or the full postpaid base is eligible — confirm whether rank 1-8 is a hard filter or a prioritization signal",
+      "Criteria #12 references a file drop path (data/telusoutbound/pub/CSS_INDIA/Outbound_lists/Mobility) — this is an operational delivery instruction, not a targeting criterion, but has been noted for the dialing team",
+      "English only (Criteria #3) conflicts with the brief's general note that Quebec English-speaking customers should receive bilingual communications — however, QC records are excluded from dialing entirely, so this conflict is moot for OB; flagged for awareness",
+      "Bases 2–5 are empty (no targeting criteria populated); Base 5 is labelled 'Public Mobile' but has no criteria — confirm whether additional bases are in scope or if this is a single-base campaign",
+      "No control holdout or UCG percentage specified — confirm whether a holdout group is required"
+    ],
+    "ob_vendor_missing": false,
+    "css_ids_missing": false
+  },
+  "campaign_summary": "This outbound call campaign targets TELUS postpaid mobility customers who are single-subscriber accounts, scored in the AAL recommendation module (ranks 1–8), on shareable data plans (5G+ or premium unlimited), and located within the TELUS Fibre or Bell Fibre (Vulcan) eligible footprint. The offer promotes adding a new mobile line (Add-A-Line) with an Internet cross-sell component, dialed via the TIIN site under CSS campaign ID AALVUL. Key exclusions include existing Koodo Internet, Altima, and Start.ca internet customers; customers with pending PRE or KI orders; EPP subscribers; customers whose last transaction was at a corporate store; and all Quebec records, with dialing prioritized in Ontario (in-footprint first), then other East provinces, then AB/BC.",
+  "connectors": {
+    "sizing_tool": {
+      "status": "pending_bq_mapping",
+      "sql_fragments": {
+        "include": [],
+        "exclude": [],
+        "default_exclusions": [
+          {
+            "rule": "dnc",
+            "scope": "call DNC",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "non_primary_subscriber",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "stop_sell",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "castl_compliance",
+            "sql_snippet": null,
+            "bq_field_required": true
+          }
+        ]
+      },
+      "unmapped_terms": [
+        "AAL 1-8 reco module (everyone TELUS postpaid)",
+        "Single subscriber only (only 1 sub on the account)",
+        "Include only those on plans that have shareable data - 5G+ and premium unlimited",
+        "Include those in TELUS Fibre footprint (EAST first, fill with West as required)",
+        "Bell Fibre (Vulcan) eligible footprint, PureFibre Recosell",
+        "Exclude existing Koodo Internet customers",
+        "Exclude existing Altima base (use fda_altima_base to exclude)",
+        "Exclude existing Start base (use fda_start_ca_base to exclude)",
+        "Exclude any PRE or KI Pending orders",
+        "Exclude EPP",
+        "Exclude anyone with last transaction corporate stores",
+        "Dialing team does not want QC records"
+      ],
+      "note": "12 criterion/criteria need BQ field mappings before SQL can be generated. Provide config/bq_schema.json with real field names, then run: vibe-briefing map-fields --glossary <path> --bq-schema config/bq_schema.json"
+    },
+    "brief_regeneration": {
+      "status": "ready",
+      "structured_sections": {
+        "campaign_overview": {
+          "brand": "TELUS",
+          "portfolio": "AAL",
+          "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+          "purpose": "Cross-Sell",
+          "medium": [
+            "OB"
+          ],
+          "cadence": "Bi Weekly"
+        },
+        "offer": {
+          "product": "Add-A-Line",
+          "sub_product": "Internet (TELUS PureFibre / Bell Fibre Vulcan cross-sell)",
+          "offer_code": null
+        },
+        "segmentation": {
+          "base": "Base 1 — TELUS Mobility postpaid",
+          "language": [
+            "English"
+          ],
+          "geography": "Canada excluding Quebec (QC suppressed from dialing); within TELUS Fibre or Bell Fibre (Vulcan) eligible footprint; prioritization order: ON in fibre footprint > ON not in fibre footprint > other East provinces > AB/BC"
+        },
+        "vendor": {
+          "name": "TIIN",
+          "css_campaign_id": "AALVUL",
+          "css_measurement_id": "AAL"
+        },
+        "channel_rules": {
+          "medium": [
+            "OB"
+          ],
+          "contact_strategy_override": {
+            "allowed": false,
+            "approver": null,
+            "condition": null
+          },
+          "control_holdout": {
+            "applied": false,
+            "percentage": null,
+            "type": null
+          }
+        },
+        "target_audience": [
+          {
+            "criterion": "AAL 1-8 reco module (everyone TELUS postpaid)",
+            "description": "Include customers who are scored in the AAL recommendation module with a rank between 1 and 8, scoped to all TELUS postpaid mobility customers",
+            "threshold": "rank 1-8",
+            "confidence_score": 0.85
+          },
+          {
+            "criterion": "Single subscriber only (only 1 sub on the account)",
+            "description": "Include only accounts that have exactly one subscriber (subscriber count = 1)",
+            "threshold": "1 subscriber on account",
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Include only those on plans that have shareable data - 5G+ and premium unlimited",
+            "description": "Include only customers whose current rate plan is classified as shareable data, specifically 5G+ or premium unlimited plan tiers",
+            "threshold": "5G+ or premium unlimited plan",
+            "confidence_score": 0.85
+          },
+          {
+            "criterion": "Include those in TELUS Fibre footprint (EAST first, fill with West as required)",
+            "description": "Include customers whose service address falls within the TELUS Fibre footprint; prioritize East Canada records first, then fill remaining capacity with West Canada records",
+            "threshold": "TELUS Fibre footprint — East priority, West as fill",
+            "confidence_score": 0.8
+          },
+          {
+            "criterion": "Bell Fibre (Vulcan) eligible footprint, PureFibre Recosell",
+            "description": "Include customers who are within the Bell Fibre (Vulcan) eligible footprint and are flagged for PureFibre Recosell targeting",
+            "threshold": "Bell Fibre (Vulcan) footprint eligible; PureFibre Recosell flag active",
+            "confidence_score": 0.7
+          }
+        ],
+        "campaign_exclusions": [
+          {
+            "criterion": "Exclude existing Koodo Internet customers",
+            "description": "Exclude any customer who is an active Koodo Internet subscriber",
+            "threshold": null,
+            "lookback_days": null,
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Exclude existing Altima base (use fda_altima_base to exclude)",
+            "description": "Exclude any customer present in the fda_altima_base table, indicating they are an existing Altima internet customer",
+            "threshold": "fda_altima_base",
+            "lookback_days": null,
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Exclude existing Start base (use fda_start_ca_base to exclude)",
+            "description": "Exclude any customer present in the fda_start_ca_base table, indicating they are an existing Start.ca internet customer",
+            "threshold": "fda_start_ca_base",
+            "lookback_days": null,
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Exclude any PRE or KI Pending orders",
+            "description": "Exclude any customer who has a pending PRE (pre-order) or KI (keep-in) order in flight",
+            "threshold": "PRE or KI order status = pending",
+            "lookback_days": null,
+            "confidence_score": 0.8
+          },
+          {
+            "criterion": "Exclude EPP",
+            "description": "Exclude any customer who is on an Employee Purchase Program (EPP) rate plan or account type",
+            "threshold": null,
+            "lookback_days": null,
+            "confidence_score": 0.9
+          },
+          {
+            "criterion": "Exclude anyone with last transaction corporate stores",
+            "description": "Exclude any customer whose most recent transaction was made through a corporate store channel",
+            "threshold": "last transaction channel = corporate store",
+            "lookback_days": null,
+            "confidence_score": 0.85
+          },
+          {
+            "criterion": "Dialing team does not want QC records",
+            "description": "Exclude all customers with a Quebec province address or billing province code of QC from the dialing list",
+            "threshold": "province = QC",
+            "lookback_days": null,
+            "confidence_score": 0.95
+          }
+        ],
+        "default_exclusions": {
+          "dnc": {
+            "applied": true,
+            "scope": "call DNC"
+          },
+          "non_primary_subscriber": true,
+          "stop_sell": true,
+          "castl_compliance": true
+        },
+        "quality_flags": {
+          "missing_required_fields": [
+            "offer_code — no offer or campaign code provided in the brief",
+            "css_measurement_id — value 'AAL' captured from Criteria #14 labelled 'Measurement' but field label is ambiguous; confirm this maps to CSS Measurement ID"
+          ],
+          "ambiguities": [
+            "Medium conflict: brief header states 'Medium/Channels = EM' (email) but campaign metadata and file drop path (CSS_INDIA/Outbound_lists) and site/CSS criteria clearly indicate OB (outbound call); OB has been applied based on metadata and vendor criteria — confirm correct medium with requestor",
+            "Criteria #5 and #6 overlap: both TELUS Fibre footprint and Bell Fibre (Vulcan) footprint are listed as include criteria — it is unclear whether these are additive (OR) or sequential (fill logic); relationship between the two footprint criteria should be confirmed",
+            "AAL reco module rank 1-8 threshold: brief states 'everyone TELUS postpaid' alongside rank 1-8, which may mean the rank filter is aspirational or the full postpaid base is eligible — confirm whether rank 1-8 is a hard filter or a prioritization signal",
+            "Criteria #12 references a file drop path (data/telusoutbound/pub/CSS_INDIA/Outbound_lists/Mobility) — this is an operational delivery instruction, not a targeting criterion, but has been noted for the dialing team",
+            "English only (Criteria #3) conflicts with the brief's general note that Quebec English-speaking customers should receive bilingual communications — however, QC records are excluded from dialing entirely, so this conflict is moot for OB; flagged for awareness",
+            "Bases 2–5 are empty (no targeting criteria populated); Base 5 is labelled 'Public Mobile' but has no criteria — confirm whether additional bases are in scope or if this is a single-base campaign",
+            "No control holdout or UCG percentage specified — confirm whether a holdout group is required"
+          ],
+          "ob_vendor_missing": false,
+          "css_ids_missing": false
+        }
+      },
+      "campaign_summary": "This outbound call campaign targets TELUS postpaid mobility customers who are single-subscriber accounts, scored in the AAL recommendation module (ranks 1–8), on shareable data plans (5G+ or premium unlimited), and located within the TELUS Fibre or Bell Fibre (Vulcan) eligible footprint. The offer promotes adding a new mobile line (Add-A-Line) with an Internet cross-sell component, dialed via the TIIN site under CSS campaign ID AALVUL. Key exclusions include existing Koodo Internet, Altima, and Start.ca internet customers; customers with pending PRE or KI orders; EPP subscribers; customers whose last transaction was at a corporate store; and all Quebec records, with dialing prioritized in Ontario (in-footprint first), then other East provinces, then AB/BC."
+    },
+    "brief_assistant": {
+      "status": "ready",
+      "completeness_score": 100,
+      "required_fields_check": {
+        "campaign.brand": true,
+        "campaign.medium": true,
+        "campaign.cadence": true,
+        "targeting.include": true,
+        "offer.product": true,
+        "segmentation.base": true,
+        "vendor.name": true
+      },
+      "failed_checks": [],
+      "include_criteria_count": 5,
+      "exclude_criteria_count": 7,
+      "ambiguities": [
+        "Medium conflict: brief header states 'Medium/Channels = EM' (email) but campaign metadata and file drop path (CSS_INDIA/Outbound_lists) and site/CSS criteria clearly indicate OB (outbound call); OB has been applied based on metadata and vendor criteria — confirm correct medium with requestor",
+        "Criteria #5 and #6 overlap: both TELUS Fibre footprint and Bell Fibre (Vulcan) footprint are listed as include criteria — it is unclear whether these are additive (OR) or sequential (fill logic); relationship between the two footprint criteria should be confirmed",
+        "AAL reco module rank 1-8 threshold: brief states 'everyone TELUS postpaid' alongside rank 1-8, which may mean the rank filter is aspirational or the full postpaid base is eligible — confirm whether rank 1-8 is a hard filter or a prioritization signal",
+        "Criteria #12 references a file drop path (data/telusoutbound/pub/CSS_INDIA/Outbound_lists/Mobility) — this is an operational delivery instruction, not a targeting criterion, but has been noted for the dialing team",
+        "English only (Criteria #3) conflicts with the brief's general note that Quebec English-speaking customers should receive bilingual communications — however, QC records are excluded from dialing entirely, so this conflict is moot for OB; flagged for awareness",
+        "Bases 2–5 are empty (no targeting criteria populated); Base 5 is labelled 'Public Mobile' but has no criteria — confirm whether additional bases are in scope or if this is a single-base campaign",
+        "No control holdout or UCG percentage specified — confirm whether a holdout group is required"
+      ],
+      "missing_required_fields": [
+        "offer_code — no offer or campaign code provided in the brief",
+        "css_measurement_id — value 'AAL' captured from Criteria #14 labelled 'Measurement' but field label is ambiguous; confirm this maps to CSS Measurement ID"
+      ],
+      "guidance": [
+        "Incomplete: offer_code — no offer or campaign code provided in the brief",
+        "Incomplete: css_measurement_id — value 'AAL' captured from Criteria #14 labelled 'Measurement' but field label is ambiguous; confirm this maps to CSS Measurement ID",
+        "Clarify: Medium conflict: brief header states 'Medium/Channels = EM' (email) but campaign metadata and file drop path (CSS_INDIA/Outbound_lists) and site/CSS criteria clearly indicate OB (outbound call); OB has been applied based on metadata and vendor criteria — confirm correct medium with requestor",
+        "Clarify: Criteria #5 and #6 overlap: both TELUS Fibre footprint and Bell Fibre (Vulcan) footprint are listed as include criteria — it is unclear whether these are additive (OR) or sequential (fill logic); relationship between the two footprint criteria should be confirmed",
+        "Clarify: AAL reco module rank 1-8 threshold: brief states 'everyone TELUS postpaid' alongside rank 1-8, which may mean the rank filter is aspirational or the full postpaid base is eligible — confirm whether rank 1-8 is a hard filter or a prioritization signal",
+        "Clarify: Criteria #12 references a file drop path (data/telusoutbound/pub/CSS_INDIA/Outbound_lists/Mobility) — this is an operational delivery instruction, not a targeting criterion, but has been noted for the dialing team",
+        "Clarify: English only (Criteria #3) conflicts with the brief's general note that Quebec English-speaking customers should receive bilingual communications — however, QC records are excluded from dialing entirely, so this conflict is moot for OB; flagged for awareness"
+      ]
+    }
+  },
+  "feedback_log": [
+    {
+      "entry_id": "123bcd8c-b8ec-40ec-8aa1-35c2c6251f5f",
+      "schema_version": "1.0",
+      "timestamp": "2026-05-29T20:37:34.694380+00:00",
+      "source": {
+        "tool": "ask"
+      },
+      "trigger": {
+        "human_query": "how many customers are eligible for a TELUS AAL email campaign?",
+        "action": "size_audience"
+      },
+      "result": {
+        "status": "pending_bq_mapping",
+        "data": {
+          "status": "pending_bq_mapping",
+          "unmapped_count": 12
+        },
+        "sql_executed": null,
+        "row_count": null
+      },
+      "learning_signal": {
+        "corrections": [],
+        "confirmed_correct": false,
+        "confidence_adjustment": null,
+        "new_terms": []
+      }
+    }
+  ]
+}

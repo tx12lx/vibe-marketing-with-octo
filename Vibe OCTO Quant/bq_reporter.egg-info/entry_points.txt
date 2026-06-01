@@ -1,0 +1,2 @@
+[console_scripts]
+bq-reporter = bq_reporter.cli:main

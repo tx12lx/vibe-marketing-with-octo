@@ -1,0 +1,357 @@
+{
+  "_meta": {
+    "schema_version": "1.0",
+    "tool": "vibe-briefing",
+    "portfolio": "AAL",
+    "glossary_version": "1.0",
+    "generated_at": "2026-05-29T18:40:13.135445+00:00"
+  },
+  "campaign": {
+    "id": "AALALTFR OB FR",
+    "portfolio": "AAL",
+    "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+    "brand": "TELUS",
+    "purpose": "Cross-Sell",
+    "medium": [
+      "OB"
+    ],
+    "cadence": "Bi Weekly"
+  },
+  "targeting": {
+    "include": [
+      {
+        "term": "Telus Postpaid only",
+        "logic": "Include customers where LOB_DESC = 'Telus Postpaid' AND SUB_STATUS = 'A' (active subscribers on the TELUS postpaid line of business)",
+        "threshold": "LOB_DESC = 'Telus Postpaid', SUB_STATUS = 'A'",
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "Primary subs only",
+        "logic": "Include only primary subscribers where Primary_Sub > 0",
+        "threshold": "Primary_Sub > 0",
+        "confidence_score": 0.95,
+        "bq_mapping": null
+      },
+      {
+        "term": "AAL reco 1-5",
+        "logic": "Include customers scored in the FDA current model score master table where PREDICT_MODL_ID = 2008, CLASSN_NM = 'ADD_A_LINE', and SEG_NM is one of reco_1 through reco_5, using the most recent PART_LOAD_DT partition",
+        "threshold": "SEG_NM IN ('reco_1','reco_2','reco_3','reco_4','reco_5'), PREDICT_MODL_ID = 2008, CLASSN_NM = 'ADD_A_LINE'",
+        "confidence_score": 0.98,
+        "bq_mapping": null
+      },
+      {
+        "term": "French speakers",
+        "logic": "Include only customers whose preferred language is French (language code = 'FR')",
+        "threshold": "language = 'FR'",
+        "confidence_score": 0.9,
+        "bq_mapping": null
+      },
+      {
+        "term": "Prioritize highest reco when cutting the list",
+        "logic": "Sort the final audience by AAL recommendation segment ascending (reco_1 first through reco_5 last) and apply list cut based on this sort order",
+        "threshold": "Sort by reco_# ascending",
+        "confidence_score": 0.85,
+        "bq_mapping": null
+      }
+    ],
+    "exclude": [
+      {
+        "term": "Remove those added a line in the past 60 days",
+        "logic": "Exclude customers who have had a new line activation on their BAN within the past 60 days",
+        "threshold": "BAN-level activation within last 60 days",
+        "lookback_days": 60,
+        "confidence_score": 0.9,
+        "bq_mapping": null
+      },
+      {
+        "term": "Standard exclusions — Credit Classes L, C, E, V, X, K",
+        "logic": "Exclude customers whose credit class is one of L, C, E, V, or X or K (Standard_Exclusions = 0 AND credit class NOT IN ('L','C','E','V','X','K'))",
+        "threshold": "Credit Classes L, C, E, V, X, K",
+        "lookback_days": null,
+        "confidence_score": 0.9,
+        "bq_mapping": null
+      },
+      {
+        "term": "Apply UCG",
+        "logic": "Exclude customers assigned to the Universal Control Group holdout per Adobe template",
+        "threshold": "Per UCG template",
+        "lookback_days": null,
+        "confidence_score": 0.8,
+        "bq_mapping": null
+      }
+    ]
+  },
+  "default_exclusions": {
+    "dnc": {
+      "applied": true,
+      "scope": "call DNC"
+    },
+    "non_primary_subscriber": true,
+    "stop_sell": true,
+    "castl_compliance": true
+  },
+  "channel": {
+    "medium": [
+      "OB"
+    ],
+    "contact_strategy_override": {
+      "allowed": true,
+      "approver": "GCH",
+      "condition": "Contact strategy applied per template; distribution list includes dlCSSWLSListDeliveryGroup@telus.com, ti.dialer@telusinternational.com, Jenny Olsen, Michael El Hage"
+    },
+    "control_holdout": {
+      "applied": true,
+      "percentage": null,
+      "type": "UCG"
+    }
+  },
+  "vendor": {
+    "name": "TI Morocco (TELUS International) and PL Telecom (PLT)",
+    "css_campaign_id": "AALALTFR",
+    "css_measurement_id": null
+  },
+  "offer": {
+    "product": "Add-A-Line",
+    "sub_product": null,
+    "offer_code": null
+  },
+  "segmentation": {
+    "base": "Base 1 — TELUS Mobility postpaid, French-language customers",
+    "language": [
+      "French"
+    ],
+    "geography": "Quebec customers with English as preferred language should receive a bilingual version per OQLF compliance requirement"
+  },
+  "data_brief_flags": {
+    "missing_required_fields": [
+      "css_measurement_id — CSS campaign ID (AALALTFR) is provided but CSS measurement ID is not stated in the brief",
+      "offer_code — no offer code specified in the brief",
+      "UCG holdout percentage — UCG is applied but the exact holdout percentage is not stated"
+    ],
+    "ambiguities": [
+      "Criteria #4 (French speakers): the MUB field name for language is not explicitly stated (shown as '= FR' with no column name); assumed to be a preferred language or language code field",
+      "Criteria #7 (Standard exclusions): 'Standard_Exclusions = 0' is referenced alongside specific credit class exclusions — it is unclear whether Standard_Exclusions is a pre-built flag that already incorporates credit class logic or whether the credit class list is additive",
+      "Vendor split: brief references both TI Morocco (TIMC) and PL Telecom (PLT) as dialing sites with separate volume allocations — it is unclear whether both vendors receive the same list or separate extracts; volume figures (25K total, 15K TIMC, 10K PLT) are noted for context but not captured per rules",
+      "CSS ID 'AALALTFR' is listed under Criteria #13 but it is ambiguous whether this is the CSS campaign ID or another identifier; treated as css_campaign_id",
+      "Brief header states 'Business Unit: Mobility - TELUS, Koodo, EPP, Public Mobile' but Base 1 targeting criteria specify TELUS Postpaid only; brand is set to TELUS for this base — Koodo, EPP, and Public Mobile bases are empty in the brief",
+      "SFTP delivery path references both TI SFTP and a PL Telecom path — delivery routing for each vendor is not fully specified"
+    ],
+    "ob_vendor_missing": false,
+    "css_ids_missing": true
+  },
+  "campaign_summary": "This outbound call campaign targets active TELUS postpaid primary subscribers who are French-speaking and scored in AAL recommendation tiers 1 through 5 (PREDICT_MODL_ID = 2008, ADD_A_LINE model), promoting the addition of a new mobile line to their existing account. Customers who have added a line within the past 60 days are excluded, as are those in high-risk credit classes (L, C, E, V, X, K) and the Universal Control Group holdout. Calls are dialed by TI Morocco and PL Telecom, with call DNC, stop-sell, and CASTL compliance suppression applied as standard defaults.",
+  "connectors": {
+    "sizing_tool": {
+      "status": "pending_bq_mapping",
+      "sql_fragments": {
+        "include": [],
+        "exclude": [],
+        "default_exclusions": [
+          {
+            "rule": "dnc",
+            "scope": "call DNC",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "non_primary_subscriber",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "stop_sell",
+            "sql_snippet": null,
+            "bq_field_required": true
+          },
+          {
+            "rule": "castl_compliance",
+            "sql_snippet": null,
+            "bq_field_required": true
+          }
+        ]
+      },
+      "unmapped_terms": [
+        "Telus Postpaid only",
+        "Primary subs only",
+        "AAL reco 1-5",
+        "French speakers",
+        "Prioritize highest reco when cutting the list",
+        "Remove those added a line in the past 60 days",
+        "Standard exclusions — Credit Classes L, C, E, V, X, K",
+        "Apply UCG"
+      ],
+      "note": "8 criterion/criteria need BQ field mappings before SQL can be generated. Provide config/bq_schema.json with real field names, then run: vibe-briefing map-fields --glossary <path> --bq-schema config/bq_schema.json"
+    },
+    "brief_regeneration": {
+      "status": "ready",
+      "structured_sections": {
+        "campaign_overview": {
+          "brand": "TELUS",
+          "portfolio": "AAL",
+          "portfolio_description": "Postpaid mobility customers targeted for Add-A-Line cross-sell",
+          "purpose": "Cross-Sell",
+          "medium": [
+            "OB"
+          ],
+          "cadence": "Bi Weekly"
+        },
+        "offer": {
+          "product": "Add-A-Line",
+          "sub_product": null,
+          "offer_code": null
+        },
+        "segmentation": {
+          "base": "Base 1 — TELUS Mobility postpaid, French-language customers",
+          "language": [
+            "French"
+          ],
+          "geography": "Quebec customers with English as preferred language should receive a bilingual version per OQLF compliance requirement"
+        },
+        "vendor": {
+          "name": "TI Morocco (TELUS International) and PL Telecom (PLT)",
+          "css_campaign_id": "AALALTFR",
+          "css_measurement_id": null
+        },
+        "channel_rules": {
+          "medium": [
+            "OB"
+          ],
+          "contact_strategy_override": {
+            "allowed": true,
+            "approver": "GCH",
+            "condition": "Contact strategy applied per template; distribution list includes dlCSSWLSListDeliveryGroup@telus.com, ti.dialer@telusinternational.com, Jenny Olsen, Michael El Hage"
+          },
+          "control_holdout": {
+            "applied": true,
+            "percentage": null,
+            "type": "UCG"
+          }
+        },
+        "target_audience": [
+          {
+            "criterion": "Telus Postpaid only",
+            "description": "Include customers where LOB_DESC = 'Telus Postpaid' AND SUB_STATUS = 'A' (active subscribers on the TELUS postpaid line of business)",
+            "threshold": "LOB_DESC = 'Telus Postpaid', SUB_STATUS = 'A'",
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "Primary subs only",
+            "description": "Include only primary subscribers where Primary_Sub > 0",
+            "threshold": "Primary_Sub > 0",
+            "confidence_score": 0.95
+          },
+          {
+            "criterion": "AAL reco 1-5",
+            "description": "Include customers scored in the FDA current model score master table where PREDICT_MODL_ID = 2008, CLASSN_NM = 'ADD_A_LINE', and SEG_NM is one of reco_1 through reco_5, using the most recent PART_LOAD_DT partition",
+            "threshold": "SEG_NM IN ('reco_1','reco_2','reco_3','reco_4','reco_5'), PREDICT_MODL_ID = 2008, CLASSN_NM = 'ADD_A_LINE'",
+            "confidence_score": 0.98
+          },
+          {
+            "criterion": "French speakers",
+            "description": "Include only customers whose preferred language is French (language code = 'FR')",
+            "threshold": "language = 'FR'",
+            "confidence_score": 0.9
+          },
+          {
+            "criterion": "Prioritize highest reco when cutting the list",
+            "description": "Sort the final audience by AAL recommendation segment ascending (reco_1 first through reco_5 last) and apply list cut based on this sort order",
+            "threshold": "Sort by reco_# ascending",
+            "confidence_score": 0.85
+          }
+        ],
+        "campaign_exclusions": [
+          {
+            "criterion": "Remove those added a line in the past 60 days",
+            "description": "Exclude customers who have had a new line activation on their BAN within the past 60 days",
+            "threshold": "BAN-level activation within last 60 days",
+            "lookback_days": 60,
+            "confidence_score": 0.9
+          },
+          {
+            "criterion": "Standard exclusions — Credit Classes L, C, E, V, X, K",
+            "description": "Exclude customers whose credit class is one of L, C, E, V, or X or K (Standard_Exclusions = 0 AND credit class NOT IN ('L','C','E','V','X','K'))",
+            "threshold": "Credit Classes L, C, E, V, X, K",
+            "lookback_days": null,
+            "confidence_score": 0.9
+          },
+          {
+            "criterion": "Apply UCG",
+            "description": "Exclude customers assigned to the Universal Control Group holdout per Adobe template",
+            "threshold": "Per UCG template",
+            "lookback_days": null,
+            "confidence_score": 0.8
+          }
+        ],
+        "default_exclusions": {
+          "dnc": {
+            "applied": true,
+            "scope": "call DNC"
+          },
+          "non_primary_subscriber": true,
+          "stop_sell": true,
+          "castl_compliance": true
+        },
+        "quality_flags": {
+          "missing_required_fields": [
+            "css_measurement_id — CSS campaign ID (AALALTFR) is provided but CSS measurement ID is not stated in the brief",
+            "offer_code — no offer code specified in the brief",
+            "UCG holdout percentage — UCG is applied but the exact holdout percentage is not stated"
+          ],
+          "ambiguities": [
+            "Criteria #4 (French speakers): the MUB field name for language is not explicitly stated (shown as '= FR' with no column name); assumed to be a preferred language or language code field",
+            "Criteria #7 (Standard exclusions): 'Standard_Exclusions = 0' is referenced alongside specific credit class exclusions — it is unclear whether Standard_Exclusions is a pre-built flag that already incorporates credit class logic or whether the credit class list is additive",
+            "Vendor split: brief references both TI Morocco (TIMC) and PL Telecom (PLT) as dialing sites with separate volume allocations — it is unclear whether both vendors receive the same list or separate extracts; volume figures (25K total, 15K TIMC, 10K PLT) are noted for context but not captured per rules",
+            "CSS ID 'AALALTFR' is listed under Criteria #13 but it is ambiguous whether this is the CSS campaign ID or another identifier; treated as css_campaign_id",
+            "Brief header states 'Business Unit: Mobility - TELUS, Koodo, EPP, Public Mobile' but Base 1 targeting criteria specify TELUS Postpaid only; brand is set to TELUS for this base — Koodo, EPP, and Public Mobile bases are empty in the brief",
+            "SFTP delivery path references both TI SFTP and a PL Telecom path — delivery routing for each vendor is not fully specified"
+          ],
+          "ob_vendor_missing": false,
+          "css_ids_missing": true
+        }
+      },
+      "campaign_summary": "This outbound call campaign targets active TELUS postpaid primary subscribers who are French-speaking and scored in AAL recommendation tiers 1 through 5 (PREDICT_MODL_ID = 2008, ADD_A_LINE model), promoting the addition of a new mobile line to their existing account. Customers who have added a line within the past 60 days are excluded, as are those in high-risk credit classes (L, C, E, V, X, K) and the Universal Control Group holdout. Calls are dialed by TI Morocco and PL Telecom, with call DNC, stop-sell, and CASTL compliance suppression applied as standard defaults."
+    },
+    "brief_assistant": {
+      "status": "ready",
+      "completeness_score": 100,
+      "required_fields_check": {
+        "campaign.brand": true,
+        "campaign.medium": true,
+        "campaign.cadence": true,
+        "targeting.include": true,
+        "offer.product": true,
+        "segmentation.base": true,
+        "vendor.name": true
+      },
+      "failed_checks": [],
+      "include_criteria_count": 5,
+      "exclude_criteria_count": 3,
+      "ambiguities": [
+        "Criteria #4 (French speakers): the MUB field name for language is not explicitly stated (shown as '= FR' with no column name); assumed to be a preferred language or language code field",
+        "Criteria #7 (Standard exclusions): 'Standard_Exclusions = 0' is referenced alongside specific credit class exclusions — it is unclear whether Standard_Exclusions is a pre-built flag that already incorporates credit class logic or whether the credit class list is additive",
+        "Vendor split: brief references both TI Morocco (TIMC) and PL Telecom (PLT) as dialing sites with separate volume allocations — it is unclear whether both vendors receive the same list or separate extracts; volume figures (25K total, 15K TIMC, 10K PLT) are noted for context but not captured per rules",
+        "CSS ID 'AALALTFR' is listed under Criteria #13 but it is ambiguous whether this is the CSS campaign ID or another identifier; treated as css_campaign_id",
+        "Brief header states 'Business Unit: Mobility - TELUS, Koodo, EPP, Public Mobile' but Base 1 targeting criteria specify TELUS Postpaid only; brand is set to TELUS for this base — Koodo, EPP, and Public Mobile bases are empty in the brief",
+        "SFTP delivery path references both TI SFTP and a PL Telecom path — delivery routing for each vendor is not fully specified"
+      ],
+      "missing_required_fields": [
+        "css_measurement_id — CSS campaign ID (AALALTFR) is provided but CSS measurement ID is not stated in the brief",
+        "offer_code — no offer code specified in the brief",
+        "UCG holdout percentage — UCG is applied but the exact holdout percentage is not stated"
+      ],
+      "guidance": [
+        "Incomplete: css_measurement_id — CSS campaign ID (AALALTFR) is provided but CSS measurement ID is not stated in the brief",
+        "Incomplete: offer_code — no offer code specified in the brief",
+        "Incomplete: UCG holdout percentage — UCG is applied but the exact holdout percentage is not stated",
+        "CSS vendor: provide both CSS campaign ID and CSS measurement ID.",
+        "Clarify: Criteria #4 (French speakers): the MUB field name for language is not explicitly stated (shown as '= FR' with no column name); assumed to be a preferred language or language code field",
+        "Clarify: Criteria #7 (Standard exclusions): 'Standard_Exclusions = 0' is referenced alongside specific credit class exclusions — it is unclear whether Standard_Exclusions is a pre-built flag that already incorporates credit class logic or whether the credit class list is additive",
+        "Clarify: Vendor split: brief references both TI Morocco (TIMC) and PL Telecom (PLT) as dialing sites with separate volume allocations — it is unclear whether both vendors receive the same list or separate extracts; volume figures (25K total, 15K TIMC, 10K PLT) are noted for context but not captured per rules",
+        "Clarify: CSS ID 'AALALTFR' is listed under Criteria #13 but it is ambiguous whether this is the CSS campaign ID or another identifier; treated as css_campaign_id",
+        "Clarify: Brief header states 'Business Unit: Mobility - TELUS, Koodo, EPP, Public Mobile' but Base 1 targeting criteria specify TELUS Postpaid only; brand is set to TELUS for this base — Koodo, EPP, and Public Mobile bases are empty in the brief"
+      ]
+    }
+  },
+  "feedback_log": []
+}

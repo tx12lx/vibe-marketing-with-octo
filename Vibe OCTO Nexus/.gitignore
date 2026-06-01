@@ -1,0 +1,10 @@
+.env
+*.progress.json
+output/
+glossary/*.json
+!glossary/.gitkeep
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/

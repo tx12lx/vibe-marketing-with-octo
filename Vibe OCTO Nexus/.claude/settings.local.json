@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\T965788\\\\Documents\\\\Claude Projects\\\\Vibe Briefing\" -Recurse)",
+      "Bash(Select-Object FullName, Length)",
+      "Bash(python -m py_compile main.py commands/learn.py commands/analyze.py commands/validate.py commands/sql.py core/claude_client.py core/bq_client.py core/brief_fetcher.py core/glossary.py core/json_formatter.py core/validators.py)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/test_validators.py -v)",
+      "Bash(python -c \"import anthropic, click, pydantic, dotenv; print\\('deps OK'\\)\")",
+      "Bash(python -c \"import os; k = os.environ.get\\('ANTHROPIC_API_KEY', ''\\); print\\('set' if k else 'not set'\\)\")",
+      "Bash(python -c \"import vertexai; from vertexai.generative_models import GenerativeModel; vertexai.init\\(project='bi-srv-hsmdet-pr-7b9def', location='us-central1'\\); model = GenerativeModel\\('gemini-2.0-flash-001'\\); print\\(model.generate_content\\('Reply with valid JSON: {\\\\\"status\\\\\": \\\\\"ok\\\\\"}'\\).text\\)\")",
+      "Bash(claude -p \"Reply with this exact JSON: {\\\\\"status\\\\\": \\\\\"ok\\\\\"}\")",
+      "Bash(where claude *)",
+      "Bash(Get-Command claude *)",
+      "PowerShell(where.exe claude; \\(Get-Command claude -ErrorAction SilentlyContinue\\).Source)",
+      "PowerShell(Get-ChildItem \"$env:LOCALAPPDATA\\\\Programs\" -Recurse -Filter \"claude.exe\" -ErrorAction SilentlyContinue | Select-Object -First 5 FullName)",
+      "PowerShell(& \"C:\\\\Users\\\\T965788\\\\AppData\\\\Roaming\\\\Claude\\\\claude-code\\\\2.1.154\\\\claude.exe\" -p \"Reply with this exact JSON and nothing else: {\"\"status\"\": \"\"ok\"\"}\" 2>&1)",
+      "Bash(python main.py learn --portfolio AAL --bq-table bi-srv-hsmdet-pr-7b9def.campaign_data.bq_plan_camp_deploy_mdc --limit 5 --random --held-out 0 --output glossary/aal_test.json)",
+      "Bash(python main.py learn --portfolio AAL --bq-table bi-srv-hsmdet-pr-7b9def.campaign_data.bq_plan_camp_deploy_mdc --limit 10 --sort-order DESC --held-out 0 --output glossary/aal_test.json)",
+      "Bash(python main.py learn --portfolio AAL --bq-table bi-srv-hsmdet-pr-7b9def.campaign_data.bq_plan_camp_deploy_mdc --limit 5 --sort-order DESC --held-out 0 --output glossary/aal_test.json)",
+      "Bash(python main.py learn --campaign-name \"AAL Monthly EM\" --bq-table bi-srv-hsmdet-pr-7b9def.campaign_data.bq_plan_camp_deploy_mdc --output glossary/aal_monthly_em.json)"
+    ]
+  }
+}

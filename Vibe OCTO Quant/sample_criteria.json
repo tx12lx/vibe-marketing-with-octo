@@ -1,0 +1,7 @@
+{
+  "lob": "postpaid",
+  "customer_type": "naked",
+  "lifecycle": "T-3",
+  "province_exclude": ["AB", "BC", "QC"],
+  "eligible_for": ["hsia"]
+}

@@ -1,0 +1,22 @@
+# BQ Reporter — schema tables (MVP scope)
+#
+# WORKFLOW for adding a new table:
+#   1. FIRST add a section for the table in business_context.md
+#      (column semantics, valid filter values, counting IDs, default filters,
+#      common intent → column mappings).
+#   2. THEN add the table name to this file.
+#
+# Adding a table here without business context bloats the prompt without
+# improving accuracy.
+
+bq_fda_mob_mobility_base
+
+# --- Parked: not yet documented in business_context.md ---
+# bq_dly_dbm_customer_profl
+# bq_dly_stop_sell
+# bq_fda_mob_stop_sell
+# bq_fda_mobility_churn_master_view
+# bq_wls_tm_view_dbm_intraday_port_out
+# bq_fda_product_instance_fact_mob
+# bq_fda_mob_standard_exclusions_view
+# bq_fda_current_model_score_master_view
