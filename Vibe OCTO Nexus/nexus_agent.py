@@ -799,25 +799,34 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
     else:
         propensity = "N/A"
 
-    # Segment Focus — lifecycle and device financing signals
-    segment_parts: list[str] = []
-    if re.search(r"commit_start_date\s+is\s+null", blob, re.IGNORECASE):
-        segment_parts.append("BYOD")
-    if re.search(r"\bhp_ind\s*=\s*1\b", blob, re.IGNORECASE):
-        segment_parts.append("Hardware Subsidized")
-    m_renewal = re.search(
-        r"commit_end_date\s*<=\s*DATE_ADD.*?INTERVAL\s+(\d+)\s+MONTH", blob, re.IGNORECASE
+    # Regional Scope — province IN / NOT IN patterns; national fallback with ON/QC annotation
+    m_prov_in = re.search(
+        r"UPPER\s*\(\s*province\s*\)\s+IN\s*\(([^)]+)\)",
+        blob, re.IGNORECASE
     )
-    if m_renewal:
-        segment_parts.append(f"T-{m_renewal.group(1)} Renewal Window")
-    elif re.search(r"commit_end_date\s*<\s*CURRENT_DATE", blob, re.IGNORECASE):
-        segment_parts.append("Month-to-Month")
-    if segment_parts:
-        segment_focus = " + ".join(segment_parts)
-    elif request.medium.upper().strip() == "EM":
-        segment_focus = "Unified Email Campaign Matrix"
+    m_prov_not_in = re.search(
+        r"UPPER\s*\(\s*province\s*\)\s+NOT\s+IN\s*\(([^)]+)\)",
+        blob, re.IGNORECASE
+    )
+    if m_prov_in:
+        raw_codes = re.findall(r"['\"]([A-Za-z]{2})['\"]", m_prov_in.group(1))
+        codes = sorted(set(c.upper().replace("PQ", "QC") for c in raw_codes))
+        regional_scope = "Regional: " + ", ".join(codes)
+    elif m_prov_not_in:
+        raw_codes = re.findall(r"['\"]([A-Za-z]{2})['\"]", m_prov_not_in.group(1))
+        codes = sorted(set(c.upper().replace("PQ", "QC") for c in raw_codes))
+        regional_scope = "National excl. " + ", ".join(codes)
     else:
-        segment_focus = "N/A"
+        has_on = bool(re.search(r"\bON\b", blob))
+        has_qc = bool(re.search(r"\b(?:QC|PQ)\b", blob))
+        if has_on and has_qc:
+            regional_scope = "National (ON & QC highlighted)"
+        elif has_on:
+            regional_scope = "National (ON highlighted)"
+        elif has_qc:
+            regional_scope = "National (QC highlighted)"
+        else:
+            regional_scope = "National"
 
     # Primary Channel Guard — medium label + governing DNC flag
     _medium_labels = {"EM": "Email", "SMS": "SMS", "OB": "Outbound Dialing", "DM": "Direct Mail"}
@@ -828,26 +837,6 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
         channel_guard = f"{channel_label} ({dnc_col} = 0)"
     else:
         channel_guard = channel_label
-
-    # Exclusivity Sieve — presence and value of all four DNC flags
-    flag_vals: dict[str, str] = {}
-    for flag in ("em_dnc", "sms_dnc", "ob_dnc", "dm_dnc"):
-        m = re.search(rf"\b{flag}\s*=\s*([01])\b", blob, re.IGNORECASE)
-        if m:
-            flag_vals[flag] = m.group(1)
-
-    if flag_vals:
-        allowed    = [f for f, v in flag_vals.items() if v == "0"]
-        suppressed = [f for f, v in flag_vals.items() if v == "1"]
-        if allowed and suppressed:
-            parts = [f"{f} = 0" for f in allowed] + [f"{f} = 1" for f in suppressed]
-            exclusivity_sieve = " & ".join(parts)
-        elif allowed:
-            exclusivity_sieve = " & ".join(f"{f} = 0" for f in allowed)
-        else:
-            exclusivity_sieve = "None"
-    else:
-        exclusivity_sieve = "None"
 
     # Dynamic Exclusions — behavioral self-join lookback windows and non-DNC exclusion layers
     dynamic_parts: list[str] = []
@@ -880,9 +869,8 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
         "portfolio":          f"{request.campaign_code} / {request.campaign_sub_code}",
         "core_product":       core_product,
         "propensity":         propensity,
-        "segment_focus":      segment_focus,
+        "regional_scope":     regional_scope,
         "channel_guard":      channel_guard,
-        "exclusivity_sieve":  exclusivity_sieve,
         "dynamic_exclusions": dynamic_exclusions,
     }
 
@@ -902,9 +890,8 @@ def _print_criteria_block(request: "AudienceSizingRequest") -> None:
         f"  {'Portfolio / Initiative':<{lw}}: {f['portfolio']}",
         f"  {'Target Core Product':<{lw}}: {f['core_product']}",
         f"  {'Target Propensity':<{lw}}: {f['propensity']}",
-        f"  {'Segment Focus':<{lw}}: {f['segment_focus']}",
+        f"  {'Regional Scope':<{lw}}: {f['regional_scope']}",
         f"  {'Primary Channel Guard':<{lw}}: {f['channel_guard']}",
-        f"  {'Exclusivity Sieve':<{lw}}: {f['exclusivity_sieve']}",
         f"  {'Dynamic Exclusions':<{lw}}: {f['dynamic_exclusions']}",
         "",
         thin,
