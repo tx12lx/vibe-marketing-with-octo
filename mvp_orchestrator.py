@@ -176,16 +176,8 @@ def _format_audit_log(log: QuantAuditLog) -> str:
 # ---------------------------------------------------------------------------
 
 def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
-    print("\n" + "=" * 66)
-    print("  Vibe Marketing with OCTO — Campaign Intelligence Console")
-    print("=" * 66)
-    print(f"  Agents  : Nexus  +  Quant")
-    print(f"  Briefs  : {len(nexus.briefs)} loaded")
-    print()
-    print("  How can the OCTO team help you today?")
-    print()
-
     while True:
+        print("  How can the OCTO team help you today?\n")
         print("  [1] Size Campaign      — automated sizing from pre-loaded briefs")
         print("  [2] Natural Language   — describe your audience in plain English")
         print("  [q] Quit")
@@ -250,12 +242,11 @@ def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
 
 def main() -> None:
     _silence_google_noise()
-    print("\n  Vibe Marketing with OCTO — Initializing agents ...\n")
+    os.system("cls" if os.name == "nt" else "clear")
     _init_buf = io.StringIO()
-    with contextlib.redirect_stderr(_init_buf):
+    with contextlib.redirect_stderr(_init_buf), contextlib.redirect_stdout(_init_buf):
         nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
         quant: QuantAgent = _AGENT_REGISTRY["quant"]()
-    print("  Both agents online.\n")
     _run_console(nexus, quant)
 
 
