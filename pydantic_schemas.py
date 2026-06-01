@@ -83,3 +83,4 @@ class NexusErrorPayload(BaseModel):
     original_request: dict
     retry_hint: str
     attempt: int = 1
+    failed_sql: Optional[str] = None

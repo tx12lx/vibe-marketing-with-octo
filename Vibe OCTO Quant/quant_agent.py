@@ -301,6 +301,7 @@ class QuantAgent:
         self._default_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
         self._default_dataset = os.getenv("BQ_DATASET", "adobe")
         self._schema_cache = _QUANT_DIR / ".schema_cache.json"
+        self._last_sql: str = ""
 
     # ------------------------------------------------------------------
     # Public API — strict gateway, never raises to orchestrator
@@ -334,6 +335,7 @@ class QuantAgent:
                 ),
             )
 
+        self._last_sql = ""
         try:
             return self._run_audit(request)
         except Exception as exc:
@@ -341,6 +343,7 @@ class QuantAgent:
                 error_type="database_error",
                 error_summary=str(exc)[:400],
                 original_request=payload,
+                failed_sql=self._last_sql or None,
                 retry_hint=(
                     "Check that target_population and filters use standard telecom "
                     "marketing terminology recognisable in the BQ schema. "
@@ -371,6 +374,7 @@ class QuantAgent:
                 error_type="database_error",
                 error_summary=str(exc)[:400],
                 original_request=request.model_dump(),
+                failed_sql=self._last_sql or None,
                 retry_hint=(
                     "Check that filters use valid BQ column names. "
                     "Verify ADC credentials are active for the BQ project."
@@ -437,14 +441,18 @@ class QuantAgent:
                     {"role": "system", "content": _QUANT_SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 2048,
+                "max_tokens": 4096,
                 "temperature": 0,
             },
             timeout=180,
         )
         resp.raise_for_status()
-        sql = resp.json()["choices"][0]["message"]["content"].strip()
-        return _clean_sql(sql)
+        sql = _clean_sql(resp.json()["choices"][0]["message"]["content"].strip())
+        self._last_sql = sql
+        if os.getenv("QUANT_DEBUG_SQL"):
+            print(f"[Quant SQL — waterfall]\n{sql}\n", file=sys.stderr)
+        _validate_sql_structure(sql)
+        return sql
 
     def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
         prompt = _ADHOC_WATERFALL_PROMPT.format(
@@ -469,14 +477,18 @@ class QuantAgent:
                     {"role": "system", "content": _QUANT_SYSTEM},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 1024,
+                "max_tokens": 4096,
                 "temperature": 0,
             },
             timeout=180,
         )
         resp.raise_for_status()
-        sql = resp.json()["choices"][0]["message"]["content"].strip()
-        return _clean_sql(sql)
+        sql = _clean_sql(resp.json()["choices"][0]["message"]["content"].strip())
+        self._last_sql = sql
+        if os.getenv("QUANT_DEBUG_SQL"):
+            print(f"[Quant SQL — ad-hoc]\n{sql}\n", file=sys.stderr)
+        _validate_sql_structure(sql)
+        return sql
 
     def _execute_query(self, sql: str, project: str) -> list[dict]:
         with warnings.catch_warnings():
@@ -601,4 +613,54 @@ def _clean_sql(sql: str) -> str:
             sql = "\n".join(lines[i:])
             break
 
-    return sql.strip().rstrip(";").strip()
+    sql = sql.strip().rstrip(";").strip()
+
+    # 3. Strip trailing CTE comma — emitted when the model hits the token limit
+    #    immediately after the last CTE closing paren.  A bare comma at EOF means
+    #    no SELECT follows, causing BQ "Unexpected end of script".
+    sql = re.sub(r",\s*$", "", sql).strip()
+
+    return sql
+
+
+def _validate_sql_structure(sql: str) -> None:
+    """Raise ValueError with a diagnostic message if the SQL is structurally incomplete.
+
+    Called immediately after _clean_sql so that truncated or malformed output is
+    caught before it reaches BigQuery and produces a cryptic 400 error.
+    """
+    if not re.match(r"^\s*WITH\b", sql, re.IGNORECASE):
+        raise ValueError(
+            "Generated SQL does not begin with WITH — response may have been "
+            "prefixed with prose or truncated before the query start."
+        )
+
+    # A trailing comma at EOF means the UNION ALL execution block never arrived.
+    if re.search(r",\s*$", sql):
+        raise ValueError(
+            "Generated SQL ends with a trailing comma — the UNION ALL execution "
+            "block is absent. Increase max_tokens and retry."
+        )
+
+    union_count = len(re.findall(r"\bUNION\s+ALL\b", sql, re.IGNORECASE))
+    if union_count < 5:
+        raise ValueError(
+            f"Generated SQL contains {union_count} UNION ALL clause(s); a 6-step "
+            "waterfall requires exactly 5. The query appears truncated — "
+            "increase max_tokens."
+        )
+
+    open_parens = sql.count("(")
+    close_parens = sql.count(")")
+    if open_parens != close_parens:
+        raise ValueError(
+            f"Generated SQL has unbalanced parentheses ({open_parens} open vs "
+            f"{close_parens} close) — likely truncated inside a subquery or "
+            "DATE_ADD/DATE_SUB expression."
+        )
+
+    if "control_group_flg" not in sql:
+        raise ValueError(
+            "Generated SQL is missing the mandatory control_group_flg = 'N' filter "
+            "(step 6). The final CTE was not generated."
+        )
