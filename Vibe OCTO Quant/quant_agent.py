@@ -67,7 +67,8 @@ _QUANT_SYSTEM = (
     "    WHERE primary_sub = 1\n"
     "      AND standard_exclusions = 0\n"
     "      AND stop_sell = 0\n"
-    "      AND sub_status = 'A'\n\n"
+    "      AND sub_status = 'A'\n"
+    "      AND control_group_flg = 'N'\n\n"
     "  Strict typing rules:\n"
     "  - INT64 flags (1=True/Active, 0=False/Inactive): ALL columns matching *_ind, *_elig,\n"
     "    plus primary_sub, standard_exclusions, and stop_sell.\n"
@@ -98,11 +99,20 @@ _QUANT_SYSTEM = (
     "- Size audiences using COUNT(DISTINCT ban) — no other sizing aggregate\n"
     "- Always return exactly two output columns: layer_name STRING, audience_count INT64\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
-    "- Base Universe CTE must always apply all four mandatory baseline filters:\n"
+    "- Base Universe CTE must always apply all five mandatory baseline filters:\n"
     "    primary_sub = 1 AND standard_exclusions = 0 AND stop_sell = 0 AND sub_status = 'A'\n"
+    "    AND control_group_flg = 'N'\n"
     "- Do not reference columns absent from the confirmed schema above\n"
     "- Use Standard SQL syntax; backtick-quote all table refs as `project.dataset.table`\n"
-    "- Return ONLY the raw SQL — no markdown, no explanation, no trailing semicolon"
+    "- Return ONLY the raw SQL — no markdown, no explanation, no trailing semicolon\n"
+    "- Case-sensitive STRING columns — lob_desc, province, device_type, device_name — must\n"
+    "  always be wrapped in UPPER() and matched with LIKE wildcards to prevent 0-count case\n"
+    "  mismatches. Required pattern examples:\n"
+    "    UPPER(lob_desc) LIKE '%POSTPAID%'\n"
+    "    UPPER(province) LIKE '%BC%'\n"
+    "    UPPER(device_type) LIKE '%SMARTPHONE%'\n"
+    "    UPPER(device_name) LIKE '%IPHONE%'\n"
+    "  Never use bare equality (=) on these columns."
 )
 
 _WATERFALL_SQL_PROMPT = """Generate a BigQuery audience waterfall query for this sizing request.
@@ -119,9 +129,10 @@ Available schema:
 
 Waterfall structure required:
   Row 1 : layer_name = 'Base Universe', audience_count = COUNT(DISTINCT ban) filtered
-           by the four mandatory baseline filters only —
+           by the five mandatory baseline filters only —
            primary_sub = 1 AND standard_exclusions = 0 AND stop_sell = 0
-           AND sub_status = 'A' — no other audience filters at this layer.
+           AND sub_status = 'A' AND control_group_flg = 'N' — no other audience
+           filters at this layer.
   Rows 2+ : label each 'After: <short filter description>', adding one filter per step.
   Last row: label 'Final Audience' — all filters and exclusions applied.
 
@@ -152,7 +163,7 @@ Return exactly two output columns: layer_name STRING set to the literal 'Final A
 audience_count INT64.
 Apply ALL listed filters in a single WHERE clause. The mandatory baseline filters
 primary_sub = 1 AND standard_exclusions = 0 AND stop_sell = 0 AND sub_status = 'A'
-MUST be present in the WHERE clause before any audience-specific filters.
+AND control_group_flg = 'N' MUST be present in the WHERE clause before any audience-specific filters.
 No CTEs, no waterfall layers — one SELECT that returns exactly one result row.
 
 Return ONLY the SQL."""
