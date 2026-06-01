@@ -61,14 +61,20 @@ _QUANT_SYSTEM = (
     "  msf, mrc, arpu, ban_arpu, soc_desc_e, soc_desc_f, em_dnc, ob_dnc, sms_dnc, dm_dnc,\n"
     "  handset_tenure, prizm_socialgrp_cd, prizm_socialgrp_nm, prizm_lifestage_cd,\n"
     "  prizm_lifestage_nm, allowance_qty, unit_of_measure_cd, standard_exclusions,\n"
-    "  pending_order_ind, primary_sub, commit_start_date, commit_end_date, sub_status\n\n"
-    "  MANDATORY BASELINE MARKETING FILTERS — apply to EVERY marketing campaign query\n"
-    "  at the base query layer before any audience-specific filters:\n"
-    "    WHERE primary_sub = 1\n"
-    "      AND standard_exclusions = 0\n"
-    "      AND stop_sell = 0\n"
-    "      AND sub_status = 'A'\n"
-    "      AND control_group_flg = 'N'\n\n"
+    "  pending_order_ind, primary_sub, commit_start_date, commit_end_date, sub_status,\n"
+    "  init_activation_date\n\n"
+    "  WATERFALL FILTER SEQUENCE — apply as sequential cumulative CTE layers in this\n"
+    "  exact order. Never collapse them into a single flat WHERE clause.\n"
+    "  Step 1 — Base Universe / LOB   : UPPER(lob_desc) IN (...) only — no other filters\n"
+    "  Step 2 — Primary Subscriber    : adds primary_sub = 1\n"
+    "  Step 3 — Standard Exclusions   : adds standard_exclusions = 0 AND sub_status = 'A'\n"
+    "  Step 4 — Stop Sell             : adds stop_sell = 0\n"
+    "  Step 5 — Campaign-Specific     : adds all audience-specific criteria — province,\n"
+    "                                   lifecycle, dnc flags, cross-sell pairs, model scores,\n"
+    "                                   AAL behavioral self-join exclusions / triggers,\n"
+    "                                   and AAL NBA propensity model joins\n"
+    "  Step 6 — Control Group Excl.   : adds control_group_flg = 'N' — MUST be the absolute\n"
+    "                                   last CTE layer, never moved or merged upward\n\n"
     "  Strict typing rules:\n"
     "  - INT64 flags (1=True/Active, 0=False/Inactive): ALL columns matching *_ind, *_elig,\n"
     "    plus primary_sub, standard_exclusions, and stop_sell.\n"
@@ -97,6 +103,9 @@ _QUANT_SYSTEM = (
     "=== BUSINESS RULE MATRICES ===\n\n"
     "LINE OF BUSINESS (lob_desc) MAPPING — always use UPPER(lob_desc) IN (...):\n"
     "  'Postpaid'  -> UPPER(lob_desc) IN ('TELUS POSTPAID', 'KOODO POSTPAID', 'TELUS EPP')\n"
+    "               CRITICAL: 'TELUS EPP' is MANDATORY for every Postpaid filter. Omitting\n"
+    "               it silently under-counts the audience. The IN list must contain all three\n"
+    "               values — 'TELUS POSTPAID', 'KOODO POSTPAID', and 'TELUS EPP' — every time.\n"
     "  'Prepaid'   -> UPPER(lob_desc) IN ('TELUS PREPAID', 'KOODO PREPAID')\n"
     "  TWA (Telus Wireless Ambassador) is EXCLUDED from all queries by default unless\n"
     "  explicitly requested — never add TWA values to any IN list unprompted.\n"
@@ -110,6 +119,14 @@ _QUANT_SYSTEM = (
     "    commit_end_date < CURRENT_DATE()\n"
     "  BYOD (Bring Your Own Device, no device financing):\n"
     "    commit_start_date IS NULL\n\n"
+    "PROVINCE CODES — the province column uses 2-letter codes. Most provinces have a\n"
+    "  single canonical code. Quebec is the exception — it exists under TWO legacy codes\n"
+    "  in this dataset: 'QC' and 'PQ'. Whenever a request includes or excludes Quebec\n"
+    "  (referred to by any name: 'Quebec', 'QC', or 'PQ'), the generated SQL must handle\n"
+    "  both codes together using an IN or NOT IN list — never filter on one alone:\n"
+    "    Include Quebec  : UPPER(province) IN ('QC', 'PQ')\n"
+    "    Exclude Quebec  : UPPER(province) NOT IN ('QC', 'PQ')\n"
+    "  Filtering only UPPER(province) = 'QC' or LIKE '%QC%' silently drops 'PQ' records.\n\n"
     "CROSS-SELL / FFH PRODUCT TARGETING — when a request targets customers for\n"
     "  cross-sell or promotion of an FFH product, ALWAYS pair the ownership index\n"
     "  (= 0, does not currently have the product) with the eligibility index\n"
@@ -123,25 +140,70 @@ _QUANT_SYSTEM = (
     "    smart_energy: smart_energy_ind = 0 AND smart_energy_elig = 1\n"
     "    pfe_hsia    : pfe_hsia_ind = 0 AND pfe_hsia_elig = 1\n"
     "    pfe_tv      : pfe_tv_ind = 0 AND pfe_tv_elig = 1\n\n"
+    "ADD-A-LINE (AAL) TARGETING — two distinct trigger patterns; both belong exclusively\n"
+    "  in the Step 5 Campaign-Specific CTE layer. Apply whichever pattern the request invokes.\n\n"
+    "  BEHAVIORAL AAL EXCLUSION / TRIGGER (recent-subscriber self-join on Table 1):\n"
+    "  Trigger: request isolates or excludes accounts that recently Added a Line.\n"
+    "  Technique: self-join Table 1 as t1 (primary_sub = 1) and t2 (primary_sub = 0) on the\n"
+    "  same BAN. Compare t2.init_activation_date against CURRENT_DATE() for the lookback.\n"
+    "  Required join structure:\n"
+    "    FROM `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base` t1\n"
+    "    INNER JOIN `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base` t2\n"
+    "      ON  t1.ban  = t2.ban\n"
+    "      AND t1.primary_sub = 1\n"
+    "      AND t2.primary_sub = 0\n"
+    "      AND t2.init_activation_date > t1.init_activation_date\n"
+    "  Apply the user's lookback window on t2.init_activation_date. Example for 6 months:\n"
+    "    AND t2.init_activation_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH)\n"
+    "  To EXCLUDE these BANs from the audience: use NOT IN / NOT EXISTS against the BAN set\n"
+    "  returned by the self-join. To TARGET them: use IN / EXISTS.\n"
+    "  Never infer a lookback period — use only the period the user explicitly states.\n\n"
+    "  PREDICTIVE AAL NBA MODEL (Table 2 propensity join):\n"
+    "  Trigger: request targets based on the Add-A-Line recommendation model, propensity\n"
+    "  tiers, or NBA scores.\n"
+    "  Fixed identifiers — always use BOTH together, never one alone:\n"
+    "    t2.predict_modl_id = 2008\n"
+    "    t2.classn_nm = 'AAD_A_LINE'\n"
+    "  Default tier filter (top 5 propensity deciles — apply unless user requests more):\n"
+    "    t2.seg_nm IN ('reco_1', 'reco_2', 'reco_3', 'reco_4', 'reco_5')\n"
+    "  Dynamic scaling — expand ONLY on explicit user instruction; never expand unprompted:\n"
+    "    Moderate expansion : IN ('reco_1', 'reco_2', 'reco_3', 'reco_4', 'reco_5', 'reco_6')\n"
+    "    Broad expansion    : up to 'reco_8' maximum — hard ceiling, never exceed reco_8\n"
+    "  Model-isolated partition subquery (mandatory — always scope to predict_modl_id = 2008):\n"
+    "    AND t2.part_load_dt = (\n"
+    "      SELECT MAX(inner_t2.part_load_dt)\n"
+    "      FROM `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_current_model_score_master_view` inner_t2\n"
+    "      WHERE inner_t2.predict_modl_id = 2008\n"
+    "    )\n\n"
     "=== GENERATION RULES ===\n"
     "- Never select customer PII (names, addresses, emails, phone numbers, IMEI)\n"
     "- Size audiences using COUNT(DISTINCT ban) — no other sizing aggregate\n"
     "- Always return exactly two output columns: layer_name STRING, audience_count INT64\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
-    "- Base Universe CTE must always apply all five mandatory baseline filters:\n"
-    "    primary_sub = 1 AND standard_exclusions = 0 AND stop_sell = 0 AND sub_status = 'A'\n"
-    "    AND control_group_flg = 'N'\n"
+    "- Six-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
+    "    CTE 1 'Base Universe'              : LOB filter only (UPPER(lob_desc) IN (...))\n"
+    "    CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1\n"
+    "    CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'\n"
+    "    CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0\n"
+    "    CTE 5 'After: <Campaign Criteria>' : cumulative + all campaign-specific filters;\n"
+    "                                         AAL behavioral self-join or NBA model join\n"
+    "                                         (whichever the request invokes) lives here\n"
+    "    CTE 6 'Final Audience'             : cumulative + control_group_flg = 'N' — always last\n"
+    "- control_group_flg = 'N' must appear ONLY in CTE 6 and nowhere above it\n"
     "- Do not reference columns absent from the confirmed schema above\n"
     "- Use Standard SQL syntax; backtick-quote all table refs as `project.dataset.table`\n"
     "- Return ONLY the raw SQL — no markdown, no explanation, no trailing semicolon\n"
-    "- Case-sensitive STRING columns — lob_desc, province, device_type, device_name — must\n"
+    "- Case-sensitive STRING columns — province, device_type, device_name — must\n"
     "  always be wrapped in UPPER() and matched with LIKE wildcards to prevent 0-count case\n"
     "  mismatches. Required pattern examples:\n"
-    "    UPPER(lob_desc) LIKE '%POSTPAID%'\n"
     "    UPPER(province) LIKE '%BC%'\n"
     "    UPPER(device_type) LIKE '%SMARTPHONE%'\n"
     "    UPPER(device_name) LIKE '%IPHONE%'\n"
-    "  Never use bare equality (=) on these columns.\n\n"
+    "  Never use bare equality (=) on these columns.\n"
+    "  EXCEPTION — lob_desc must NEVER be filtered with LIKE. Always use the exact IN list\n"
+    "  from the LOB MAPPING above. Using LIKE '%POSTPAID%' silently excludes 'TELUS EPP'\n"
+    "  customers and must never appear in generated SQL. Postpaid requires:\n"
+    "    UPPER(lob_desc) IN ('TELUS POSTPAID', 'KOODO POSTPAID', 'TELUS EPP')\n\n"
     "=== OUTPUT FORMAT — ABSOLUTE REQUIREMENT ===\n"
     "The response MUST be 100% executable BigQuery Standard SQL and nothing else.\n"
     "PROHIBITED — the response must NEVER contain:\n"
@@ -168,14 +230,21 @@ BQ Dataset : {bq_dataset}
 Available schema:
 {schema_context}
 
-Waterfall structure required:
-  Row 1 : layer_name = 'Base Universe', audience_count = COUNT(DISTINCT ban) filtered
-           by the five mandatory baseline filters only —
-           primary_sub = 1 AND standard_exclusions = 0 AND stop_sell = 0
-           AND sub_status = 'A' AND control_group_flg = 'N' — no other audience
-           filters at this layer.
-  Rows 2+ : label each 'After: <short filter description>', adding one filter per step.
-  Last row: label 'Final Audience' — all filters and exclusions applied.
+Waterfall structure required — six mandatory layers in this exact sequence:
+  CTE 1 'Base Universe'              : LOB filter only — UPPER(lob_desc) IN (...)
+  CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
+  CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
+  CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
+  CTE 5 'After: <Campaign Criteria>' : cumulative + all campaign-specific filters from
+                                       the Filters and Exclusions lists above; for AAL
+                                       use cases apply the behavioral self-join rule
+                                       (init_activation_date + lookback window) or the
+                                       predictive NBA model join (predict_modl_id = 2008,
+                                       classn_nm = 'AAD_A_LINE') per the system rules
+  CTE 6 'Final Audience'             : cumulative + control_group_flg = 'N' — absolute last
+
+The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
+control_group_flg = 'N' must NOT appear in any CTE above CTE 6.
 
 Constraints:
 - Never SELECT any customer identifier values in output — only aggregate counts
@@ -191,7 +260,7 @@ The first character must be 'W' (WITH). Any explanatory text causes a pipeline p
 _EXTREME_DROP = 0.60
 _HIGH_SCRUB_RATE = 0.80
 
-_DIRECT_COUNT_PROMPT = """Generate a single BigQuery COUNT query for this ad-hoc audience request.
+_ADHOC_WATERFALL_PROMPT = """Generate a BigQuery audience waterfall query for this ad-hoc sizing request.
 
 Population : {target_population}
 Filters    : {filters_json}
@@ -201,15 +270,26 @@ BQ Dataset : {bq_dataset}
 Available schema:
 {schema_context}
 
-Return exactly two output columns: layer_name STRING set to the literal 'Final Audience',
-audience_count INT64.
-Apply ALL listed filters in a single WHERE clause. The mandatory baseline filters
-primary_sub = 1 AND standard_exclusions = 0 AND stop_sell = 0 AND sub_status = 'A'
-AND control_group_flg = 'N' MUST be present in the WHERE clause before any audience-specific filters.
-No CTEs, no waterfall layers — one SELECT that returns exactly one result row.
+Waterfall structure required — six mandatory layers in this exact sequence:
+  CTE 1 'Base Universe'              : LOB filter only — UPPER(lob_desc) IN (...)
+  CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
+  CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
+  CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
+  CTE 5 'After: <Campaign Criteria>' : cumulative + all audience-specific filters from
+                                       the Filters list; for AAL use cases apply the
+                                       behavioral self-join rule (init_activation_date +
+                                       lookback window) or the predictive NBA model join
+                                       (predict_modl_id = 2008, classn_nm = 'AAD_A_LINE')
+                                       per the system rules
+  CTE 6 'Final Audience'             : cumulative + control_group_flg = 'N' — absolute last
+
+The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
+control_group_flg = 'N' must NOT appear in any CTE above CTE 6.
+Apply filters cumulatively — each CTE re-applies all prior WHERE conditions plus the new one.
+Use ONLY the filter criteria listed above.
 
 OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
-The first character must be 'S' (SELECT). Any explanatory text causes a pipeline parse failure."""
+The first character must be 'W' (WITH). Any explanatory text causes a pipeline parse failure."""
 
 
 class QuantAgent:
@@ -269,20 +349,22 @@ class QuantAgent:
             )
 
     def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
-        """Path 2 — execute a direct single-row count query. No waterfall, no retry loop."""
+        """Path 2 — execute a six-step waterfall count query for an ad-hoc sizing request."""
         try:
             schema = self._fetch_schema(request.bq_project, request.bq_dataset)
-            sql = self._generate_direct_sql(request, schema)
+            sql = self._generate_adhoc_waterfall_sql(request, schema)
             raw_rows = self._execute_query(sql, request.bq_project)
             masked_rows = _mask_pii(raw_rows)
             waterfall = _parse_waterfall(masked_rows)
+            _log_waterfall(waterfall)
+            note = _optimization_note(waterfall)
             final_count = waterfall[-1].audience_count if waterfall else 0
             return QuantAuditLog(
                 request=request,
                 sql=sql,
                 waterfall=waterfall,
                 final_count=final_count,
-                optimization_note=None,
+                optimization_note=note,
             )
         except Exception as exc:
             return NexusErrorPayload(
@@ -305,6 +387,7 @@ class QuantAgent:
         raw_rows = self._execute_query(sql, request.bq_project)
         masked_rows = _mask_pii(raw_rows)
         waterfall = _parse_waterfall(masked_rows)
+        _log_waterfall(waterfall)
         note = _optimization_note(waterfall)
         final_count = waterfall[-1].audience_count if waterfall else 0
 
@@ -363,8 +446,8 @@ class QuantAgent:
         sql = resp.json()["choices"][0]["message"]["content"].strip()
         return _clean_sql(sql)
 
-    def _generate_direct_sql(self, request: AdHocSizingRequest, schema: str) -> str:
-        prompt = _DIRECT_COUNT_PROMPT.format(
+    def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
+        prompt = _ADHOC_WATERFALL_PROMPT.format(
             target_population=request.target_population or "UNSPECIFIED",
             filters_json=json.dumps(
                 [f for f in (request.filters or []) if f is not None],
@@ -426,6 +509,18 @@ def _mask_pii(rows: list[dict]) -> list[dict]:
             masked[k] = "***" if _is_filter_only_pii(k) else v
         out.append(masked)
     return out
+
+
+def _log_waterfall(waterfall: list[WaterfallLayer]) -> None:
+    if not waterfall:
+        return
+    width_label = max(len(l.layer_name) for l in waterfall)
+    divider = "-" * (width_label + 18)
+    print(f"\n{'AUDIENCE WATERFALL':^{width_label + 18}}")
+    print(divider)
+    for layer in waterfall:
+        print(f"  {layer.layer_name:<{width_label}}  {layer.audience_count:>12,}")
+    print(divider)
 
 
 def _parse_waterfall(rows: list[dict]) -> list[WaterfallLayer]:
