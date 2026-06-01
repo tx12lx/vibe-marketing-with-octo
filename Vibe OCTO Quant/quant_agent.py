@@ -69,14 +69,31 @@ _QUANT_SYSTEM = (
     "  Step 2 — Primary Subscriber    : adds primary_sub = 1\n"
     "  Step 3 — Standard Exclusions   : adds standard_exclusions = 0 AND sub_status = 'A'\n"
     "  Step 4 — Stop Sell             : adds stop_sell = 0\n"
-    "  Step 5 — Targeting Criteria     : houses the intersection of all custom parameters\n"
+    "  Step 5 — Targeting Criteria    : houses the intersection of all custom parameters\n"
     "                                   extracted from the brief or NL request — service\n"
     "                                   exclusions (e.g., excluding EPP), multi-province\n"
     "                                   boundaries, behavioral metrics (e.g., adding a line\n"
-    "                                   in the past 3 months), lifecycle windows, DNC flags,\n"
-    "                                   cross-sell pairs, model scores, AAL behavioral\n"
-    "                                   self-join exclusions / triggers, NBA model joins\n"
-    "  Step 6 — Universal Control Group : adds control_group_flg = 'N' — MUST be the\n"
+    "                                   in the past 3 months), lifecycle windows, cross-sell\n"
+    "                                   pairs, model scores, AAL behavioral self-join\n"
+    "                                   exclusions / triggers, NBA model joins.\n"
+    "                                   DNC flags belong exclusively in Step 6 — never here.\n"
+    "  Step 6 — Channel Governance    : dedicated exclusively to communication preference\n"
+    "                                   and DNC flag isolation. Four team-governed outbound\n"
+    "                                   channels tracked via INT64 flags (0=Allowed,\n"
+    "                                   1=Suppressed): em_dnc (Email), sms_dnc (SMS),\n"
+    "                                   ob_dnc (Outbound Dialing), dm_dnc (Direct Mail).\n"
+    "                                   CHANNEL EXCLUSIVITY SIEVE: when a request specifies\n"
+    "                                   that an audience is 'only', 'exclusively', or 'solely'\n"
+    "                                   eligible for a particular channel or combination:\n"
+    "                                     Named channels   : set their DNC flag = 0\n"
+    "                                     Unnamed channels : force their DNC flag = 1\n"
+    "                                   Example 'only eligible to receive SMS':\n"
+    "                                     sms_dnc = 0 AND em_dnc = 1 AND ob_dnc = 1 AND dm_dnc = 1\n"
+    "                                   Example 'only eligible for email and SMS':\n"
+    "                                     em_dnc = 0 AND sms_dnc = 0 AND ob_dnc = 1 AND dm_dnc = 1\n"
+    "                                   If no channel exclusivity is specified, apply only the\n"
+    "                                   DNC constraints explicitly stated in the request.\n"
+    "  Step 7 — Universal Control Group : adds control_group_flg = 'N' — MUST be the\n"
     "                                    absolute last CTE layer, never moved or merged\n"
     "                                    upward; this step yields the final targetable\n"
     "                                    list volume\n\n"
@@ -185,18 +202,24 @@ _QUANT_SYSTEM = (
     "- Size audiences using COUNT(DISTINCT ban) — no other sizing aggregate\n"
     "- Always return exactly two output columns: layer_name STRING, audience_count INT64\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
-    "- Six-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
+    "- Seven-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
     "    CTE 1 'Base Universe'              : LOB filter only (UPPER(lob_desc) IN (...))\n"
     "    CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1\n"
     "    CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'\n"
     "    CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0\n"
     "    CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom\n"
     "                                         parameters — service exclusions, province filters,\n"
-    "                                         behavioral metrics, lifecycle windows, DNC flags,\n"
-    "                                         cross-sell pairs, model scores; AAL behavioral\n"
-    "                                         self-join or NBA model join lives here\n"
-    "    CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — always last\n"
-    "- control_group_flg = 'N' must appear ONLY in CTE 6 and nowhere above it\n"
+    "                                         behavioral metrics, lifecycle windows, cross-sell\n"
+    "                                         pairs, model scores; AAL behavioral self-join or\n"
+    "                                         NBA model join lives here. DNC flags must NOT\n"
+    "                                         appear here — they belong exclusively in CTE 6.\n"
+    "    CTE 6 'After: Channel Governance'  : cumulative + DNC flag logic only.\n"
+    "                                         Apply channel exclusivity sieve when 'only',\n"
+    "                                         'exclusively', or 'solely' pairs with a channel:\n"
+    "                                         named channels = 0, all unnamed channels = 1.\n"
+    "                                         Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.\n"
+    "    CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — always last\n"
+    "- control_group_flg = 'N' must appear ONLY in CTE 7 and nowhere above it\n"
     "- Do not reference columns absent from the confirmed schema above\n"
     "- Use Standard SQL syntax; backtick-quote all table refs as `project.dataset.table`\n"
     "- Return ONLY the raw SQL — no markdown, no explanation, no trailing semicolon\n"
@@ -237,7 +260,7 @@ BQ Dataset : {bq_dataset}
 Available schema:
 {schema_context}
 
-Waterfall structure required — six mandatory layers in this exact sequence:
+Waterfall structure required — seven mandatory layers in this exact sequence:
   CTE 1 'Base Universe'              : LOB filter only — UPPER(lob_desc) IN (...)
   CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
   CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
@@ -245,15 +268,21 @@ Waterfall structure required — six mandatory layers in this exact sequence:
   CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom parameters
                                        from Filters and Exclusions above — service exclusions,
                                        province filters, behavioral metrics, lifecycle windows,
-                                       DNC flags, cross-sell pairs, model scores; for AAL
-                                       use cases apply the behavioral self-join rule
+                                       cross-sell pairs, model scores; for AAL use cases
+                                       apply the behavioral self-join rule
                                        (init_activation_date + lookback window) or the
                                        predictive NBA model join (predict_modl_id = 2008,
-                                       classn_nm = 'ADD_A_LINE') per the system rules
-  CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
+                                       classn_nm = 'ADD_A_LINE') per the system rules.
+                                       DNC flags must NOT appear here.
+  CTE 6 'After: Channel Governance'  : cumulative + DNC flag constraints only.
+                                       Apply channel exclusivity sieve when 'only',
+                                       'exclusively', or 'solely' pairs with a channel:
+                                       named channels = 0, all unnamed channels = 1.
+                                       Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.
+  CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
-control_group_flg = 'N' must NOT appear in any CTE above CTE 6.
+control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 
 Constraints:
 - Never SELECT any customer identifier values in output — only aggregate counts
@@ -269,7 +298,7 @@ The first character must be 'W' (WITH). Any explanatory text causes a pipeline p
 _EXTREME_DROP = 0.60
 _HIGH_SCRUB_RATE = 0.80
 
-# Canonical six-step display order.  _parse_waterfall sorts by position in this
+# Canonical seven-step display order.  _parse_waterfall sorts by position in this
 # list so the waterfall is always chronological regardless of BQ row return order.
 _WATERFALL_STEP_ORDER = [
     "Base Universe",
@@ -277,6 +306,7 @@ _WATERFALL_STEP_ORDER = [
     "After: Standard Exclusions",
     "After: Stop Sell",
     "After: Targeting Criteria",
+    "After: Channel Governance",
     "After: Universal Control Group",
 ]
 
@@ -290,23 +320,29 @@ BQ Dataset : {bq_dataset}
 Available schema:
 {schema_context}
 
-Waterfall structure required — six mandatory layers in this exact sequence:
+Waterfall structure required — seven mandatory layers in this exact sequence:
   CTE 1 'Base Universe'              : LOB filter only — UPPER(lob_desc) IN (...)
   CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
   CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
   CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
   CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom parameters
                                        from the Filters list — service exclusions, province
-                                       filters, behavioral metrics, lifecycle windows, DNC
-                                       flags, cross-sell pairs, model scores; for AAL use
-                                       cases apply the behavioral self-join rule
+                                       filters, behavioral metrics, lifecycle windows,
+                                       cross-sell pairs, model scores; for AAL use cases
+                                       apply the behavioral self-join rule
                                        (init_activation_date + lookback window) or the
                                        predictive NBA model join (predict_modl_id = 2008,
-                                       classn_nm = 'ADD_A_LINE') per the system rules
-  CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
+                                       classn_nm = 'ADD_A_LINE') per the system rules.
+                                       DNC flags must NOT appear here.
+  CTE 6 'After: Channel Governance'  : cumulative + DNC flag constraints only.
+                                       Apply channel exclusivity sieve when 'only',
+                                       'exclusively', or 'solely' pairs with a channel:
+                                       named channels = 0, all unnamed channels = 1.
+                                       Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.
+  CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
-control_group_flg = 'N' must NOT appear in any CTE above CTE 6.
+control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 Apply filters cumulatively — each CTE re-applies all prior WHERE conditions plus the new one.
 Use ONLY the filter criteria listed above.
 
@@ -374,7 +410,7 @@ class QuantAgent:
             )
 
     def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
-        """Path 2 — execute a six-step waterfall count query for an ad-hoc sizing request."""
+        """Path 2 — execute a seven-step waterfall count query for an ad-hoc sizing request."""
         print("[QUANT AGENT] -> Strategizing SQL translation and BigQuery optimization...")
         print("  Constructing multi-stage sequential CTE blocks. Injecting optimized partition")
         print("  filters for Model tables and applying baseline marketing exclusions...\n")
@@ -599,7 +635,7 @@ def _waterfall_step_index(name: str) -> int:
 
 
 def _final_audience_count(waterfall: list[WaterfallLayer]) -> int:
-    """Return the count from the Universal Control Group step (Step 6).
+    """Return the count from the Universal Control Group step (Step 7).
 
     Falls back to the last layer in the sorted waterfall if the canonical name
     is not found, so behaviour degrades gracefully if the model emits a
@@ -702,10 +738,10 @@ def _validate_sql_structure(sql: str) -> None:
         )
 
     union_count = len(re.findall(r"\bUNION\s+ALL\b", sql, re.IGNORECASE))
-    if union_count < 5:
+    if union_count < 6:
         raise ValueError(
-            f"Generated SQL contains {union_count} UNION ALL clause(s); a 6-step "
-            "waterfall requires exactly 5. The query appears truncated — "
+            f"Generated SQL contains {union_count} UNION ALL clause(s); a 7-step "
+            "waterfall requires exactly 6. The query appears truncated — "
             "increase max_tokens."
         )
 
