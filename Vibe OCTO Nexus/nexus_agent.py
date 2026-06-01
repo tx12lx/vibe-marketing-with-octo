@@ -252,35 +252,38 @@ or:
 }}"""
 
 
-_DEPLOYMENT_ANALYSIS_PROMPT = """You are analyzing {n} deployment record(s) for the same campaign retrieved from a Canadian
-telecom marketing data store. Each record represents a distinct list pull or execution run.
-Records sharing the same camp_id / sub_camp_id may nonetheless reflect evolving targeting
-cohorts — shifts in propensity tier access, geographic scope, lifecycle window boundaries,
-product eligibility criteria, or seasonal behavioral exclusions. The databrief_link column
-identifies the source brief document for each run's full targeting ruleset.
+_DEPLOYMENT_ANALYSIS_PROMPT = """You are analyzing {n} deployment record(s) for the AAL Monthly Email (EM) campaign retrieved from a Canadian
+telecom marketing data store. Each record represents a distinct list pull or execution run of the
+monthly email send (camp_id = 'AAL', sub_camp_id = 'AALBAU', medium = 'EM'). Records may reflect
+evolving email targeting cohorts — shifts in NBA propensity tier access, geographic scope, lifecycle
+window boundaries, product eligibility criteria, or behavioral exclusion rules. The databrief_link
+column identifies the source brief document for each run's full targeting ruleset.
 
 Deployment Records (sorted most-recent first):
 {deployments_json}
 
 Tasks:
-1. SCAN for divergence across deployments — examine cadence, medium, product focus, and
-   campaign_purpose language for signals of targeting evolution. Reference databrief_link
-   values as the source documentation for each run's complete parameter set.
-2. SYNTHESIZE a strategic summary: explain concisely WHY these variations exist and what
-   campaign evolution they represent. Be specific — name the actual parameter shifts
-   (e.g. "widened NBA decile access from reco_1-5 to reco_1-6", "narrowed to BC/AB only"),
-   not vague observations. If only one deployment is present, describe its strategic intent.
+1. SCAN for divergence across deployments — examine propensity tier access, province scope,
+   lifecycle windows, and eligibility criteria for signals of targeting evolution specific to
+   the email channel. Reference databrief_link values as the source documentation for each
+   run's complete parameter set.
+2. SYNTHESIZE a strategic summary focused exclusively on the monthly email deployment:
+   identify the target audience (LOB, lifecycle stage, propensity tier or behavioral trigger),
+   explain what the email send is designed to achieve, and name any concrete parameter shifts
+   (e.g. "widened NBA decile access from reco_1-5 to reco_1-6", "narrowed to BC/AB only").
+   If only one deployment is present, describe its email send logic and audience intent.
 3. SELECT the target deployment: the most recent record (first in the list).
 4. COMPILE explicit instructions: extract the target deployment's full parameter set into
    BQ-interpretable filter strings that Quant can directly assemble into a 7-stage waterfall
-   CTE. Be precise — include lob_desc values, propensity model IDs, province codes,
-   lifecycle windows, DNC flags, and eligibility pairs where relevant.
+   CTE for the email channel. Be precise — include lob_desc values, propensity model IDs,
+   province codes, lifecycle windows, em_dnc = 0 channel governance, and eligibility pairs
+   where relevant.
 
 Return exactly this JSON (no markdown, no explanation):
 {{
-  "strategy_summary": "<2-4 sentences: the campaign's structural evolution and the strategic rationale behind the most recent deployment's targeting approach>",
+  "strategy_summary": "<2-4 sentences: identify the target audience of this AAL Monthly Email deployment (LOB, lifecycle stage, propensity tier or behavioral trigger), describe the core logic and business objective of the email send, and explain the strategic rationale behind the most recent deployment's targeting approach. Close with the key Quant instruction needed to trigger the 7-stage waterfall correctly.>",
   "deployment_deltas": [
-    "<concrete delta — e.g. 'Nov deployment expanded NBA decile access from reco_1-5 to reco_1-6 to widen the addressable pool'>",
+    "<concrete delta specific to the email channel — e.g. 'Nov deployment expanded NBA decile access from reco_1-5 to reco_1-6 to widen the addressable email pool'>",
     "<another specific parameter shift, or omit if only one deployment>"
   ],
   "target_deployment": {{
@@ -288,15 +291,15 @@ Return exactly this JSON (no markdown, no explanation):
     "campaign_code": "<code>",
     "campaign_sub_code": "<sub_code>",
     "cadence": "<cadence>",
-    "medium": "<medium>",
+    "medium": "EM",
     "campaign_purpose": "<purpose>",
     "primary_products": "<products>"
   }},
   "compiled_instructions": {{
-    "target_population": "<precise plain-English description of who qualifies in the target deployment>",
-    "filters": ["<explicit BQ-interpretable filter criterion derived from this deployment>"],
-    "exclusion_layers": ["<explicit exclusion layer>"],
-    "optimization_context": "<one sentence: strategic context for the Quant audit reflecting this deployment's specific targeting approach>"
+    "target_population": "<precise plain-English description of who qualifies for the email send — include LOB, lifecycle stage, propensity tier or behavioral criteria, and confirm em_dnc eligibility>",
+    "filters": ["<explicit BQ-interpretable filter criterion for this email deployment>"],
+    "exclusion_layers": ["<explicit exclusion layer — e.g. em_dnc = 0 for email channel eligibility>"],
+    "optimization_context": "<one sentence: strategic context for the Quant audit reflecting this monthly email deployment's specific targeting approach and audience scope>"
   }}
 }}"""
 
@@ -550,9 +553,6 @@ class NexusAgent:
         if not campaign_hint:
             return None
 
-        hint_words = [w for w in campaign_hint.upper().split() if len(w) > 2]
-        search_term = f"%{hint_words[0]}%" if hint_words else f"%{campaign_hint.upper()}%"
-
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -561,29 +561,25 @@ class NexusAgent:
             client = bigquery.Client(project=self._bq_project)
             query_str = f"""
             SELECT
-                campaign      AS campaign_name,
-                camp_id       AS campaign_code,
-                sub_camp_id   AS campaign_sub_code,
-                cadence,
+                campaign        AS campaign_name,
+                camp_id         AS campaign_code,
+                sub_camp_id     AS campaign_sub_code,
                 medium,
+                cadence,
                 campaign_purpose,
                 primary_products,
                 databrief_link,
                 list_pull_date
             FROM `{self._bq_table}`
-            WHERE current_ind  = 1
-              AND closed_ind   = 0
-              AND UPPER(target_base) <> 'EPP'
-              AND UPPER(campaign) LIKE @search_term
+            WHERE current_ind   = 1
+              AND closed_ind    = 0
+              AND camp_id       = 'AAL'
+              AND sub_camp_id   = 'AALBAU'
+              AND UPPER(medium) = 'EM'
             ORDER BY list_pull_date DESC
             LIMIT 5
             """
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("search_term", "STRING", search_term)
-                ]
-            )
-            rows = [dict(r) for r in client.query(query_str, job_config=job_config).result()]
+            rows = [dict(r) for r in client.query(query_str).result()]
             if rows:
                 return {"deployments": rows}
         except Exception:
