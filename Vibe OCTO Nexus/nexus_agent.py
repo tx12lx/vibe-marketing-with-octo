@@ -210,6 +210,37 @@ If no valid correction can be determined, return exactly: {{"correctable": false
 
 Return the corrected JSON only — no markdown, no explanation."""
 
+_INTENT_CLASSIFY_PROMPT = """\
+A consultant submitted the following request to a Canadian telecom marketing AI:
+  "{query}"
+
+Classify this into exactly one of two workflows:
+
+WORKFLOW_A — Ad-Hoc Exploratory Request
+  A standalone count or audience question referencing a described segment with no
+  reference to a specific named campaign. The user wants a quick size of a custom slice.
+  Examples: "How many customers in AB or BC?",
+            "Count postpaid subscribers with SHS eligible",
+            "How many Koodo prepaid customers are MTM?"
+
+WORKFLOW_B — Structured Campaign Execution Request
+  The user wants to size or execute a specific named campaign. The request references
+  a known campaign label, campaign code, or product-channel-cadence combination.
+  Examples: "Size the AAL monthly email campaign",
+            "Run the Koodo winback outbound brief",
+            "Execute the AAL voice analytics weekly"
+
+Return exactly this JSON — no markdown, no explanation:
+{{
+  "workflow": "WORKFLOW_A",
+  "campaign_hint": null
+}}
+or:
+{{
+  "workflow": "WORKFLOW_B",
+  "campaign_hint": "<campaign name or label extracted from the request>"
+}}"""
+
 
 class NexusAgent:
     def __init__(self) -> None:
@@ -223,13 +254,7 @@ class NexusAgent:
             f"{self._bq_project}.campaign_data.bq_plan_camp_deploy_mdc",
         )
         self._taxonomy: dict = {}
-
-        print("  [Nexus] Loading 5 campaign briefs...")
-        self.briefs: list[dict] = self._load_taxonomy_briefs()
-
-        print(f"  [Nexus] Building taxonomy from {len(self.briefs)} brief(s)...")
-        self._taxonomy = self._build_taxonomy()
-        print("  [Nexus] Taxonomy matrix ready. Prompt cache armed.")
+        self.briefs: list[dict] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -257,6 +282,35 @@ class NexusAgent:
             print(f"\n  [Nexus Strategy]\n  {thin}")
             print(f"  {request.optimization_context}\n")
         return request
+
+    def classify_and_route(self, query: str) -> tuple[str, "dict | None"]:
+        """Classify user intent and return (workflow, payload).
+
+        Returns ("WORKFLOW_A", None) for ad-hoc exploratory queries.
+        Returns ("WORKFLOW_B", brief_dict) for named campaign execution requests,
+        or falls back to ("WORKFLOW_A", None) if no matching campaign is located.
+        """
+        try:
+            raw = self._call_simple(_INTENT_CLASSIFY_PROMPT.format(query=query))
+            data = self._extract_json(raw)
+        except Exception as exc:
+            print(f"  [Nexus] Intent classification error ({exc.__class__.__name__}) — routing as ad-hoc.\n")
+            return "WORKFLOW_A", None
+
+        workflow = data.get("workflow", "WORKFLOW_A")
+
+        if workflow == "WORKFLOW_B":
+            campaign_hint = (data.get("campaign_hint") or "").strip()
+            print(f"  Recognized WORKFLOW B: Structured Campaign Execution Request.")
+            print(f"  Searching for campaign: '{campaign_hint}'...\n")
+            brief = self._find_brief_for_campaign(campaign_hint)
+            if brief:
+                return "WORKFLOW_B", brief
+            print(f"  [Nexus] No matching campaign found for '{campaign_hint}' — routing as ad-hoc.\n")
+            return "WORKFLOW_A", None
+
+        print("  Recognized WORKFLOW A: Ad-Hoc Exploratory Request.\n")
+        return "WORKFLOW_A", None
 
     def route_with_retry(
         self,
@@ -337,6 +391,51 @@ class NexusAgent:
             except Exception:
                 continue
         return out[:5]
+
+    def _find_brief_for_campaign(self, campaign_hint: str) -> "dict | None":
+        """Query BQ on-demand for the most recent campaign matching the hint string."""
+        if not campaign_hint:
+            return None
+
+        hint_words = [w for w in campaign_hint.upper().split() if len(w) > 2]
+        search_term = f"%{hint_words[0]}%" if hint_words else f"%{campaign_hint.upper()}%"
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                from google.cloud import bigquery  # type: ignore
+
+            client = bigquery.Client(project=self._bq_project)
+            query_str = f"""
+            SELECT DISTINCT
+                campaign      AS campaign_name,
+                camp_id       AS campaign_code,
+                sub_camp_id   AS campaign_sub_code,
+                cadence,
+                medium,
+                campaign_purpose,
+                primary_products
+            FROM `{self._bq_table}`
+            WHERE current_ind  = 1
+              AND closed_ind   = 0
+              AND UPPER(target_base) <> 'EPP'
+              AND UPPER(campaign) LIKE @search_term
+            ORDER BY list_pull_date DESC
+            LIMIT 1
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("search_term", "STRING", search_term)
+                ]
+            )
+            rows = [dict(r) for r in client.query(query_str, job_config=job_config).result()]
+            if rows:
+                return rows[0]
+            print(f"  [Nexus] BQ returned no match for '{campaign_hint}'.")
+        except Exception as exc:
+            print(f"  [Nexus] BQ campaign lookup unavailable ({exc.__class__.__name__}).")
+
+        return None
 
     # ------------------------------------------------------------------
     # Taxonomy build — one-time, no caching needed

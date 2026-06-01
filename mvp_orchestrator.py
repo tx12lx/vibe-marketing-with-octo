@@ -3,26 +3,16 @@ mvp_orchestrator.py — Vibe Marketing with OCTO
 Central decoupled router.
 
 Design principle: this file is the only wiring layer. It knows which agents
-exist and which mode maps to which agent method — nothing else. Agent cores
+exist and which workflow maps to which agent method — nothing else. Agent cores
 are fully independent and test in isolation.
 
 Scaling to new agents requires only two changes here:
   1. Import the new agent class.
   2. Add it to _AGENT_REGISTRY.
 Zero changes to Nexus, Quant, or pydantic_schemas.
-
-To add Vibe OCTO Strategist (telecom standards benchmarking):
-  from strategist_agent import StrategistAgent
-  _AGENT_REGISTRY["strategist"] = StrategistAgent
-
-To scale to RAG pattern across 1,000+ briefs:
-  from nexus_rag_agent import NexusRAGAgent
-  _AGENT_REGISTRY["nexus"] = NexusRAGAgent
 """
 from __future__ import annotations
 
-import contextlib
-import io
 import logging
 import os
 import sys
@@ -47,12 +37,8 @@ for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR)]:
 
 from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
-from pydantic_schemas import NexusErrorPayload, QuantAuditLog  # noqa: E402
+from pydantic_schemas import QuantAuditLog  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Boot cleanliness — suppress Google Cloud auth / quota noise before any
-# agent code imports google.auth or google.cloud at initialisation time.
-# ---------------------------------------------------------------------------
 
 def _silence_google_noise() -> None:
     """Mute Google Cloud SDK and urllib3 log chatter below ERROR level."""
@@ -67,7 +53,6 @@ def _silence_google_noise() -> None:
 
 # ---------------------------------------------------------------------------
 # Agent registry — the ONLY place agent classes are registered.
-# Adding a new agent here is sufficient; no downstream code changes needed.
 # ---------------------------------------------------------------------------
 _AGENT_REGISTRY: dict[str, type] = {
     "nexus": NexusAgent,
@@ -76,38 +61,25 @@ _AGENT_REGISTRY: dict[str, type] = {
 
 
 # ---------------------------------------------------------------------------
-# Router — stateless, mode-dispatch only
+# Router — stateless, workflow-dispatch only
 # ---------------------------------------------------------------------------
 
 def route(
     nexus: NexusAgent,
     quant: QuantAgent,
-    mode: str,
+    workflow: str,
     payload: dict,
 ) -> Optional[QuantAuditLog]:
-    """Dispatch a request to the correct pipeline branch.
+    """Dispatch a classified request to the correct pipeline branch.
 
-    mode 'size_campaign' : Path 1 — automated sizing from a pre-loaded brief.
-                           Runs the full waterfall audit with one correction retry.
-    mode 'nl_query'      : Path 2 — natural language audience description.
-                           Bypasses the audit loop; executes a direct single-row count.
+    workflow 'WORKFLOW_A': Ad-Hoc Exploratory Request — natural language audience
+                           sizing. Runs a direct single-row count via Quant.
 
-    Adding a new mode (e.g. 'strategist_benchmark') requires adding one elif
-    here and a corresponding method on the relevant agent — nothing else.
+    workflow 'WORKFLOW_B': Structured Campaign Execution Request — named campaign
+                           brief. Builds a validated AudienceSizingRequest and runs
+                           the full waterfall audit with one correction retry.
     """
-    if mode == "size_campaign":
-        print("\n[NEXUS AGENT] -> Analyzing intent...")
-        print("  Recognized campaign brief sizing request. Extracting targeting parameters,")
-        print("  filter layers, and exclusion rules...\n")
-        request = nexus.build_sizing_request_from_brief(payload)
-        if request is None:
-            return None
-        return nexus.route_with_retry(request, quant)
-
-    elif mode == "nl_query":
-        print("\n[NEXUS AGENT] -> Analyzing intent...")
-        print("  Recognized ad hoc sizing request. Extracting parameters, filters, and")
-        print("  cross-entity exclusions...\n")
+    if workflow == "WORKFLOW_A":
         request = nexus.build_sizing_request_from_nl(payload["query"])
         if request is None:
             return None
@@ -117,8 +89,14 @@ def route(
         print(f"\n  [ERROR]: {result.error_summary}")
         return None
 
+    elif workflow == "WORKFLOW_B":
+        request = nexus.build_sizing_request_from_brief(payload)
+        if request is None:
+            return None
+        return nexus.route_with_retry(request, quant)
+
     else:
-        print(f"\n[ERROR]: Unknown routing mode '{mode}'")
+        print(f"\n[ERROR]: Unknown workflow '{workflow}'")
         return None
 
 
@@ -172,68 +150,28 @@ def _format_audit_log(log: QuantAuditLog) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Interactive console
+# Interactive console — dual-intent engine
 # ---------------------------------------------------------------------------
 
 def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
     while True:
         print("  How can the OCTO team help you today?\n")
-        print("  [1] Size Campaign      — automated sizing from pre-loaded briefs")
-        print("  [2] Natural Language   — describe your audience in plain English")
-        print("  [q] Quit")
-
-        choice = input("\n  Select: ").strip().lower()
+        query = input("  > ").strip()
         print()
 
-        if choice == "q":
+        if not query:
+            continue
+
+        if query.lower() in ("q", "quit", "exit"):
             print("  Session closed.\n")
             break
 
-        elif choice == "1":
-            # ------------------------------------------------------------------
-            # Path 1 — Size Campaign
-            # ------------------------------------------------------------------
-            if not nexus.briefs:
-                print("  No briefs loaded. Check BQ connectivity or local glossary.\n")
-                continue
-
-            print("  Pre-loaded Campaigns")
-            print("  " + "-" * 62)
-            for i, brief in enumerate(nexus.briefs, 1):
-                name = brief.get("campaign_name", "?")
-                code = brief.get("campaign_code", "?")
-                cadence = brief.get("cadence", "?") or "—"
-                medium = brief.get("medium", "?") or "—"
-                print(f"  [{i}] {name:<32} {code:<14} {cadence:<10} {medium}")
-            print()
-
-            sel = input("  Select campaign number: ").strip()
-            try:
-                selected = nexus.briefs[int(sel) - 1]
-            except (ValueError, IndexError):
-                print("  Invalid selection.\n")
-                continue
-
-            print(f"\n  Sizing '{selected.get('campaign_name', '?')}' ...\n")
-            log = route(nexus, quant, "size_campaign", selected)
-            if log:
-                print(_format_audit_log(log))
-
-        elif choice == "2":
-            # ------------------------------------------------------------------
-            # Path 2 — Natural Language Query
-            # ------------------------------------------------------------------
-            query = input("  Describe your audience: ").strip()
-            if not query:
-                print()
-                continue
-            print("\n  Processing with Nexus ...\n")
-            log = route(nexus, quant, "nl_query", {"query": query})
-            if log:
-                print(_format_audit_log(log))
-
-        else:
-            print("  Invalid selection. Enter 1, 2, or q.\n")
+        print("  [NEXUS AGENT] -> Analyzing intent...\n")
+        workflow, payload = nexus.classify_and_route(query)
+        log = route(nexus, quant, workflow, payload if payload is not None else {"query": query})
+        if log:
+            print(_format_audit_log(log))
+        print()
 
 
 # ---------------------------------------------------------------------------
@@ -243,10 +181,8 @@ def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
 def main() -> None:
     _silence_google_noise()
     os.system("cls" if os.name == "nt" else "clear")
-    _init_buf = io.StringIO()
-    with contextlib.redirect_stderr(_init_buf), contextlib.redirect_stdout(_init_buf):
-        nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
-        quant: QuantAgent = _AGENT_REGISTRY["quant"]()
+    nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
+    quant: QuantAgent = _AGENT_REGISTRY["quant"]()
     _run_console(nexus, quant)
 
 
