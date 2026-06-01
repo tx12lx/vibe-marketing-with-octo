@@ -216,25 +216,36 @@ _INTENT_CLASSIFY_PROMPT = """\
 A consultant submitted the following request to a Canadian telecom marketing AI:
   "{query}"
 
-Classify this into exactly one of two workflows using the rules below.
-Apply the WORKFLOW_A hard-routing rule first — if it matches, stop and return WORKFLOW_A
-without considering WORKFLOW_B.
+Classify this into exactly one of two workflows using the priority rules below.
+Evaluate each priority in order and stop at the first match.
 
-HARD RULE — WORKFLOW_A: Ad-Hoc Exploratory Request
-  If the request is phrased as a metric or probing question — i.e. it opens with or is
-  semantically equivalent to "How many...", "Count...", "What is the size of...",
-  "Give me a count of...", or any other interrogative asking for a number — classify
-  immediately as WORKFLOW_A. Do NOT trigger a campaign playbook lookup for these.
+PRIORITY 1 — CAMPAIGN CODE OVERRIDE (absolute priority — evaluate before all other rules):
+  If the request explicitly names a corporate campaign code or sub-campaign code
+  — including 'AAL', 'AALBAU', or any other recognized campaign identifier —
+  classify immediately as WORKFLOW_B. This overrides ALL other rules without exception,
+  including interrogative phrasing such as "What's the size of...", "How many...", or
+  "Count...". A named campaign code is always a Structured Campaign Execution Request,
+  regardless of how the question is framed.
+  Examples: "What's the size of the AALBAU campaign?",
+            "How many subscribers are in the AAL monthly email?",
+            "Show me the AAL audience count",
+            "Pull the AALBAU playbook"
+
+PRIORITY 2 — WORKFLOW_A: Ad-Hoc Exploratory Request (apply only if Priority 1 did not match):
+  If the request is phrased as a metric or probing question with NO named campaign code
+  — i.e. it opens with or is semantically equivalent to "How many...", "Count...",
+  "What is the size of...", "Give me a count of...", or any other interrogative asking
+  for a number against a generic audience description — classify as WORKFLOW_A.
+  Do NOT trigger a campaign playbook lookup for these.
   Examples: "How many customers in AB or BC?",
             "Count postpaid subscribers with SHS eligible",
             "How many Koodo prepaid customers are MTM?",
             "What is the size of the TELUS postpaid base?"
 
-WORKFLOW_B — Structured Campaign Execution Request
-  Use ONLY when the consultant explicitly orders campaign setup or execution using
+WORKFLOW_B — Structured Campaign Execution Request:
+  All requests that name a specific campaign code (reached via Priority 1), or that use
   action verbs such as "Size the...", "Run...", "Execute...", "Set up...", or
-  "Pull the playbook for...". The request must name a specific campaign, brief, or
-  recognised campaign label.
+  "Pull the playbook for..." targeting a named campaign.
   Examples: "Size the AAL monthly email campaign",
             "Run the Koodo winback outbound brief",
             "Execute the AAL voice analytics weekly",
@@ -279,12 +290,15 @@ Tasks:
    province codes, lifecycle windows, em_dnc = 0 channel governance, and eligibility pairs
    where relevant.
 
-Return exactly this JSON (no markdown, no explanation):
+Return exactly this JSON (no markdown, no explanation). deployment_deltas must contain at most 3 entries;
+each entry must be a single concise line focused on measurable data changes (date-run differences,
+channel variations, decile-range shifts) — no narrative paragraphs or parenthetical notes.
 {{
   "strategy_summary": "<2-4 sentences: identify the target audience of this AAL Monthly Email deployment (LOB, lifecycle stage, propensity tier or behavioral trigger), describe the core logic and business objective of the email send, and explain the strategic rationale behind the most recent deployment's targeting approach. Close with the key Quant instruction needed to trigger the 7-stage waterfall correctly.>",
   "deployment_deltas": [
-    "<concrete delta specific to the email channel — e.g. 'Nov deployment expanded NBA decile access from reco_1-5 to reco_1-6 to widen the addressable email pool'>",
-    "<another specific parameter shift, or omit if only one deployment>"
+    "<single-line data delta — e.g. 'Nov vs Oct: NBA decile access expanded reco_1-5 to reco_1-6'>",
+    "<single-line channel or date-run variation, or omit if only one deployment>",
+    "<third single-line delta if present, otherwise omit>"
   ],
   "target_deployment": {{
     "campaign_name": "<name>",
@@ -435,7 +449,7 @@ class NexusAgent:
             thin = "-" * 44
             print(f"  Deployment Variance Detected Across {len(deployments)} Run(s):")
             print(f"  {thin}")
-            for delta in deltas:
+            for delta in deltas[:3]:
                 print(f"    * {delta}")
             print()
 
@@ -762,7 +776,7 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
     m_classn = re.search(r"classn_nm\s*=\s*['\"]([^'\"]+)['\"]", blob, re.IGNORECASE)
     m_modl   = re.search(r"predict_modl_id\s*=\s*(\d+)", blob, re.IGNORECASE)
     if m_classn and m_modl:
-        core_product = f"{m_classn.group(1).upper()} via NBA Model {m_modl.group(1)}"
+        core_product = f"{m_classn.group(1).upper()} (Model {m_modl.group(1)})"
     elif m_classn:
         core_product = m_classn.group(1).upper()
     else:
@@ -792,7 +806,12 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
         segment_parts.append(f"T-{m_renewal.group(1)} Renewal Window")
     elif re.search(r"commit_end_date\s*<\s*CURRENT_DATE", blob, re.IGNORECASE):
         segment_parts.append("Month-to-Month")
-    segment_focus = " + ".join(segment_parts) if segment_parts else "N/A"
+    if segment_parts:
+        segment_focus = " + ".join(segment_parts)
+    elif request.medium.upper().strip() == "EM":
+        segment_focus = "Unified Email Campaign Matrix"
+    else:
+        segment_focus = "N/A"
 
     # Primary Channel Guard — medium label + governing DNC flag
     _medium_labels = {"EM": "Email", "SMS": "SMS", "OB": "Outbound Dialing", "DM": "Direct Mail"}
@@ -833,7 +852,7 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
     )
     if m_aal:
         dynamic_parts.append(
-            f"Retrospective {m_aal.group(1)}-Month Secondary Line Activation Check"
+            f"Exclude secondary line activations within trailing {m_aal.group(1)} months."
         )
     if request.exclusion_layers:
         for excl in request.exclusion_layers:
@@ -841,7 +860,14 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
                 continue
             lower = excl.lower()
             if "dnc" not in lower and "init_activation_date" not in lower:
-                dynamic_parts.append(excl.strip())
+                clean = excl.strip()
+                # Drop raw SQL filter strings (contain BQ operators) — they are not
+                # human-readable labels and bloat the terminal card.
+                if re.search(r"\b(AND|OR)\b|=\s*[01'\"]", clean, re.IGNORECASE):
+                    continue
+                if len(clean) > 100:
+                    clean = clean[:97] + "..."
+                dynamic_parts.append(clean)
     dynamic_exclusions = ", ".join(dynamic_parts) if dynamic_parts else "None"
 
     return {
