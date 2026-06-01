@@ -214,21 +214,29 @@ _INTENT_CLASSIFY_PROMPT = """\
 A consultant submitted the following request to a Canadian telecom marketing AI:
   "{query}"
 
-Classify this into exactly one of two workflows:
+Classify this into exactly one of two workflows using the rules below.
+Apply the WORKFLOW_A hard-routing rule first — if it matches, stop and return WORKFLOW_A
+without considering WORKFLOW_B.
 
-WORKFLOW_A — Ad-Hoc Exploratory Request
-  A standalone count or audience question referencing a described segment with no
-  reference to a specific named campaign. The user wants a quick size of a custom slice.
+HARD RULE — WORKFLOW_A: Ad-Hoc Exploratory Request
+  If the request is phrased as a metric or probing question — i.e. it opens with or is
+  semantically equivalent to "How many...", "Count...", "What is the size of...",
+  "Give me a count of...", or any other interrogative asking for a number — classify
+  immediately as WORKFLOW_A. Do NOT trigger a campaign playbook lookup for these.
   Examples: "How many customers in AB or BC?",
             "Count postpaid subscribers with SHS eligible",
-            "How many Koodo prepaid customers are MTM?"
+            "How many Koodo prepaid customers are MTM?",
+            "What is the size of the TELUS postpaid base?"
 
 WORKFLOW_B — Structured Campaign Execution Request
-  The user wants to size or execute a specific named campaign. The request references
-  a known campaign label, campaign code, or product-channel-cadence combination.
+  Use ONLY when the consultant explicitly orders campaign setup or execution using
+  action verbs such as "Size the...", "Run...", "Execute...", "Set up...", or
+  "Pull the playbook for...". The request must name a specific campaign, brief, or
+  recognised campaign label.
   Examples: "Size the AAL monthly email campaign",
             "Run the Koodo winback outbound brief",
-            "Execute the AAL voice analytics weekly"
+            "Execute the AAL voice analytics weekly",
+            "Pull the playbook for the TELUS AAL internet campaign"
 
 Return exactly this JSON — no markdown, no explanation:
 {{
@@ -293,8 +301,7 @@ class NexusAgent:
         try:
             raw = self._call_simple(_INTENT_CLASSIFY_PROMPT.format(query=query))
             data = self._extract_json(raw)
-        except Exception as exc:
-            print(f"  [Nexus] Intent classification error ({exc.__class__.__name__}) — routing as ad-hoc.\n")
+        except Exception:
             return "WORKFLOW_A", None
 
         workflow = data.get("workflow", "WORKFLOW_A")
@@ -306,7 +313,6 @@ class NexusAgent:
             brief = self._find_brief_for_campaign(campaign_hint)
             if brief:
                 return "WORKFLOW_B", brief
-            print(f"  [Nexus] No matching campaign found for '{campaign_hint}' — routing as ad-hoc.\n")
             return "WORKFLOW_A", None
 
         print("  Recognized WORKFLOW A: Ad-Hoc Exploratory Request.\n")
@@ -431,9 +437,8 @@ class NexusAgent:
             rows = [dict(r) for r in client.query(query_str, job_config=job_config).result()]
             if rows:
                 return rows[0]
-            print(f"  [Nexus] BQ returned no match for '{campaign_hint}'.")
-        except Exception as exc:
-            print(f"  [Nexus] BQ campaign lookup unavailable ({exc.__class__.__name__}).")
+        except Exception:
+            pass
 
         return None
 

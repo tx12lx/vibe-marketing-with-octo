@@ -168,7 +168,7 @@ _QUANT_SYSTEM = (
     "  tiers, or NBA scores.\n"
     "  Fixed identifiers — always use BOTH together, never one alone:\n"
     "    t2.predict_modl_id = 2008\n"
-    "    t2.classn_nm = 'AAD_A_LINE'\n"
+    "    t2.classn_nm = 'ADD_A_LINE'\n"
     "  Default tier filter (top 5 propensity deciles — apply unless user requests more):\n"
     "    t2.seg_nm IN ('reco_1', 'reco_2', 'reco_3', 'reco_4', 'reco_5')\n"
     "  Dynamic scaling — expand ONLY on explicit user instruction; never expand unprompted:\n"
@@ -249,7 +249,7 @@ Waterfall structure required — six mandatory layers in this exact sequence:
                                        use cases apply the behavioral self-join rule
                                        (init_activation_date + lookback window) or the
                                        predictive NBA model join (predict_modl_id = 2008,
-                                       classn_nm = 'AAD_A_LINE') per the system rules
+                                       classn_nm = 'ADD_A_LINE') per the system rules
   CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
@@ -302,7 +302,7 @@ Waterfall structure required — six mandatory layers in this exact sequence:
                                        cases apply the behavioral self-join rule
                                        (init_activation_date + lookback window) or the
                                        predictive NBA model join (predict_modl_id = 2008,
-                                       classn_nm = 'AAD_A_LINE') per the system rules
+                                       classn_nm = 'ADD_A_LINE') per the system rules
   CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
