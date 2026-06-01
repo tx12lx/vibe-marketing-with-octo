@@ -294,7 +294,7 @@ Return exactly this JSON (no markdown, no explanation). deployment_deltas must c
 each entry must be a single concise line focused on measurable data changes (date-run differences,
 channel variations, decile-range shifts) — no narrative paragraphs or parenthetical notes.
 {{
-  "strategy_summary": "<2-4 sentences: identify the target audience of this AAL Monthly Email deployment (LOB, lifecycle stage, propensity tier or behavioral trigger), describe the core logic and business objective of the email send, and explain the strategic rationale behind the most recent deployment's targeting approach. Close with the key Quant instruction needed to trigger the 7-stage waterfall correctly.>",
+  "strategy_summary": "<MAXIMUM 2 SENTENCES, high-level only. Sentence 1: state the deployment type, channel, cadence, and target audience (LOB, lifecycle stage, propensity tier or behavioral trigger). Sentence 2: state the business objective and any cohort consolidation logic (e.g. re-unifying prior variant splits). Do NOT include Quant instructions, waterfall details, SQL references, or technical filter parameters.>",
   "deployment_deltas": [
     "<single-line data delta — e.g. 'Nov vs Oct: NBA decile access expanded reco_1-5 to reco_1-6'>",
     "<single-line channel or date-run variation, or omit if only one deployment>",
@@ -774,6 +774,9 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
 
     # Core Product — NBA model classn_nm + predict_modl_id
     m_classn = re.search(r"classn_nm\s*=\s*['\"]([^'\"]+)['\"]", blob, re.IGNORECASE)
+    if not m_classn:
+        # Fallback: unquoted value (e.g. classn_nm = ADD_A_LINE)
+        m_classn = re.search(r"classn_nm\s*=\s*([A-Z][A-Z_0-9]+)", blob, re.IGNORECASE)
     m_modl   = re.search(r"predict_modl_id\s*=\s*(\d+)", blob, re.IGNORECASE)
     if m_classn and m_modl:
         core_product = f"{m_classn.group(1).upper()} (Model {m_modl.group(1)})"
@@ -782,14 +785,17 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
     else:
         core_product = (request.target_population or "N/A").split(".")[0].strip()
 
-    # Propensity tiers — seg_nm IN ('reco_1', ...)
+    # Propensity tiers — seg_nm IN ('reco_1', ...); fallback: any reco_N reference in blob
     m_seg = re.search(r"seg_nm\s+in\s*\(([^)]+)\)", blob, re.IGNORECASE)
     if m_seg:
         reco_nums = sorted(int(n) for n in re.findall(r"reco_(\d+)", m_seg.group(1), re.IGNORECASE))
+    else:
+        reco_nums = sorted(set(int(n) for n in re.findall(r"reco_(\d+)", blob, re.IGNORECASE)))
+    if reco_nums:
         propensity = (
             f"Deciles {reco_nums[0]}-{reco_nums[-1]} "
             f"(reco_{reco_nums[0]} to reco_{reco_nums[-1]})"
-        ) if reco_nums else "N/A"
+        )
     else:
         propensity = "N/A"
 

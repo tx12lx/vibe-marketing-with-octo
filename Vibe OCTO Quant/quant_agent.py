@@ -611,11 +611,13 @@ def _log_waterfall(waterfall: list[WaterfallLayer]) -> None:
 def _parse_waterfall(rows: list[dict]) -> list[WaterfallLayer]:
     layers: list[WaterfallLayer] = []
     for row in rows:
-        name = str(
+        raw_name = str(
             row.get("layer_name")
             or row.get("LAYER_NAME")
             or ""
         ).strip()
+        # Strip "CTE N:" / "CTE N -" prefix so labels display as clean corporate funnel steps.
+        name = re.sub(r"^CTE\s*\d+\s*[:\-]\s*", "", raw_name, flags=re.IGNORECASE).strip()
         raw_count = row.get("audience_count") or row.get("AUDIENCE_COUNT") or 0
         try:
             count = int(raw_count)
@@ -631,7 +633,13 @@ def _waterfall_step_index(name: str) -> int:
     try:
         return _WATERFALL_STEP_ORDER.index(name)
     except ValueError:
-        return len(_WATERFALL_STEP_ORDER)
+        pass
+    # Fuzzy fallback: match by containment after CTE prefix has been stripped.
+    name_lower = name.lower()
+    for i, canonical in enumerate(_WATERFALL_STEP_ORDER):
+        if canonical.lower() in name_lower:
+            return i
+    return len(_WATERFALL_STEP_ORDER)
 
 
 def _final_audience_count(waterfall: list[WaterfallLayer]) -> int:
