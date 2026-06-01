@@ -439,7 +439,10 @@ class NexusAgent:
                 print(f"    * {delta}")
             print()
 
-        return self._build_sizing_request_from_analysis(analysis)
+        request = self._build_sizing_request_from_analysis(analysis)
+        if request is not None:
+            _print_criteria_block(request)
+        return request
 
     def _analyze_deployment_variance(self, deployments: list[dict]) -> Optional[dict]:
         """Call the LLM to identify cross-deployment deltas and synthesize targeting strategy."""
@@ -748,6 +751,134 @@ class NexusAgent:
         if start != -1 and end > start:
             return json.loads(text[start:end])
         raise ValueError(f"No valid JSON in response. First 300 chars: {text[:300]!r}")
+
+
+def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
+    """Parse a validated AudienceSizingRequest into display-ready targeting fields."""
+    all_filters = list(request.filters or []) + list(request.exclusion_layers or [])
+    blob = " ".join(all_filters)
+
+    # Core Product — NBA model classn_nm + predict_modl_id
+    m_classn = re.search(r"classn_nm\s*=\s*['\"]([^'\"]+)['\"]", blob, re.IGNORECASE)
+    m_modl   = re.search(r"predict_modl_id\s*=\s*(\d+)", blob, re.IGNORECASE)
+    if m_classn and m_modl:
+        core_product = f"{m_classn.group(1).upper()} via NBA Model {m_modl.group(1)}"
+    elif m_classn:
+        core_product = m_classn.group(1).upper()
+    else:
+        core_product = (request.target_population or "N/A").split(".")[0].strip()
+
+    # Propensity tiers — seg_nm IN ('reco_1', ...)
+    m_seg = re.search(r"seg_nm\s+in\s*\(([^)]+)\)", blob, re.IGNORECASE)
+    if m_seg:
+        reco_nums = sorted(int(n) for n in re.findall(r"reco_(\d+)", m_seg.group(1), re.IGNORECASE))
+        propensity = (
+            f"Deciles {reco_nums[0]}-{reco_nums[-1]} "
+            f"(reco_{reco_nums[0]} to reco_{reco_nums[-1]})"
+        ) if reco_nums else "N/A"
+    else:
+        propensity = "N/A"
+
+    # Segment Focus — lifecycle and device financing signals
+    segment_parts: list[str] = []
+    if re.search(r"commit_start_date\s+is\s+null", blob, re.IGNORECASE):
+        segment_parts.append("BYOD")
+    if re.search(r"\bhp_ind\s*=\s*1\b", blob, re.IGNORECASE):
+        segment_parts.append("Hardware Subsidized")
+    m_renewal = re.search(
+        r"commit_end_date\s*<=\s*DATE_ADD.*?INTERVAL\s+(\d+)\s+MONTH", blob, re.IGNORECASE
+    )
+    if m_renewal:
+        segment_parts.append(f"T-{m_renewal.group(1)} Renewal Window")
+    elif re.search(r"commit_end_date\s*<\s*CURRENT_DATE", blob, re.IGNORECASE):
+        segment_parts.append("Month-to-Month")
+    segment_focus = " + ".join(segment_parts) if segment_parts else "N/A"
+
+    # Primary Channel Guard — medium label + governing DNC flag
+    _medium_labels = {"EM": "Email", "SMS": "SMS", "OB": "Outbound Dialing", "DM": "Direct Mail"}
+    channel_label = _medium_labels.get(request.medium.upper().strip(), request.medium)
+    _dnc_col = {"EM": "em_dnc", "SMS": "sms_dnc", "OB": "ob_dnc", "DM": "dm_dnc"}
+    dnc_col = _dnc_col.get(request.medium.upper().strip(), "")
+    if dnc_col and re.search(rf"\b{dnc_col}\s*=\s*0\b", blob, re.IGNORECASE):
+        channel_guard = f"{channel_label} ({dnc_col} = 0)"
+    else:
+        channel_guard = channel_label
+
+    # Exclusivity Sieve — presence and value of all four DNC flags
+    flag_vals: dict[str, str] = {}
+    for flag in ("em_dnc", "sms_dnc", "ob_dnc", "dm_dnc"):
+        m = re.search(rf"\b{flag}\s*=\s*([01])\b", blob, re.IGNORECASE)
+        if m:
+            flag_vals[flag] = m.group(1)
+
+    if flag_vals:
+        allowed    = [f for f, v in flag_vals.items() if v == "0"]
+        suppressed = [f for f, v in flag_vals.items() if v == "1"]
+        if allowed and suppressed:
+            parts = [f"{f} = 0" for f in allowed] + [f"{f} = 1" for f in suppressed]
+            exclusivity_sieve = " & ".join(parts)
+        elif allowed:
+            exclusivity_sieve = " & ".join(f"{f} = 0" for f in allowed)
+        else:
+            exclusivity_sieve = "None"
+    else:
+        exclusivity_sieve = "None"
+
+    # Dynamic Exclusions — behavioral self-join lookback windows and non-DNC exclusion layers
+    dynamic_parts: list[str] = []
+    m_aal = re.search(
+        r"init_activation_date.*?INTERVAL\s+(\d+)\s+MONTH",
+        blob,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_aal:
+        dynamic_parts.append(
+            f"Retrospective {m_aal.group(1)}-Month Secondary Line Activation Check"
+        )
+    if request.exclusion_layers:
+        for excl in request.exclusion_layers:
+            if not excl:
+                continue
+            lower = excl.lower()
+            if "dnc" not in lower and "init_activation_date" not in lower:
+                dynamic_parts.append(excl.strip())
+    dynamic_exclusions = ", ".join(dynamic_parts) if dynamic_parts else "None"
+
+    return {
+        "portfolio":          f"{request.campaign_code} / {request.campaign_sub_code}",
+        "core_product":       core_product,
+        "propensity":         propensity,
+        "segment_focus":      segment_focus,
+        "channel_guard":      channel_guard,
+        "exclusivity_sieve":  exclusivity_sieve,
+        "dynamic_exclusions": dynamic_exclusions,
+    }
+
+
+def _print_criteria_block(request: "AudienceSizingRequest") -> None:
+    """Print the structured Nexus handoff banner before Quant begins SQL generation."""
+    f = _extract_criteria_fields(request)
+    sep  = "=" * 70
+    thin = "-" * 70
+    lw   = 23  # label column width
+    lines = [
+        "",
+        sep,
+        "[NEXUS AGENT] -> FINAL RECOMMENDED TARGETING CRITERIA FOR QUANT SIZE",
+        sep,
+        "",
+        f"  {'Portfolio / Initiative':<{lw}}: {f['portfolio']}",
+        f"  {'Target Core Product':<{lw}}: {f['core_product']}",
+        f"  {'Target Propensity':<{lw}}: {f['propensity']}",
+        f"  {'Segment Focus':<{lw}}: {f['segment_focus']}",
+        f"  {'Primary Channel Guard':<{lw}}: {f['channel_guard']}",
+        f"  {'Exclusivity Sieve':<{lw}}: {f['exclusivity_sieve']}",
+        f"  {'Dynamic Exclusions':<{lw}}: {f['dynamic_exclusions']}",
+        "",
+        thin,
+        "",
+    ]
+    print("\n".join(lines))
 
 
 def _print_terminal_error() -> None:
