@@ -7,8 +7,10 @@ Step 1: On startup, pull 5 campaign briefs from BigQuery (or local glossary
         the top of every subsequent prompt, targeting a ~90% token discount on
         repeated queries.
 
-Step 2: Path 1 — Given a loaded brief dict, resolve it to a validated
-        AudienceSizingRequest for Quant.
+Step 2: Path 1 — Given a loaded brief dict or multi-deployment matrix from
+        BQ, resolve to a validated AudienceSizingRequest for Quant. When
+        multiple deployment records are returned, runs deployment variance
+        analysis and strategy synthesis before compiling Quant instructions.
 
         Path 2 — Parse a natural language phrase, map it against the taxonomy,
         append strategic feedback, and emit a validated AudienceSizingRequest.
@@ -250,6 +252,55 @@ or:
 }}"""
 
 
+_DEPLOYMENT_ANALYSIS_PROMPT = """You are analyzing {n} deployment record(s) for the same campaign retrieved from a Canadian
+telecom marketing data store. Each record represents a distinct list pull or execution run.
+Records sharing the same camp_id / sub_camp_id may nonetheless reflect evolving targeting
+cohorts — shifts in propensity tier access, geographic scope, lifecycle window boundaries,
+product eligibility criteria, or seasonal behavioral exclusions. The databrief_link column
+identifies the source brief document for each run's full targeting ruleset.
+
+Deployment Records (sorted most-recent first):
+{deployments_json}
+
+Tasks:
+1. SCAN for divergence across deployments — examine cadence, medium, product focus, and
+   campaign_purpose language for signals of targeting evolution. Reference databrief_link
+   values as the source documentation for each run's complete parameter set.
+2. SYNTHESIZE a strategic summary: explain concisely WHY these variations exist and what
+   campaign evolution they represent. Be specific — name the actual parameter shifts
+   (e.g. "widened NBA decile access from reco_1-5 to reco_1-6", "narrowed to BC/AB only"),
+   not vague observations. If only one deployment is present, describe its strategic intent.
+3. SELECT the target deployment: the most recent record (first in the list).
+4. COMPILE explicit instructions: extract the target deployment's full parameter set into
+   BQ-interpretable filter strings that Quant can directly assemble into a 7-stage waterfall
+   CTE. Be precise — include lob_desc values, propensity model IDs, province codes,
+   lifecycle windows, DNC flags, and eligibility pairs where relevant.
+
+Return exactly this JSON (no markdown, no explanation):
+{{
+  "strategy_summary": "<2-4 sentences: the campaign's structural evolution and the strategic rationale behind the most recent deployment's targeting approach>",
+  "deployment_deltas": [
+    "<concrete delta — e.g. 'Nov deployment expanded NBA decile access from reco_1-5 to reco_1-6 to widen the addressable pool'>",
+    "<another specific parameter shift, or omit if only one deployment>"
+  ],
+  "target_deployment": {{
+    "campaign_name": "<name>",
+    "campaign_code": "<code>",
+    "campaign_sub_code": "<sub_code>",
+    "cadence": "<cadence>",
+    "medium": "<medium>",
+    "campaign_purpose": "<purpose>",
+    "primary_products": "<products>"
+  }},
+  "compiled_instructions": {{
+    "target_population": "<precise plain-English description of who qualifies in the target deployment>",
+    "filters": ["<explicit BQ-interpretable filter criterion derived from this deployment>"],
+    "exclusion_layers": ["<explicit exclusion layer>"],
+    "optimization_context": "<one sentence: strategic context for the Quant audit reflecting this deployment's specific targeting approach>"
+  }}
+}}"""
+
+
 class NexusAgent:
     def __init__(self) -> None:
         self._api_key = os.getenv("FUELIX_API_KEY")
@@ -269,7 +320,18 @@ class NexusAgent:
     # ------------------------------------------------------------------
 
     def build_sizing_request_from_brief(self, brief: dict) -> Optional[AudienceSizingRequest]:
-        """Path 1 — resolve a loaded campaign brief to a validated sizing request."""
+        """Path 1 — resolve a loaded campaign brief to a validated sizing request.
+
+        If brief contains a 'deployments' key (multi-deployment matrix returned from BQ),
+        runs the deployment variance analysis and strategy synthesis path before building
+        the request. Falls back to single-brief construction for plain dicts (local
+        glossary or legacy callers).
+        """
+        deployments = brief.get("deployments")
+        if deployments:
+            return self._build_from_deployment_matrix(deployments)
+
+        # Single-brief fallback (local glossary or legacy caller)
         prompt = _SIZE_CAMPAIGN_PROMPT.format(
             campaign_name=brief.get("campaign_name", ""),
             campaign_code=brief.get("campaign_code", ""),
@@ -344,6 +406,91 @@ class NexusAgent:
         return None
 
     # ------------------------------------------------------------------
+    # Deployment variance analysis — multi-deployment synthesis (Path 1)
+    # ------------------------------------------------------------------
+
+    def _build_from_deployment_matrix(
+        self, deployments: list[dict]
+    ) -> Optional[AudienceSizingRequest]:
+        """Orchestrate the variance analysis, print strategy headers, build the request."""
+        print(
+            "  [NEXUS AGENT] -> Analyzing deployment variations and "
+            "synthesizing portfolio strategy...\n"
+        )
+
+        analysis = self._analyze_deployment_variance(deployments)
+        if analysis is None:
+            # Analysis failed — fall back to treating the most recent deployment as a plain brief
+            return self.build_sizing_request_from_brief(deployments[0])
+
+        summary = analysis.get("strategy_summary", "")
+        if summary:
+            print(f"  [NEXUS AGENT] -> CAMPAIGN STRATEGY SUMMARY: {summary}\n")
+
+        deltas = [d for d in analysis.get("deployment_deltas", []) if d]
+        if deltas and len(deployments) > 1:
+            thin = "-" * 44
+            print(f"  Deployment Variance Detected Across {len(deployments)} Run(s):")
+            print(f"  {thin}")
+            for delta in deltas:
+                print(f"    * {delta}")
+            print()
+
+        return self._build_sizing_request_from_analysis(analysis)
+
+    def _analyze_deployment_variance(self, deployments: list[dict]) -> Optional[dict]:
+        """Call the LLM to identify cross-deployment deltas and synthesize targeting strategy."""
+        # Convert BQ-native types (datetime.date, Decimal, etc.) to plain strings
+        # so json.dumps does not raise on non-serializable objects.
+        safe = [
+            {k: str(v) if v is not None else "" for k, v in row.items()}
+            for row in deployments
+        ]
+        prompt = _DEPLOYMENT_ANALYSIS_PROMPT.format(
+            n=len(safe),
+            deployments_json=json.dumps(safe, indent=2, ensure_ascii=False),
+        )
+        try:
+            raw = self._call_with_cached_taxonomy(prompt)
+            return self._extract_json(raw)
+        except Exception as exc:
+            print(
+                f"  [Nexus] Deployment analysis warning: {exc.__class__.__name__} "
+                "— falling back to single-brief mode"
+            )
+            return None
+
+    def _build_sizing_request_from_analysis(
+        self, analysis: dict
+    ) -> Optional[AudienceSizingRequest]:
+        """Merge target_deployment + compiled_instructions into a validated AudienceSizingRequest."""
+        target = analysis.get("target_deployment", {})
+        compiled = analysis.get("compiled_instructions", {})
+        try:
+            return AudienceSizingRequest(
+                campaign_name=target.get("campaign_name", ""),
+                campaign_code=target.get("campaign_code", ""),
+                campaign_sub_code=target.get("campaign_sub_code", ""),
+                cadence=target.get("cadence", ""),
+                medium=target.get("medium", ""),
+                target_population=compiled.get("target_population", ""),
+                filters=compiled.get("filters") or [],
+                exclusion_layers=compiled.get("exclusion_layers") or None,
+                optimization_context=compiled.get("optimization_context") or None,
+                bq_project="bi-srv-hsmdet-pr-7b9def",
+                bq_dataset="adobe",
+            )
+        except ValidationError as exc:
+            print(
+                f"  [Nexus] Synthesis payload validation failed "
+                f"({exc.error_count()} field error(s))"
+            )
+            return None
+        except Exception as exc:
+            print(f"  [Nexus] Synthesis build error: {exc.__class__.__name__}: {exc}")
+            return None
+
+    # ------------------------------------------------------------------
     # Brief loading — BQ first, local glossary fallback
     # ------------------------------------------------------------------
 
@@ -413,21 +560,23 @@ class NexusAgent:
 
             client = bigquery.Client(project=self._bq_project)
             query_str = f"""
-            SELECT DISTINCT
+            SELECT
                 campaign      AS campaign_name,
                 camp_id       AS campaign_code,
                 sub_camp_id   AS campaign_sub_code,
                 cadence,
                 medium,
                 campaign_purpose,
-                primary_products
+                primary_products,
+                databrief_link,
+                list_pull_date
             FROM `{self._bq_table}`
             WHERE current_ind  = 1
               AND closed_ind   = 0
               AND UPPER(target_base) <> 'EPP'
               AND UPPER(campaign) LIKE @search_term
             ORDER BY list_pull_date DESC
-            LIMIT 1
+            LIMIT 5
             """
             job_config = bigquery.QueryJobConfig(
                 query_parameters=[
@@ -436,7 +585,7 @@ class NexusAgent:
             )
             rows = [dict(r) for r in client.query(query_str, job_config=job_config).result()]
             if rows:
-                return rows[0]
+                return {"deployments": rows}
         except Exception:
             pass
 
