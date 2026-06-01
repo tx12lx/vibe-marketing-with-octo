@@ -375,13 +375,16 @@ class QuantAgent:
 
     def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
         """Path 2 — execute a six-step waterfall count query for an ad-hoc sizing request."""
+        print("[QUANT AGENT] -> Strategizing SQL translation and BigQuery optimization...")
+        print("  Constructing multi-stage sequential CTE blocks. Injecting optimized partition")
+        print("  filters for Model tables and applying baseline marketing exclusions...\n")
         try:
             schema = self._fetch_schema(request.bq_project, request.bq_dataset)
             sql = self._generate_adhoc_waterfall_sql(request, schema)
+            _print_sql_block(sql)
             raw_rows = self._execute_query(sql, request.bq_project)
             masked_rows = _mask_pii(raw_rows)
             waterfall = _parse_waterfall(masked_rows)
-            _log_waterfall(waterfall)
             note = _optimization_note(waterfall)
             final_count = _final_audience_count(waterfall)
             return QuantAuditLog(
@@ -408,12 +411,15 @@ class QuantAgent:
     # ------------------------------------------------------------------
 
     def _run_audit(self, request: AudienceSizingRequest) -> QuantAuditLog:
+        print("[QUANT AGENT] -> Strategizing SQL translation and BigQuery optimization...")
+        print("  Constructing multi-stage sequential CTE blocks. Injecting optimized partition")
+        print("  filters for Model tables and applying baseline marketing exclusions...\n")
         schema = self._fetch_schema(request.bq_project, request.bq_dataset)
         sql = self._generate_waterfall_sql(request, schema)
+        _print_sql_block(sql)
         raw_rows = self._execute_query(sql, request.bq_project)
         masked_rows = _mask_pii(raw_rows)
         waterfall = _parse_waterfall(masked_rows)
-        _log_waterfall(waterfall)
         note = _optimization_note(waterfall)
         final_count = _final_audience_count(waterfall)
 
@@ -543,6 +549,15 @@ def _mask_pii(rows: list[dict]) -> list[dict]:
             masked[k] = "***" if _is_filter_only_pii(k) else v
         out.append(masked)
     return out
+
+
+def _print_sql_block(sql: str) -> None:
+    sep = "-" * 40
+    print(sep)
+    print("[QUANT] -> GENERATING PRODUCTION SQL")
+    print(sep)
+    print(sql)
+    print()
 
 
 def _log_waterfall(waterfall: list[WaterfallLayer]) -> None:

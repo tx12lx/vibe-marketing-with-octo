@@ -21,7 +21,12 @@ To scale to RAG pattern across 1,000+ briefs:
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import logging
+import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -43,6 +48,22 @@ for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR)]:
 from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from pydantic_schemas import NexusErrorPayload, QuantAuditLog  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Boot cleanliness — suppress Google Cloud auth / quota noise before any
+# agent code imports google.auth or google.cloud at initialisation time.
+# ---------------------------------------------------------------------------
+
+def _silence_google_noise() -> None:
+    """Mute Google Cloud SDK and urllib3 log chatter below ERROR level."""
+    for name in (
+        "google", "google.auth", "google.auth.transport",
+        "google.cloud", "urllib3", "grpc",
+    ):
+        logging.getLogger(name).setLevel(logging.ERROR)
+    warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", category=ResourceWarning)
+
 
 # ---------------------------------------------------------------------------
 # Agent registry — the ONLY place agent classes are registered.
@@ -75,12 +96,18 @@ def route(
     here and a corresponding method on the relevant agent — nothing else.
     """
     if mode == "size_campaign":
+        print("\n[NEXUS AGENT] -> Analyzing intent...")
+        print("  Recognized campaign brief sizing request. Extracting targeting parameters,")
+        print("  filter layers, and exclusion rules...\n")
         request = nexus.build_sizing_request_from_brief(payload)
         if request is None:
             return None
         return nexus.route_with_retry(request, quant)
 
     elif mode == "nl_query":
+        print("\n[NEXUS AGENT] -> Analyzing intent...")
+        print("  Recognized ad hoc sizing request. Extracting parameters, filters, and")
+        print("  cross-entity exclusions...\n")
         request = nexus.build_sizing_request_from_nl(payload["query"])
         if request is None:
             return None
@@ -112,13 +139,9 @@ def _format_audit_log(log: QuantAuditLog) -> str:
         f"  Code     : {log.request.campaign_code}  /  {log.request.campaign_sub_code}",
         f"  Cadence  : {log.request.cadence}   |   Medium: {log.request.medium}",
         "",
-        "  SQL GENERATED",
+        "  AUDIENCE WATERFALL",
         "  " + thin,
     ]
-    for line in log.sql.splitlines():
-        lines.append("  " + line)
-
-    lines += ["", "  AUDIENCE WATERFALL", "  " + thin]
 
     if log.waterfall:
         max_label = max(len(lyr.layer_name) for lyr in log.waterfall)
@@ -158,6 +181,8 @@ def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
     print("=" * 66)
     print(f"  Agents  : Nexus  +  Quant")
     print(f"  Briefs  : {len(nexus.briefs)} loaded")
+    print()
+    print("  How can the OCTO team help you today?")
     print()
 
     while True:
@@ -224,10 +249,13 @@ def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    _silence_google_noise()
     print("\n  Vibe Marketing with OCTO — Initializing agents ...\n")
-    nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
-    quant: QuantAgent = _AGENT_REGISTRY["quant"]()
-    print(f"\n  Both agents online.\n")
+    _init_buf = io.StringIO()
+    with contextlib.redirect_stderr(_init_buf):
+        nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
+        quant: QuantAgent = _AGENT_REGISTRY["quant"]()
+    print("  Both agents online.\n")
     _run_console(nexus, quant)
 
 
