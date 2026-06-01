@@ -69,12 +69,17 @@ _QUANT_SYSTEM = (
     "  Step 2 — Primary Subscriber    : adds primary_sub = 1\n"
     "  Step 3 — Standard Exclusions   : adds standard_exclusions = 0 AND sub_status = 'A'\n"
     "  Step 4 — Stop Sell             : adds stop_sell = 0\n"
-    "  Step 5 — Campaign-Specific     : adds all audience-specific criteria — province,\n"
-    "                                   lifecycle, dnc flags, cross-sell pairs, model scores,\n"
-    "                                   AAL behavioral self-join exclusions / triggers,\n"
-    "                                   and AAL NBA propensity model joins\n"
-    "  Step 6 — Control Group Excl.   : adds control_group_flg = 'N' — MUST be the absolute\n"
-    "                                   last CTE layer, never moved or merged upward\n\n"
+    "  Step 5 — Targeting Criteria     : houses the intersection of all custom parameters\n"
+    "                                   extracted from the brief or NL request — service\n"
+    "                                   exclusions (e.g., excluding EPP), multi-province\n"
+    "                                   boundaries, behavioral metrics (e.g., adding a line\n"
+    "                                   in the past 3 months), lifecycle windows, DNC flags,\n"
+    "                                   cross-sell pairs, model scores, AAL behavioral\n"
+    "                                   self-join exclusions / triggers, NBA model joins\n"
+    "  Step 6 — Universal Control Group : adds control_group_flg = 'N' — MUST be the\n"
+    "                                    absolute last CTE layer, never moved or merged\n"
+    "                                    upward; this step yields the final targetable\n"
+    "                                    list volume\n\n"
     "  Strict typing rules:\n"
     "  - INT64 flags (1=True/Active, 0=False/Inactive): ALL columns matching *_ind, *_elig,\n"
     "    plus primary_sub, standard_exclusions, and stop_sell.\n"
@@ -141,7 +146,7 @@ _QUANT_SYSTEM = (
     "    pfe_hsia    : pfe_hsia_ind = 0 AND pfe_hsia_elig = 1\n"
     "    pfe_tv      : pfe_tv_ind = 0 AND pfe_tv_elig = 1\n\n"
     "ADD-A-LINE (AAL) TARGETING — two distinct trigger patterns; both belong exclusively\n"
-    "  in the Step 5 Campaign-Specific CTE layer. Apply whichever pattern the request invokes.\n\n"
+    "  in the Step 5 Targeting Criteria CTE layer. Apply whichever pattern the request invokes.\n\n"
     "  BEHAVIORAL AAL EXCLUSION / TRIGGER (recent-subscriber self-join on Table 1):\n"
     "  Trigger: request isolates or excludes accounts that recently Added a Line.\n"
     "  Technique: self-join Table 1 as t1 (primary_sub = 1) and t2 (primary_sub = 0) on the\n"
@@ -185,10 +190,12 @@ _QUANT_SYSTEM = (
     "    CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1\n"
     "    CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'\n"
     "    CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0\n"
-    "    CTE 5 'After: <Campaign Criteria>' : cumulative + all campaign-specific filters;\n"
-    "                                         AAL behavioral self-join or NBA model join\n"
-    "                                         (whichever the request invokes) lives here\n"
-    "    CTE 6 'Final Audience'             : cumulative + control_group_flg = 'N' — always last\n"
+    "    CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom\n"
+    "                                         parameters — service exclusions, province filters,\n"
+    "                                         behavioral metrics, lifecycle windows, DNC flags,\n"
+    "                                         cross-sell pairs, model scores; AAL behavioral\n"
+    "                                         self-join or NBA model join lives here\n"
+    "    CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — always last\n"
     "- control_group_flg = 'N' must appear ONLY in CTE 6 and nowhere above it\n"
     "- Do not reference columns absent from the confirmed schema above\n"
     "- Use Standard SQL syntax; backtick-quote all table refs as `project.dataset.table`\n"
@@ -235,13 +242,15 @@ Waterfall structure required — six mandatory layers in this exact sequence:
   CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
   CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
   CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
-  CTE 5 'After: <Campaign Criteria>' : cumulative + all campaign-specific filters from
-                                       the Filters and Exclusions lists above; for AAL
+  CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom parameters
+                                       from Filters and Exclusions above — service exclusions,
+                                       province filters, behavioral metrics, lifecycle windows,
+                                       DNC flags, cross-sell pairs, model scores; for AAL
                                        use cases apply the behavioral self-join rule
                                        (init_activation_date + lookback window) or the
                                        predictive NBA model join (predict_modl_id = 2008,
                                        classn_nm = 'AAD_A_LINE') per the system rules
-  CTE 6 'Final Audience'             : cumulative + control_group_flg = 'N' — absolute last
+  CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
 control_group_flg = 'N' must NOT appear in any CTE above CTE 6.
@@ -260,6 +269,17 @@ The first character must be 'W' (WITH). Any explanatory text causes a pipeline p
 _EXTREME_DROP = 0.60
 _HIGH_SCRUB_RATE = 0.80
 
+# Canonical six-step display order.  _parse_waterfall sorts by position in this
+# list so the waterfall is always chronological regardless of BQ row return order.
+_WATERFALL_STEP_ORDER = [
+    "Base Universe",
+    "After: Primary Subscriber",
+    "After: Standard Exclusions",
+    "After: Stop Sell",
+    "After: Targeting Criteria",
+    "After: Universal Control Group",
+]
+
 _ADHOC_WATERFALL_PROMPT = """Generate a BigQuery audience waterfall query for this ad-hoc sizing request.
 
 Population : {target_population}
@@ -275,13 +295,15 @@ Waterfall structure required — six mandatory layers in this exact sequence:
   CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
   CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
   CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
-  CTE 5 'After: <Campaign Criteria>' : cumulative + all audience-specific filters from
-                                       the Filters list; for AAL use cases apply the
-                                       behavioral self-join rule (init_activation_date +
-                                       lookback window) or the predictive NBA model join
-                                       (predict_modl_id = 2008, classn_nm = 'AAD_A_LINE')
-                                       per the system rules
-  CTE 6 'Final Audience'             : cumulative + control_group_flg = 'N' — absolute last
+  CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom parameters
+                                       from the Filters list — service exclusions, province
+                                       filters, behavioral metrics, lifecycle windows, DNC
+                                       flags, cross-sell pairs, model scores; for AAL use
+                                       cases apply the behavioral self-join rule
+                                       (init_activation_date + lookback window) or the
+                                       predictive NBA model join (predict_modl_id = 2008,
+                                       classn_nm = 'AAD_A_LINE') per the system rules
+  CTE 6 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
 control_group_flg = 'N' must NOT appear in any CTE above CTE 6.
@@ -361,7 +383,7 @@ class QuantAgent:
             waterfall = _parse_waterfall(masked_rows)
             _log_waterfall(waterfall)
             note = _optimization_note(waterfall)
-            final_count = waterfall[-1].audience_count if waterfall else 0
+            final_count = _final_audience_count(waterfall)
             return QuantAuditLog(
                 request=request,
                 sql=sql,
@@ -393,7 +415,7 @@ class QuantAgent:
         waterfall = _parse_waterfall(masked_rows)
         _log_waterfall(waterfall)
         note = _optimization_note(waterfall)
-        final_count = waterfall[-1].audience_count if waterfall else 0
+        final_count = _final_audience_count(waterfall)
 
         return QuantAuditLog(
             request=request,
@@ -550,7 +572,29 @@ def _parse_waterfall(rows: list[dict]) -> list[WaterfallLayer]:
             count = 0
         if name:
             layers.append(WaterfallLayer(layer_name=name, audience_count=count))
+    layers.sort(key=lambda l: _waterfall_step_index(l.layer_name))
     return layers
+
+
+def _waterfall_step_index(name: str) -> int:
+    try:
+        return _WATERFALL_STEP_ORDER.index(name)
+    except ValueError:
+        return len(_WATERFALL_STEP_ORDER)
+
+
+def _final_audience_count(waterfall: list[WaterfallLayer]) -> int:
+    """Return the count from the Universal Control Group step (Step 6).
+
+    Falls back to the last layer in the sorted waterfall if the canonical name
+    is not found, so behaviour degrades gracefully if the model emits a
+    non-standard label.
+    """
+    ucg = next(
+        (l for l in waterfall if "Universal Control Group" in l.layer_name),
+        waterfall[-1] if waterfall else None,
+    )
+    return ucg.audience_count if ucg else 0
 
 
 def _optimization_note(waterfall: list[WaterfallLayer]) -> Optional[str]:

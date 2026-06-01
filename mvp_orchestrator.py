@@ -123,7 +123,7 @@ def _format_audit_log(log: QuantAuditLog) -> str:
     if log.waterfall:
         max_label = max(len(lyr.layer_name) for lyr in log.waterfall)
         for lyr in log.waterfall:
-            marker = "=" if "Final" in lyr.layer_name else "-"
+            marker = "=" if "Universal Control Group" in lyr.layer_name else "-"
             lines.append(
                 f"  {marker} {lyr.layer_name:<{max_label}}  {lyr.audience_count:>14,}"
             )
