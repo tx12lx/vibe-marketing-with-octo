@@ -94,6 +94,35 @@ _QUANT_SYSTEM = (
     "        FROM `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_current_model_score_master_view` inner_t2\n"
     "        WHERE inner_t2.predict_modl_id = [TARGET_ID]\n"
     "      )\n\n"
+    "=== BUSINESS RULE MATRICES ===\n\n"
+    "LINE OF BUSINESS (lob_desc) MAPPING — always use UPPER(lob_desc) IN (...):\n"
+    "  'Postpaid'  -> UPPER(lob_desc) IN ('TELUS POSTPAID', 'KOODO POSTPAID', 'TELUS EPP')\n"
+    "  'Prepaid'   -> UPPER(lob_desc) IN ('TELUS PREPAID', 'KOODO PREPAID')\n"
+    "  TWA (Telus Wireless Ambassador) is EXCLUDED from all queries by default unless\n"
+    "  explicitly requested — never add TWA values to any IN list unprompted.\n"
+    "  Combinations are supported: union the relevant IN lists when multiple LOBs are\n"
+    "  requested (e.g., 'Postpaid and Prepaid' merges both value sets into one IN clause).\n\n"
+    "CUSTOMER LIFECYCLE / TIME LOGIC — translate these shorthand terms exactly:\n"
+    "  T-X renewal window (e.g., T-3 means within 3 months of contract end):\n"
+    "    commit_end_date >= CURRENT_DATE()\n"
+    "    AND commit_end_date <= DATE_ADD(CURRENT_DATE(), INTERVAL X MONTH)\n"
+    "  MTM (Month-to-Month, no active contract):\n"
+    "    commit_end_date < CURRENT_DATE()\n"
+    "  BYOD (Bring Your Own Device, no device financing):\n"
+    "    commit_start_date IS NULL\n\n"
+    "CROSS-SELL / FFH PRODUCT TARGETING — when a request targets customers for\n"
+    "  cross-sell or promotion of an FFH product, ALWAYS pair the ownership index\n"
+    "  (= 0, does not currently have the product) with the eligibility index\n"
+    "  (= 1, is technically eligible). Never filter on eligibility or ownership alone\n"
+    "  for cross-sell use cases. Required pairs by product:\n"
+    "    hsia        : hsia_ind = 0 AND hsia_elig = 1\n"
+    "    shs         : shs_ind = 0 AND shs_elig = 1\n"
+    "    optik       : optik_ind = 0 AND optik_elig = 1\n"
+    "    stream      : stream_ind = 0 AND stream_elig = 1\n"
+    "    tos         : tos_ind = 0 AND tos_elig = 1\n"
+    "    smart_energy: smart_energy_ind = 0 AND smart_energy_elig = 1\n"
+    "    pfe_hsia    : pfe_hsia_ind = 0 AND pfe_hsia_elig = 1\n"
+    "    pfe_tv      : pfe_tv_ind = 0 AND pfe_tv_elig = 1\n\n"
     "=== GENERATION RULES ===\n"
     "- Never select customer PII (names, addresses, emails, phone numbers, IMEI)\n"
     "- Size audiences using COUNT(DISTINCT ban) — no other sizing aggregate\n"
@@ -112,7 +141,19 @@ _QUANT_SYSTEM = (
     "    UPPER(province) LIKE '%BC%'\n"
     "    UPPER(device_type) LIKE '%SMARTPHONE%'\n"
     "    UPPER(device_name) LIKE '%IPHONE%'\n"
-    "  Never use bare equality (=) on these columns."
+    "  Never use bare equality (=) on these columns.\n\n"
+    "=== OUTPUT FORMAT — ABSOLUTE REQUIREMENT ===\n"
+    "The response MUST be 100% executable BigQuery Standard SQL and nothing else.\n"
+    "PROHIBITED — the response must NEVER contain:\n"
+    "  - Any English prose, commentary, or explanation of any kind\n"
+    "  - Introductory phrases such as 'Here is the query', 'The following query',\n"
+    "    'This SQL will', 'Sure!', or any conversational prefix whatsoever\n"
+    "  - Markdown code fences (``` or ```sql)\n"
+    "  - A trailing semicolon\n"
+    "  - Any text appearing before the opening WITH or SELECT keyword\n"
+    "  - Any text appearing after the final SELECT of the waterfall UNION ALL\n"
+    "The very first character of the response must be 'W' (WITH) or 'S' (SELECT).\n"
+    "Emitting any prose causes an immediate parse failure in the execution pipeline."
 )
 
 _WATERFALL_SQL_PROMPT = """Generate a BigQuery audience waterfall query for this sizing request.
@@ -144,7 +185,8 @@ Constraints:
 - If the schema does not contain an expected field, use the closest available field
   and add a comment explaining the substitution
 
-Return ONLY the SQL."""
+OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
+The first character must be 'W' (WITH). Any explanatory text causes a pipeline parse failure."""
 
 _EXTREME_DROP = 0.60
 _HIGH_SCRUB_RATE = 0.80
@@ -166,7 +208,8 @@ primary_sub = 1 AND standard_exclusions = 0 AND stop_sell = 0 AND sub_status = '
 AND control_group_flg = 'N' MUST be present in the WHERE clause before any audience-specific filters.
 No CTEs, no waterfall layers — one SELECT that returns exactly one result row.
 
-Return ONLY the SQL."""
+OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
+The first character must be 'S' (SELECT). Any explanatory text causes a pipeline parse failure."""
 
 
 class QuantAgent:
@@ -437,10 +480,30 @@ def _optimization_note(waterfall: list[WaterfallLayer]) -> Optional[str]:
     return "Optimization Note: " + " | ".join(notes)
 
 
+# Matches the first line that is recognisably SQL (WITH/SELECT or a SQL comment).
+# Used by _clean_sql to strip any leading prose the model emits despite instructions.
+_SQL_LEAD = re.compile(r"^\s*(WITH|SELECT|--)", re.IGNORECASE)
+
+
 def _clean_sql(sql: str) -> str:
-    if sql.startswith("```"):
+    # 1. Strip markdown fences.
+    if "```" in sql:
         lines = sql.splitlines()
-        start = 1 if lines[0].startswith("```") else 0
-        end = len(lines) - 1 if lines and lines[-1].strip() == "```" else len(lines)
+        start = next(
+            (i + 1 for i, l in enumerate(lines) if l.strip().startswith("```")), 0
+        )
+        end = next(
+            (i for i in range(len(lines) - 1, start - 1, -1) if lines[i].strip() == "```"),
+            len(lines),
+        )
         sql = "\n".join(lines[start:end])
+
+    # 2. Strip any leading prose lines that precede the first SQL keyword.
+    #    Defense-in-depth against "Here is the query:\n\nWITH ..." responses.
+    lines = sql.splitlines()
+    for i, line in enumerate(lines):
+        if _SQL_LEAD.match(line):
+            sql = "\n".join(lines[i:])
+            break
+
     return sql.strip().rstrip(";").strip()
