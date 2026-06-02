@@ -90,6 +90,18 @@ def route(
                            Targeting Criteria block, then hands the sieved payload
                            to Quant for the 7-stage waterfall audit with one
                            correction retry.
+                           When the sieved exclusions list contains a GCH recency
+                           suppression entry, Quant compiles the three-table LEFT
+                           JOIN anti-join under the fixed GCH alias contract:
+                             a_gch = bq_campaign_segment
+                             b_gch = bq_campaign_communication  (MOB_BAN source)
+                             c_gch = bq_campaign_description
+                           TARGETING KEY LAW: inner SELECT must always be
+                             SELECT DISTINCT b_gch.MOB_BAN — never a_gch or c_gch.
+                           DATE CASTING LAW : lookback predicate must always be
+                             DATE(a_gch.IN_HOME_DT) >= DATE_SUB(CURRENT_DATE(),
+                             INTERVAL X DAY) — bare IN_HOME_DT comparisons are
+                             a DATETIME/DATE type mismatch.
     """
     if workflow == "WORKFLOW_A":
         request = nexus.build_sizing_request_from_nl(payload["query"])
