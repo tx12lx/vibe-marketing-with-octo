@@ -143,9 +143,8 @@ _QUANT_SYSTEM = (
     "  correlated NOT EXISTS subquery — it breaks when BigQuery resolves outer CTE aliases.\n\n"
     "  Required CTE 6 structure (substitute <CAMPAIGN_CD>, <CAMPAIGN_SUB_CD>, <N>, <dnc>):\n\n"
     "    after_channel_governance AS (\n"
-    "      SELECT t.ban\n"
-    "      FROM `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base` t\n"
-    "      INNER JOIN after_targeting_criteria tg ON t.ban = tg.ban\n"
+    "      SELECT t.*\n"
+    "      FROM after_targeting_criteria t\n"
     "      LEFT JOIN (\n"
     "        SELECT DISTINCT a_gch.MOB_BAN\n"
     "        FROM `bi-srv-hsmdet-pr-7b9def.gch_current.bq_campaign_segment` a_gch\n"
@@ -159,11 +158,7 @@ _QUANT_SYSTEM = (
     "          AND c_gch.CAMPAIGN_SUB_CD = '<CAMPAIGN_SUB_CD>'\n"
     "          AND a_gch.IN_HOME_DT >= DATE_SUB(CURRENT_DATE(), INTERVAL <N> DAY)\n"
     "      ) gch ON t.ban = gch.MOB_BAN\n"
-    "      WHERE t.primary_sub = 1\n"
-    "        AND t.standard_exclusions = 0\n"
-    "        AND t.sub_status = 'A'\n"
-    "        AND t.stop_sell = 0\n"
-    "        AND <dnc_constraints>\n"
+    "      WHERE <dnc_constraints>\n"
     "        AND gch.MOB_BAN IS NULL\n"
     "    )\n\n"
     "  Substitute <CAMPAIGN_CD>, <CAMPAIGN_SUB_CD>, and <N> from the suppression entry.\n"
@@ -296,29 +291,32 @@ _QUANT_SYSTEM = (
     "    SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group\n"
     "  Omitting AS layer_name or AS audience_count on any arm causes a BigQuery schema\n"
     "  mismatch — treat every arm as a standalone SELECT with no inherited aliases.\n"
-    "- CTE single-column output — MANDATORY: every intermediate CTE (CTEs 1-7) MUST\n"
-    "  project exactly one column: SELECT ban (or SELECT DISTINCT ban). Never SELECT *,\n"
-    "  never select extra columns. A single clean ban column eliminates COUNT(DISTINCT ban)\n"
-    "  ambiguity in the final UNION ALL regardless of join complexity.\n"
-    "- Strict sequential CTE inheritance — MANDATORY: each CTE from step 2 onward MUST\n"
-    "  query the IMMEDIATELY PRECEDING CTE, never the raw source table directly:\n"
-    "    after_primary_subscriber      : SELECT ban FROM base_universe\n"
+    "- Linear SELECT * inheritance — MANDATORY: every CTE carries ALL columns forward\n"
+    "  from the immediately preceding stage so downstream WHERE clauses can reference\n"
+    "  any column (control_group_flg, em_dnc, stop_sell, etc.) without ambiguity.\n"
+    "  Never project only ban; never go back to the raw mobility_base table after CTE 1.\n"
+    "    base_universe                 : SELECT * FROM `<mobility_base>`\n"
+    "                                    WHERE UPPER(lob_desc) IN (...)\n"
+    "    after_primary_subscriber      : SELECT * FROM base_universe\n"
     "                                    WHERE primary_sub = 1\n"
-    "    after_standard_exclusions     : SELECT ban FROM after_primary_subscriber\n"
+    "    after_standard_exclusions     : SELECT * FROM after_primary_subscriber\n"
     "                                    WHERE standard_exclusions = 0 AND sub_status = 'A'\n"
-    "    after_stop_sell               : SELECT ban FROM after_standard_exclusions\n"
+    "    after_stop_sell               : SELECT * FROM after_standard_exclusions\n"
     "                                    WHERE stop_sell = 0\n"
-    "    after_targeting_criteria      : SELECT ban FROM after_stop_sell\n"
-    "                                    WHERE <targeting_criteria>\n"
-    "    after_channel_governance      : SELECT ban FROM after_targeting_criteria\n"
-    "                                    WHERE <dnc_constraints>\n"
-    "                                    EXCEPTION: when GCH suppression is required,\n"
-    "                                    use the LEFT JOIN anti-join template from TABLE 3\n"
-    "                                    which preserves the chain via\n"
-    "                                    INNER JOIN after_targeting_criteria tg.\n"
-    "    after_universal_control_group : SELECT ban FROM after_channel_governance\n"
+    "    after_targeting_criteria      : SELECT * FROM after_stop_sell WHERE <targeting_criteria>\n"
+    "                                    EXCEPTION: when joining Table 2 (model scores) or\n"
+    "                                    performing a Table 1 self-join (AAL behavioral),\n"
+    "                                    alias the preceding CTE as t and use SELECT t.*\n"
+    "                                    to carry all columns while joining the extra table.\n"
+    "    after_channel_governance      : SELECT * FROM after_targeting_criteria WHERE <dnc_constraints>\n"
+    "                                    EXCEPTION: when GCH suppression is required, use\n"
+    "                                    SELECT t.* FROM after_targeting_criteria t LEFT JOIN ...\n"
+    "                                    per the GCH SUPPRESSION RULE template above.\n"
+    "    after_universal_control_group : SELECT * FROM after_channel_governance\n"
     "                                    WHERE control_group_flg = 'N'\n"
     "  Each CTE adds exactly one new predicate layer on top of the prior CTE output.\n"
+    "  ban is always present in every CTE because it is inherited through each SELECT *;\n"
+    "  COUNT(DISTINCT ban) in the final UNION ALL is therefore unambiguous.\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
     "- Seven-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
     "    CTE 1 'Base Universe'              : LOB filter only (UPPER(lob_desc) IN (...))\n"
@@ -430,16 +428,20 @@ Required alias schema, identical across all seven arms:
 control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 
 CTE structure rules — non-negotiable:
-- Every intermediate CTE MUST output exactly one column: SELECT ban (or SELECT DISTINCT ban)
-- Each CTE from step 2 onward MUST inherit by querying the IMMEDIATELY PRECEDING CTE:
-    after_primary_subscriber      : SELECT ban FROM base_universe WHERE primary_sub = 1
-    after_standard_exclusions     : SELECT ban FROM after_primary_subscriber
+- Linear SELECT * inheritance: every CTE selects ALL columns from the immediately preceding
+  CTE so that downstream WHERE clauses can reference any column without ambiguity.
+    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...)
+    after_primary_subscriber      : SELECT * FROM base_universe WHERE primary_sub = 1
+    after_standard_exclusions     : SELECT * FROM after_primary_subscriber
                                     WHERE standard_exclusions = 0 AND sub_status = 'A'
-    after_stop_sell               : SELECT ban FROM after_standard_exclusions WHERE stop_sell = 0
-    after_targeting_criteria      : SELECT ban FROM after_stop_sell WHERE <criteria>
-    after_channel_governance      : SELECT ban FROM after_targeting_criteria WHERE <dnc>
-                                    EXCEPTION: GCH suppression uses INNER JOIN after_targeting_criteria
-    after_universal_control_group : SELECT ban FROM after_channel_governance
+    after_stop_sell               : SELECT * FROM after_standard_exclusions WHERE stop_sell = 0
+    after_targeting_criteria      : SELECT * FROM after_stop_sell WHERE <criteria>
+                                    EXCEPTION: when joining Table 2 or a self-join, alias the
+                                    preceding CTE as t and use SELECT t.* to carry all columns.
+    after_channel_governance      : SELECT * FROM after_targeting_criteria WHERE <dnc>
+                                    EXCEPTION: GCH suppression uses SELECT t.* FROM
+                                    after_targeting_criteria t LEFT JOIN ... per system rules.
+    after_universal_control_group : SELECT * FROM after_channel_governance
                                     WHERE control_group_flg = 'N'
 
 Constraints:
@@ -519,17 +521,20 @@ Required alias schema, identical across all seven arms:
 control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 
 CTE structure rules — non-negotiable:
-- Every intermediate CTE MUST output exactly one column: SELECT ban (or SELECT DISTINCT ban)
-- Each CTE from step 2 onward MUST inherit by querying the IMMEDIATELY PRECEDING CTE:
-    after_primary_subscriber      : SELECT ban FROM base_universe WHERE primary_sub = 1
-    after_standard_exclusions     : SELECT ban FROM after_primary_subscriber
+- Linear SELECT * inheritance: every CTE selects ALL columns from the immediately preceding
+  CTE so that downstream WHERE clauses can reference any column without ambiguity.
+    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...)
+    after_primary_subscriber      : SELECT * FROM base_universe WHERE primary_sub = 1
+    after_standard_exclusions     : SELECT * FROM after_primary_subscriber
                                     WHERE standard_exclusions = 0 AND sub_status = 'A'
-    after_stop_sell               : SELECT ban FROM after_standard_exclusions WHERE stop_sell = 0
-    after_targeting_criteria      : SELECT ban FROM after_stop_sell WHERE <criteria>
-    after_channel_governance      : SELECT ban FROM after_targeting_criteria WHERE <dnc>
-    after_universal_control_group : SELECT ban FROM after_channel_governance
+    after_stop_sell               : SELECT * FROM after_standard_exclusions WHERE stop_sell = 0
+    after_targeting_criteria      : SELECT * FROM after_stop_sell WHERE <criteria>
+                                    EXCEPTION: when joining Table 2 or a self-join, alias the
+                                    preceding CTE as t and use SELECT t.* to carry all columns.
+    after_channel_governance      : SELECT * FROM after_targeting_criteria WHERE <dnc>
+    after_universal_control_group : SELECT * FROM after_channel_governance
                                     WHERE control_group_flg = 'N'
-Apply filters cumulatively — each CTE re-applies all prior WHERE conditions plus the new one.
+Apply filters cumulatively — each CTE adds one new predicate on top of the prior stage.
 Use ONLY the filter criteria listed above.
 
 OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
@@ -703,7 +708,6 @@ class QuantAgent:
         self._last_sql = sql
         if os.getenv("QUANT_DEBUG_SQL"):
             print(f"[Quant SQL — waterfall]\n{sql}\n", file=sys.stderr)
-        _validate_sql_structure(sql)
         return sql
 
     def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
@@ -739,7 +743,6 @@ class QuantAgent:
         self._last_sql = sql
         if os.getenv("QUANT_DEBUG_SQL"):
             print(f"[Quant SQL — ad-hoc]\n{sql}\n", file=sys.stderr)
-        _validate_sql_structure(sql)
         return sql
 
     def _execute_query(self, sql: str, project: str) -> list[dict]:
@@ -914,47 +917,3 @@ def _clean_sql(sql: str) -> str:
     return sql
 
 
-def _validate_sql_structure(sql: str) -> None:
-    """Emit warnings for structural anomalies without blocking execution.
-
-    SQL is locked in on the first pass and forwarded directly to the execution
-    engine. BigQuery is the authoritative validator; this function surfaces
-    diagnostic signals only and never prevents execution.
-    """
-    if not re.match(r"^\s*WITH\b", sql, re.IGNORECASE):
-        warnings.warn(
-            "Generated SQL does not begin with WITH — response may have been "
-            "prefixed with prose or truncated before the query start.",
-            stacklevel=2,
-        )
-
-    if re.search(r",\s*$", sql):
-        warnings.warn(
-            "Generated SQL ends with a trailing comma — the UNION ALL execution "
-            "block may be absent.",
-            stacklevel=2,
-        )
-
-    union_count = len(re.findall(r"\bUNION\s+ALL\b", sql, re.IGNORECASE))
-    if union_count < 6:
-        warnings.warn(
-            f"Generated SQL contains {union_count} UNION ALL clause(s); a 7-step "
-            "waterfall requires exactly 6.",
-            stacklevel=2,
-        )
-
-    open_parens = sql.count("(")
-    close_parens = sql.count(")")
-    if open_parens != close_parens:
-        warnings.warn(
-            f"Generated SQL has unbalanced parentheses ({open_parens} open vs "
-            f"{close_parens} close).",
-            stacklevel=2,
-        )
-
-    if "control_group_flg" not in sql:
-        warnings.warn(
-            "Generated SQL is missing control_group_flg = 'N' — step 7 CTE may "
-            "not have been generated.",
-            stacklevel=2,
-        )
