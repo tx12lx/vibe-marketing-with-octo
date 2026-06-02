@@ -13,6 +13,7 @@ Zero changes to Nexus, Quant, or pydantic_schemas.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -25,6 +26,11 @@ from dotenv import load_dotenv
 _ROOT = Path(__file__).resolve().parent
 _NEXUS_DIR = _ROOT / "Vibe OCTO Nexus"
 _QUANT_DIR = _ROOT / "Vibe OCTO Quant"
+_GLOSSARY_PATH = _ROOT / "glossary.json"
+_QUERY_CATALOG_PATH = _ROOT / "query_catalog.json"
+
+# Keywords that trigger dynamic glossary/catalog injection.
+_GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU"}
 
 # Load both agent environments before any agent code is imported.
 # override=False means the first file wins on conflicts.
@@ -49,6 +55,109 @@ def _silence_google_noise() -> None:
         logging.getLogger(name).setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", category=UserWarning)
     warnings.filterwarnings("ignore", category=ResourceWarning)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic knowledge config loaders
+# ---------------------------------------------------------------------------
+
+def _load_glossary() -> dict:
+    try:
+        return json.loads(_GLOSSARY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_query_catalog() -> list:
+    try:
+        return json.loads(_QUERY_CATALOG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _build_dynamic_context(query_text: str) -> str:
+    """Scan the user prompt for known glossary keywords and assemble an injection block.
+
+    Prints [LEARNING DISCOVERY] headers for each asset pulled. Returns an empty
+    string when no keywords are found so callers can skip injection cheaply.
+    """
+    text_upper = query_text.upper()
+    detected = [k for k in _GLOSSARY_KEYWORDS if k in text_upper]
+    if not detected:
+        return ""
+
+    glossary = _load_glossary()
+    catalog = _load_query_catalog()
+    if not glossary:
+        return ""
+
+    print(
+        f"\n  [LEARNING DISCOVERY] -> Dynamically pulled glossary mappings for keys: "
+        f"{', '.join(detected)}"
+    )
+
+    parts: list[str] = [
+        "=== ACTIVE SESSION GUARDRAILS (loaded from knowledge configs) ===\n\n"
+    ]
+
+    global_scope = glossary.get("GLOBAL_SCOPE", {})
+    if global_scope:
+        parts.append("GLOBAL SCOPE RULES:\n")
+        for k, v in global_scope.items():
+            parts.append(f"  {k}: {v}\n")
+        parts.append("\n")
+
+    acronyms = glossary.get("acronyms", {})
+    matched_acronyms = {k: v for k, v in acronyms.items() if k in detected}
+    if matched_acronyms:
+        parts.append(
+            "ACRONYM DEFINITIONS (authoritative — override any inferred meaning):\n"
+        )
+        for key, defn in matched_acronyms.items():
+            parts.append(
+                f"  {key} — Business Meaning: {defn.get('business_meaning', '')}\n"
+            )
+            if defn.get("special_notes"):
+                parts.append(f"       Special Notes: {defn['special_notes']}\n")
+            indicators = defn.get("database_indicators") or []
+            if indicators:
+                parts.append("       Database Indicators:\n")
+                for ind in indicators:
+                    parts.append(
+                        f"         {ind['column']} = {ind['value']} ({ind['meaning']})\n"
+                    )
+        parts.append("\n")
+
+    campaigns = glossary.get("campaigns", {})
+    matched_campaigns = {k: v for k, v in campaigns.items() if k in detected}
+    if matched_campaigns:
+        parts.append("CAMPAIGN CONFIGURATIONS:\n")
+        for key, cfg in matched_campaigns.items():
+            parts.append(f"  {key}:\n")
+            for ck, cv in cfg.items():
+                parts.append(f"    {ck}: {cv}\n")
+        parts.append("\n")
+
+    if "AALBAU" in detected and catalog:
+        blueprint = next(
+            (q for q in catalog if q.get("target_campaign") == "AALBAU"), None
+        )
+        if blueprint:
+            print(
+                "  [LEARNING DISCOVERY] -> Injected structural SQL blueprint from Query Catalog."
+            )
+            parts.append(
+                "SQL STRUCTURAL BLUEPRINT (authoritative reference template — "
+                f"{blueprint.get('id')}):\n"
+            )
+            parts.append(f"  Intent  : {blueprint.get('intent')}\n")
+            parts.append(f"  Sample  : {blueprint.get('sample_brief')}\n")
+            parts.append(
+                f"  SQL Template:\n{blueprint.get('sql_template', '')}\n\n"
+            )
+
+    print()
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +299,11 @@ def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
         if query.lower() in ("q", "quit", "exit"):
             print("  Session closed.\n")
             break
+
+        ctx = _build_dynamic_context(query)
+        if ctx:
+            nexus.set_session_context(ctx)
+            quant.set_session_context(ctx)
 
         print("  [NEXUS AGENT] -> Analyzing intent...\n")
         workflow, payload = nexus.classify_and_route(query)

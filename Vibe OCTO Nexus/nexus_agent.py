@@ -400,6 +400,11 @@ class NexusAgent:
         )
         self._taxonomy: dict = {}
         self.briefs: list[dict] = []
+        self._session_context: str = ""
+
+    def set_session_context(self, context: str) -> None:
+        """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
+        self._session_context = context
 
     # ------------------------------------------------------------------
     # Public API
@@ -756,6 +761,11 @@ class NexusAgent:
 
     def _call_simple(self, user_prompt: str) -> str:
         """Single call — no caching. Used for the one-time taxonomy build."""
+        system = (
+            _NEXUS_SYSTEM + "\n\n" + self._session_context
+            if self._session_context
+            else _NEXUS_SYSTEM
+        )
         resp = requests.post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers={
@@ -765,7 +775,7 @@ class NexusAgent:
             json={
                 "model": self._model,
                 "messages": [
-                    {"role": "system", "content": _NEXUS_SYSTEM},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": user_prompt},
                 ],
                 "max_tokens": _MAX_TOKENS_BUILD,
@@ -795,6 +805,11 @@ class NexusAgent:
         }
         query_block = {"type": "text", "text": user_query}
 
+        system = (
+            _NEXUS_SYSTEM + "\n\n" + self._session_context
+            if self._session_context
+            else _NEXUS_SYSTEM
+        )
         resp = requests.post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers={
@@ -805,7 +820,7 @@ class NexusAgent:
             json={
                 "model": self._model,
                 "messages": [
-                    {"role": "system", "content": _NEXUS_SYSTEM},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": [taxonomy_block, query_block]},
                 ],
                 "max_tokens": _MAX_TOKENS_QUERY,

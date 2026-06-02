@@ -1,0 +1,29 @@
+{
+  "GLOBAL_SCOPE": {
+    "default_exclusions": "UPPER(lob_desc) NOT LIKE '%TWA%'"
+  },
+  "acronyms": {
+    "PFE": {
+      "business_meaning": "Vulcan Product Ecosystem",
+      "special_notes": "CRITICAL: This represents Vulcan cross-sell, NOT television or TV services.",
+      "database_indicators": []
+    },
+    "KI": {
+      "business_meaning": "Koodo Internet",
+      "special_notes": "Applies strictly to Koodo broadband footprints.",
+      "database_indicators": [
+        {"column": "t.koodo_int_elig", "value": "1", "meaning": "Qualified to receive Koodo Internet"},
+        {"column": "t.koodo_int_ind", "value": "1", "meaning": "Active Koodo Internet subscriber"}
+      ]
+    }
+  },
+  "campaigns": {
+    "AALBAU": {
+      "portfolio": "AAL",
+      "initiative": "AALBAU",
+      "primary_brand": "TELUS POSTPAID",
+      "channel": "Email (em_dnc = 0)",
+      "gch_lookback_days": 30
+    }
+  }
+}

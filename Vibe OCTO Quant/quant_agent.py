@@ -174,8 +174,8 @@ _QUANT_SYSTEM = (
     "      WHERE <dnc_constraints>\n"
     "        AND gch.MOB_BAN IS NULL\n"
     "    )\n\n"
-    "  Substitute <CAMPAIGN_CD>, <CAMPAIGN_SUB_CD>, and <N> from the suppression entry.\n"
-    "  Default: CAMPAIGN_CD = 'AAL', CAMPAIGN_SUB_CD = 'AALBAU', N = 30.\n"
+    "  Substitute <CAMPAIGN_CD>, <CAMPAIGN_SUB_CD>, and <N> from the suppression entry;\n"
+    "  these values are resolved at runtime from the active campaign configuration.\n"
     "  Replace <dnc_constraints> with the applicable DNC flag predicates (e.g. em_dnc = 0).\n"
     "  GCH table aliases a_gch / b_gch / c_gch are fixed and must never be changed.\n\n"
     "=== BUSINESS RULE MATRICES ===\n\n"
@@ -189,8 +189,6 @@ _QUANT_SYSTEM = (
     "               Use equality (=) when the brief explicitly targets TELUS subscribers\n"
     "               only. This excludes KOODO POSTPAID and TELUS EPP by design.\n"
     "  'Prepaid'   -> UPPER(lob_desc) IN ('TELUS PREPAID', 'KOODO PREPAID')\n"
-    "  TWA (Telus Wireless Ambassador) is EXCLUDED from all queries by default unless\n"
-    "  explicitly requested — never add TWA values to any IN list unprompted.\n"
     "  Combinations are supported: union the relevant IN lists when multiple LOBs are\n"
     "  requested (e.g., 'Postpaid and Prepaid' merges both value sets into one IN clause).\n\n"
     "CUSTOMER LIFECYCLE / TIME LOGIC — translate these shorthand terms exactly:\n"
@@ -418,7 +416,7 @@ Waterfall structure required — seven mandatory layers in this exact sequence:
                                        GCH LEFT JOIN anti-join (TABLE 3) when Exclusions
                                        contains a 'GCH recency suppression' entry — resolve
                                        CAMPAIGN_CD, CAMPAIGN_SUB_CD, and interval days from
-                                       the suppression string (default AAL/AALBAU, 30 days).
+                                       the suppression string per the active campaign config.
                                        Apply channel exclusivity sieve when 'only',
                                        'exclusively', or 'solely' pairs with a channel:
                                        named channels = 0, all unnamed channels = 1.
@@ -568,6 +566,11 @@ class QuantAgent:
         self._default_dataset = os.getenv("BQ_DATASET", "adobe")
         self._schema_cache = _QUANT_DIR / ".schema_cache.json"
         self._last_sql: str = ""
+        self._session_context: str = ""
+
+    def set_session_context(self, context: str) -> None:
+        """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
+        self._session_context = context
 
     # ------------------------------------------------------------------
     # Public API — strict gateway, never raises to orchestrator
@@ -703,6 +706,11 @@ class QuantAgent:
             bq_dataset=request.bq_dataset,
             schema_context=schema[:6000] if schema else "(not available)",
         )
+        system = (
+            _QUANT_SYSTEM + "\n\n" + self._session_context
+            if self._session_context
+            else _QUANT_SYSTEM
+        )
         resp = requests.post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers={
@@ -712,7 +720,7 @@ class QuantAgent:
             json={
                 "model": self._model,
                 "messages": [
-                    {"role": "system", "content": _QUANT_SYSTEM},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
                 "max_tokens": 4096,
@@ -738,6 +746,11 @@ class QuantAgent:
             bq_dataset=request.bq_dataset or self._default_dataset,
             schema_context=schema[:6000] if schema else "(not available)",
         )
+        system = (
+            _QUANT_SYSTEM + "\n\n" + self._session_context
+            if self._session_context
+            else _QUANT_SYSTEM
+        )
         resp = requests.post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers={
@@ -747,7 +760,7 @@ class QuantAgent:
             json={
                 "model": self._model,
                 "messages": [
-                    {"role": "system", "content": _QUANT_SYSTEM},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
                 "max_tokens": 4096,

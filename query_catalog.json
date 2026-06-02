@@ -1,0 +1,9 @@
+[
+  {
+    "id": "q_aal_001",
+    "intent": "Structured Campaign Execution Request",
+    "target_campaign": "AALBAU",
+    "sample_brief": "Show me the marketable universe of AALBAU",
+    "sql_template": "WITH base_universe AS (\n  SELECT * FROM `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base` WHERE UPPER(lob_desc) = 'TELUS POSTPAID'\n),\nafter_primary_subscriber AS (\n  SELECT * FROM base_universe WHERE primary_sub = 1\n),\nafter_standard_exclusions AS (\n  SELECT * FROM after_primary_subscriber WHERE standard_exclusions = 0 AND sub_status = 'A'\n),\nafter_stop_sell AS (\n  SELECT * FROM after_standard_exclusions WHERE stop_sell = 0\n),\nafter_targeting_criteria AS (\n  SELECT * FROM after_stop_sell\n),\nafter_channel_governance AS (\n  SELECT t.* FROM after_targeting_criteria t\n  LEFT JOIN (\n    SELECT DISTINCT b_gch.MOB_BAN\n    FROM `bi-srv-hsmdet-pr-7b9def.gch_current.bq_campaign_segment` a_gch\n    INNER JOIN `bi-srv-hsmdet-pr-7b9def.gch_current.bq_campaign_communication` b_gch ON a_gch.SEGMENT_ID = b_gch.SEGMENT_ID\n    INNER JOIN `bi-srv-hsmdet-pr-7b9def.gch_current.bq_campaign_description` c_gch ON a_gch.CAMPAIGN_ID = c_gch.CAMPAIGN_ID\n    WHERE a_gch.DELETED_IND = '0' AND a_gch.CONTROL_FLG = 'N' AND c_gch.CAMPAIGN_CD = 'AAL' AND c_gch.CAMPAIGN_SUB_CD = 'AALBAU' AND DATE(a_gch.IN_HOME_DT) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)\n  ) gch ON t.ban = gch.MOB_BAN\n  WHERE t.em_dnc = 0 AND gch.MOB_BAN IS NULL\n),\nafter_universal_control_group AS (\n  SELECT * FROM after_channel_governance WHERE control_group_flg = 'N'\n)\nSELECT 'Base Universe' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM base_universe"
+  }
+]
