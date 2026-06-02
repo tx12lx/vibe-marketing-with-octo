@@ -59,7 +59,24 @@ _NEXUS_SYSTEM = (
     "targeting parameters from natural language, classify campaigns against historical "
     "patterns, and emit validated JSON payloads for downstream audience sizing. "
     "Always reference the provided taxonomy matrix before inferring new patterns. "
-    "Return ONLY valid JSON — no explanation, no markdown, no trailing text."
+    "Return ONLY valid JSON — no explanation, no markdown, no trailing text.\n\n"
+    "=== GLOBAL CONTACT HISTORY (GCH) SUPPRESSION SCHEMA ===\n\n"
+    "Dataset: gch_current. Three tables used exclusively for recency suppression anti-joins:\n\n"
+    "  bq_campaign_segment (alias 'a'):\n"
+    "    Fields: MOB_BAN, SEGMENT_ID, CAMPAIGN_ID, DELETED_IND, CONTROL_FLG, IN_HOME_DT\n"
+    "    Mandatory operational filters: a.DELETED_IND = '0' AND a.CONTROL_FLG = 'N'\n"
+    "    Link to mobility base table: a.MOB_BAN = t.ban\n\n"
+    "  bq_campaign_communication (alias 'b'):\n"
+    "    Fields: SEGMENT_ID — joined via: a.SEGMENT_ID = b.SEGMENT_ID\n\n"
+    "  bq_campaign_description (alias 'c'):\n"
+    "    Fields: CAMPAIGN_ID, CAMPAIGN_CD, CAMPAIGN_SUB_CD — joined via: a.CAMPAIGN_ID = c.CAMPAIGN_ID\n\n"
+    "GCH LOOKBACK EXTRACTION RULE:\n"
+    "Whenever a brief, deployment record, or natural language prompt mentions a lookback window,\n"
+    "campaign cooldown, contact recency gate, or recently contacted exclusion, you MUST include\n"
+    "a GCH suppression entry in exclusion_layers using this exact literal format:\n"
+    "  'GCH recency suppression: exclude BANs contacted via <CAMPAIGN_CD>/<CAMPAIGN_SUB_CD> within <N> days'\n"
+    "Default lookback when no window is explicitly stated: 30 days.\n"
+    "Default campaign scope for all AAL initiatives: CAMPAIGN_CD = 'AAL', CAMPAIGN_SUB_CD = 'AALBAU'."
 )
 
 _TAXONOMY_BQ_QUERY = """
@@ -312,7 +329,7 @@ channel variations, decile-range shifts) — no narrative paragraphs or parenthe
   "compiled_instructions": {{
     "target_population": "<precise plain-English description of who qualifies for the email send — include LOB, lifecycle stage, propensity tier or behavioral criteria, and confirm em_dnc eligibility>",
     "filters": ["<explicit BQ-interpretable filter criterion for this email deployment>"],
-    "exclusion_layers": ["<explicit exclusion layer — e.g. em_dnc = 0 for email channel eligibility>"],
+    "exclusion_layers": ["<explicit exclusion layer — e.g. em_dnc = 0 for email channel eligibility>", "<if a lookback window or recency cooldown is present in the brief: 'GCH recency suppression: exclude BANs contacted via AAL/AALBAU within 30 days' — include this entry whenever the deployment record implies a contact recency gate>"],
     "optimization_context": "<one sentence: strategic context for the Quant audit reflecting this monthly email deployment's specific targeting approach and audience scope>"
   }}
 }}"""
@@ -849,12 +866,28 @@ def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
         dynamic_parts.append(
             f"Exclude secondary line activations within trailing {m_aal.group(1)} months."
         )
+    # GCH recency suppression — render before the generic exclusion pass so it gets a
+    # clean formatted line rather than falling into the raw-string filter below.
+    _gch_entry = next(
+        (e for e in (request.exclusion_layers or []) if e and "gch recency suppression" in e.lower()),
+        None,
+    )
+    if _gch_entry:
+        _m_days = re.search(r"within\s+(\d+)\s+days?", _gch_entry, re.IGNORECASE)
+        _m_codes = re.search(r"via\s+([\w/]+)", _gch_entry, re.IGNORECASE)
+        _days = _m_days.group(1) if _m_days else "30"
+        _codes = _m_codes.group(1).upper() if _m_codes else "AAL/AALBAU"
+        dynamic_parts.append(f"{_days}-Day GCH Recency Suppression ({_codes} Matrix Applied)")
     if request.exclusion_layers:
         for excl in request.exclusion_layers:
             if not excl:
                 continue
             lower = excl.lower()
-            if "dnc" not in lower and "init_activation_date" not in lower:
+            if (
+                "dnc" not in lower
+                and "init_activation_date" not in lower
+                and "gch recency suppression" not in lower
+            ):
                 clean = excl.strip()
                 # Drop raw SQL filter strings (contain BQ operators) — they are not
                 # human-readable labels and bloat the terminal card.

@@ -93,6 +93,11 @@ _QUANT_SYSTEM = (
     "                                     em_dnc = 0 AND sms_dnc = 0 AND ob_dnc = 1 AND dm_dnc = 1\n"
     "                                   If no channel exclusivity is specified, apply only the\n"
     "                                   DNC constraints explicitly stated in the request.\n"
+    "                                   GCH RECENCY SUPPRESSION: when the exclusions list\n"
+    "                                   contains a 'GCH recency suppression' entry, embed the\n"
+    "                                   NOT EXISTS three-table anti-join (TABLE 3 above) in\n"
+    "                                   this CTE alongside DNC constraints — not instead of\n"
+    "                                   them. Use t.ban as the correlation reference.\n"
     "  Step 7 — Universal Control Group : adds control_group_flg = 'N' — MUST be the\n"
     "                                    absolute last CTE layer, never moved or merged\n"
     "                                    upward; this step yields the final targetable\n"
@@ -122,6 +127,36 @@ _QUANT_SYSTEM = (
     "        FROM `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_current_model_score_master_view` inner_t2\n"
     "        WHERE inner_t2.predict_modl_id = [TARGET_ID]\n"
     "      )\n\n"
+    "TABLE 3 (Global Contact History — Recency Suppression):\n"
+    "  Dataset: bi-srv-hsmdet-pr-7b9def.gch_current\n"
+    "  Three tables used exclusively for recency suppression anti-joins inside CTE 6.\n\n"
+    "  bq_campaign_segment (alias 'a'):\n"
+    "    MOB_BAN, SEGMENT_ID, CAMPAIGN_ID, DELETED_IND, CONTROL_FLG, IN_HOME_DT\n"
+    "    Mandatory operational filters: a.DELETED_IND = '0' AND a.CONTROL_FLG = 'N'\n"
+    "    Link to mobility base: a.MOB_BAN = t.ban\n\n"
+    "  bq_campaign_communication (alias 'b'):\n"
+    "    SEGMENT_ID — joined via: a.SEGMENT_ID = b.SEGMENT_ID\n\n"
+    "  bq_campaign_description (alias 'c'):\n"
+    "    CAMPAIGN_ID, CAMPAIGN_CD, CAMPAIGN_SUB_CD — joined via: a.CAMPAIGN_ID = c.CAMPAIGN_ID\n\n"
+    "  GCH SUPPRESSION RULE — when the exclusions list contains a 'GCH recency suppression'\n"
+    "  entry, embed the following NOT EXISTS block inside CTE 6 alongside the DNC constraints:\n\n"
+    "    AND NOT EXISTS (\n"
+    "      SELECT 1\n"
+    "      FROM `bi-srv-hsmdet-pr-7b9def.gch_current.bq_campaign_segment` a\n"
+    "      INNER JOIN `bi-srv-hsmdet-pr-7b9def.gch_current.bq_campaign_communication` b\n"
+    "        ON a.SEGMENT_ID = b.SEGMENT_ID\n"
+    "      INNER JOIN `bi-srv-hsmdet-pr-7b9def.gch_current.bq_campaign_description` c\n"
+    "        ON a.CAMPAIGN_ID = c.CAMPAIGN_ID\n"
+    "      WHERE a.MOB_BAN = t.ban\n"
+    "        AND a.DELETED_IND = '0'\n"
+    "        AND a.CONTROL_FLG = 'N'\n"
+    "        AND c.CAMPAIGN_CD = '<CAMPAIGN_CD from suppression entry>'\n"
+    "        AND c.CAMPAIGN_SUB_CD = '<CAMPAIGN_SUB_CD from suppression entry>'\n"
+    "        AND a.IN_HOME_DT >= DATE_SUB(CURRENT_DATE(), INTERVAL <N> DAY)\n"
+    "    )\n\n"
+    "  Substitute <CAMPAIGN_CD>, <CAMPAIGN_SUB_CD>, and <N> from the suppression entry.\n"
+    "  Default: CAMPAIGN_CD = 'AAL', CAMPAIGN_SUB_CD = 'AALBAU', N = 30.\n"
+    "  The alias 't' in WHERE a.MOB_BAN = t.ban must reference the CTE 6 source table alias.\n\n"
     "=== BUSINESS RULE MATRICES ===\n\n"
     "LINE OF BUSINESS (lob_desc) MAPPING — always use UPPER(lob_desc) IN (...):\n"
     "  'Postpaid'  -> UPPER(lob_desc) IN ('TELUS POSTPAID', 'KOODO POSTPAID', 'TELUS EPP')\n"
@@ -240,7 +275,9 @@ _QUANT_SYSTEM = (
     "                                         pairs, model scores; AAL behavioral self-join or\n"
     "                                         NBA model join lives here. DNC flags must NOT\n"
     "                                         appear here — they belong exclusively in CTE 6.\n"
-    "    CTE 6 'After: Channel Governance'  : cumulative + DNC flag logic only.\n"
+    "    CTE 6 'After: Channel Governance'  : cumulative + DNC flag logic; also embed GCH\n"
+    "                                         NOT EXISTS anti-join (TABLE 3) when exclusions\n"
+    "                                         contain a 'GCH recency suppression' entry.\n"
     "                                         Apply channel exclusivity sieve when 'only',\n"
     "                                         'exclusively', or 'solely' pairs with a channel:\n"
     "                                         named channels = 0, all unnamed channels = 1.\n"
@@ -301,7 +338,11 @@ Waterfall structure required — seven mandatory layers in this exact sequence:
                                        predictive NBA model join (predict_modl_id = 2008,
                                        classn_nm = 'ADD_A_LINE') per the system rules.
                                        DNC flags must NOT appear here.
-  CTE 6 'After: Channel Governance'  : cumulative + DNC flag constraints only.
+  CTE 6 'After: Channel Governance'  : cumulative + DNC flag constraints; also embed the
+                                       GCH NOT EXISTS anti-join (TABLE 3) when Exclusions
+                                       contains a 'GCH recency suppression' entry — resolve
+                                       CAMPAIGN_CD, CAMPAIGN_SUB_CD, and interval days from
+                                       the suppression string (default AAL/AALBAU, 30 days).
                                        Apply channel exclusivity sieve when 'only',
                                        'exclusively', or 'solely' pairs with a channel:
                                        named channels = 0, all unnamed channels = 1.
