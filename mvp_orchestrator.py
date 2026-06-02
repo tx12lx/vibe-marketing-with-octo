@@ -140,6 +140,7 @@ def _format_audit_log(log: QuantAuditLog) -> str:
         f"  Campaign : {log.request.campaign_name}",
         f"  Code     : {log.request.campaign_code}  /  {log.request.campaign_sub_code}",
         f"  Cadence  : {log.request.cadence}   |   Medium: {log.request.medium}",
+        f"  Target Core Product : {log.request.target_population}",
         "",
         "  AUDIENCE WATERFALL",
         "  " + thin,
