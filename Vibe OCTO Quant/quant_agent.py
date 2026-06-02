@@ -321,6 +321,11 @@ Exclusions : {exclusions_json}
 BQ Project : {bq_project}
 BQ Dataset : {bq_dataset}
 
+Note: Filters and Exclusions above have been sieved by Nexus to contain only Targeting
+Criteria (province scope, propensity deciles, lifecycle windows, GCH recency suppression,
+product pairs, channel governance flags). Segmentation criteria — copy splits, language
+ratios, creative version rules — have been discarded upstream. Do not reintroduce them.
+
 Available schema:
 {schema_context}
 

@@ -76,7 +76,24 @@ _NEXUS_SYSTEM = (
     "a GCH suppression entry in exclusion_layers using this exact literal format:\n"
     "  'GCH recency suppression: exclude BANs contacted via <CAMPAIGN_CD>/<CAMPAIGN_SUB_CD> within <N> days'\n"
     "Default lookback when no window is explicitly stated: 30 days.\n"
-    "Default campaign scope for all AAL initiatives: CAMPAIGN_CD = 'AAL', CAMPAIGN_SUB_CD = 'AALBAU'."
+    "Default campaign scope for all AAL initiatives: CAMPAIGN_CD = 'AAL', CAMPAIGN_SUB_CD = 'AALBAU'.\n\n"
+    "=== WORKFLOW B — DATA BRIEF READING COMPREHENSION ===\n\n"
+    "When deployment records are retrieved from bq_plan_camp_deploy_mdc, each row is the\n"
+    "direct functional business requirement for that campaign execution run. Study ALL fields,\n"
+    "including the databrief_link column (pointer to the source brief document for each run),\n"
+    "to build global strategic context: macro campaign architecture, channel assignments,\n"
+    "lifecycle cadence, and suppression configurations.\n\n"
+    "TARGETING CRITERIA ISOLATION SIEVE — mandatory before synthesizing any sizing recommendation:\n"
+    "  EXTRACT and action these (they gate who enters the audience):\n"
+    "    Province inclusions/exclusions, NBA propensity decile tiers (reco_N ranges),\n"
+    "    GCH recency suppression lookback windows, LOB scope (lob_desc values),\n"
+    "    product ownership/eligibility pairs, lifecycle windows, init_activation_date limits.\n"
+    "  DISCARD entirely (zero impact on COUNT(DISTINCT ban) — never translate into filters):\n"
+    "    Language split ratios, A/B or multivariate test splits, creative version matrices,\n"
+    "    copy version specifications, control group split percentages, sub-segment headcounts.\n"
+    "  DISCREPANCY RULE: if targeting rules conflict across active deployment records,\n"
+    "  synthesize one unified 'Final Recommended Targeting Criteria' set; the most recent\n"
+    "  record takes precedence on any ambiguous parameter."
 )
 
 _TAXONOMY_BQ_QUERY = """
@@ -280,15 +297,49 @@ or:
 }}"""
 
 
-_DEPLOYMENT_ANALYSIS_PROMPT = """You are analyzing {n} deployment record(s) for the AAL Monthly Email (EM) campaign retrieved from a Canadian
-telecom marketing data store. Each record represents a distinct list pull or execution run of the
-monthly email send (camp_id = 'AAL', sub_camp_id = 'AALBAU', medium = 'EM'). Records may reflect
-evolving email targeting cohorts — shifts in NBA propensity tier access, geographic scope, lifecycle
-window boundaries, product eligibility criteria, or behavioral exclusion rules. The databrief_link
-column identifies the source brief document for each run's full targeting ruleset.
+_DEPLOYMENT_ANALYSIS_PROMPT = """You are analyzing {n} deployment record(s) retrieved from the master Data Brief registry
+(`bq_plan_camp_deploy_mdc`) for the AAL Monthly Email portfolio initiative. Each row is the
+direct functional business requirement for a distinct list pull execution of this campaign.
+Study ALL fields — including the databrief_link column, which points to the authoritative
+source brief document for that run — to build global strategic context: macro campaign
+architecture, channel assignments, lifecycle cadence, and suppression configurations.
 
 Deployment Records (sorted most-recent first):
 {deployments_json}
+
+=== STEP 1 — GLOBAL STRATEGIC CONTEXT ===
+Analyze all returned fields to understand the full campaign architecture: which LOB(s) are
+in scope, what lifecycle stage governs eligibility, which channel(s) are active, what
+propensity model drives selection, how the GCH recency suppression rules are configured,
+and any behavioral exclusion windows. The databrief_link column is the pointer to the
+complete parameter set for each run — treat it as the authoritative reference.
+
+=== STEP 2 — TARGETING CRITERIA ISOLATION (THE SIEVE) ===
+Before building any sizing instructions, classify every brief field as Targeting Criteria
+or Segmentation. Only Targeting Criteria flow into the compiled_instructions output.
+
+TARGETING CRITERIA — extract these exclusively into compiled_instructions:
+  Inclusions : province scope (UPPER(province) IN / NOT IN), NBA propensity decile tiers
+               (seg_nm IN ('reco_N', ...)), LOB scope (lob_desc values), product ownership /
+               eligibility pairs (X_ind = 0 AND X_elig = 1), lifecycle windows.
+  Exclusions : GCH recency suppression (30-day lookback via AAL/AALBAU matrix by default),
+               behavioral line age limits (init_activation_date windows).
+  Channel    : em_dnc = 0 for email channel governance.
+
+SEGMENTATION CRITERIA — discard entirely, do NOT translate into filter criteria:
+  These describe post-sizing list operations and have zero mathematical impact on audience
+  volume. Recognised patterns — treat any of these as inert:
+    Language split ratios (e.g. '60% EN / 40% FR') or EN/FR sub-segment headcounts,
+    A/B or multivariate test splits, creative version matrices (Version A / B / C),
+    copy version specifications or sub-allocation percentages,
+    control group split percentages (handled exclusively by control_group_flg = 'N' in CTE 7).
+
+=== STEP 3 — DISCREPANCY RESOLUTION ===
+If you detect conflicting targeting rules across the active deployment records (e.g. different
+province scopes, different propensity tier ranges, different lookback windows), synthesize a
+single unified 'Final Recommended Targeting Criteria' set. The most recent record (first in
+the list) takes precedence on any ambiguous parameter. Note the discrepancy and the adopted
+resolution in the optimization_context field.
 
 Tasks:
 1. SCAN for divergence across deployments — examine propensity tier access, province scope,
@@ -301,15 +352,16 @@ Tasks:
    (e.g. "widened NBA decile access from reco_1-5 to reco_1-6", "narrowed to BC/AB only").
    If only one deployment is present, describe its email send logic and audience intent.
 3. SELECT the target deployment: the most recent record (first in the list).
-4. COMPILE explicit instructions: extract the target deployment's full parameter set into
-   BQ-interpretable filter strings that Quant can directly assemble into a 7-stage waterfall
-   CTE for the email channel. Be precise — include lob_desc values, propensity model IDs,
-   province codes, lifecycle windows, em_dnc = 0 channel governance, and eligibility pairs
-   where relevant.
+4. COMPILE UNIFIED TARGETING INSTRUCTIONS: apply the Step 2 sieve and extract only
+   Targeting Criteria into BQ-interpretable filter strings for Quant's 7-stage waterfall.
+   Include: lob_desc values, propensity model IDs and decile tiers, province codes, lifecycle
+   windows, em_dnc = 0 channel governance, and GCH recency suppression entries where present.
+   Completely exclude all Segmentation Criteria from the compiled output.
 
-Return exactly this JSON (no markdown, no explanation). deployment_deltas must contain at most 3 entries;
-each entry must be a single concise line focused on measurable data changes (date-run differences,
-channel variations, decile-range shifts) — no narrative paragraphs or parenthetical notes.
+Return exactly this JSON (no markdown, no explanation). deployment_deltas must contain at most
+3 entries; each entry must be a single concise line focused on measurable data changes
+(date-run differences, channel variations, decile-range shifts) — no narrative paragraphs
+or parenthetical notes.
 {{
   "strategy_summary": "<MAXIMUM 2 SENTENCES, high-level only. Sentence 1: state the deployment type, channel, cadence, and target audience (LOB, lifecycle stage, propensity tier or behavioral trigger). Sentence 2: state the business objective and any cohort consolidation logic (e.g. re-unifying prior variant splits). Do NOT include Quant instructions, waterfall details, SQL references, or technical filter parameters.>",
   "deployment_deltas": [
@@ -327,10 +379,10 @@ channel variations, decile-range shifts) — no narrative paragraphs or parenthe
     "primary_products": "<products>"
   }},
   "compiled_instructions": {{
-    "target_population": "<precise plain-English description of who qualifies for the email send — include LOB, lifecycle stage, propensity tier or behavioral criteria, and confirm em_dnc eligibility>",
-    "filters": ["<explicit BQ-interpretable filter criterion for this email deployment>"],
-    "exclusion_layers": ["<explicit exclusion layer — e.g. em_dnc = 0 for email channel eligibility>", "<if a lookback window or recency cooldown is present in the brief: 'GCH recency suppression: exclude BANs contacted via AAL/AALBAU within 30 days' — include this entry whenever the deployment record implies a contact recency gate>"],
-    "optimization_context": "<one sentence: strategic context for the Quant audit reflecting this monthly email deployment's specific targeting approach and audience scope>"
+    "target_population": "<precise plain-English description of who qualifies — Targeting Criteria only: LOB scope, lifecycle stage, propensity tier or behavioral criteria, em_dnc eligibility. Exclude all segmentation details.>",
+    "filters": ["<explicit BQ-interpretable Targeting Criterion — inclusions: propensity deciles, province scope, lifecycle windows, product pairs>"],
+    "exclusion_layers": ["<em_dnc = 0 — email channel governance>", "<GCH recency suppression: exclude BANs contacted via AAL/AALBAU within 30 days — include whenever the deployment records imply a contact recency gate or lookback window>"],
+    "optimization_context": "<one sentence: strategic context for the Quant audit. If cross-record discrepancies were found and resolved, name the unified parameter adopted and which record took precedence.>"
   }}
 }}"""
 
@@ -593,25 +645,20 @@ class NexusAgent:
                 from google.cloud import bigquery  # type: ignore
 
             client = bigquery.Client(project=self._bq_project)
+            # Canonical Data Brief retrieval query for the AAL Monthly EM portfolio
+            # initiative. Returns ALL active, non-cancelled deployment records so
+            # Nexus can study every field (including databrief_link) as the functional
+            # business requirements of the campaign before running variance analysis.
             query_str = f"""
-            SELECT
-                campaign        AS campaign_name,
-                camp_id         AS campaign_code,
-                sub_camp_id     AS campaign_sub_code,
-                medium,
-                cadence,
-                campaign_purpose,
-                primary_products,
-                databrief_link,
-                list_pull_date
+            SELECT *
             FROM `{self._bq_table}`
-            WHERE current_ind   = 1
-              AND closed_ind    = 0
-              AND camp_id       = 'AAL'
-              AND sub_camp_id   = 'AALBAU'
-              AND UPPER(medium) = 'EM'
+            WHERE current_ind = 1
+              AND closed_ind = 0
+              AND camp_id = 'AAL'
+              AND sub_camp_id = 'AALBAU'
+              AND UPPER(campaign) = 'AAL MONTHLY EM'
+              AND UPPER(data_status) <> 'CANCELLED'
             ORDER BY list_pull_date DESC
-            LIMIT 5
             """
             rows = [dict(r) for r in client.query(query_str).result()]
             if rows:

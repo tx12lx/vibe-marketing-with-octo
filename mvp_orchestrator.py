@@ -76,8 +76,20 @@ def route(
                            sizing. Runs a direct single-row count via Quant.
 
     workflow 'WORKFLOW_B': Structured Campaign Execution Request — named campaign
-                           brief. Builds a validated AudienceSizingRequest and runs
-                           the full waterfall audit with one correction retry.
+                           brief. Retrieves all active, non-cancelled deployment
+                           records from bq_plan_camp_deploy_mdc using:
+                             camp_id = 'AAL', sub_camp_id = 'AALBAU',
+                             UPPER(campaign) = 'AAL MONTHLY EM',
+                             UPPER(data_status) <> 'CANCELLED'
+                           Nexus reads every returned field as the functional
+                           business requirements of the campaign, applies the
+                           Targeting Criteria isolation sieve (discarding copy
+                           splits, language ratios, and creative version rules),
+                           resolves any cross-record targeting discrepancies into
+                           a unified instruction set, prints the Final Recommended
+                           Targeting Criteria block, then hands the sieved payload
+                           to Quant for the 7-stage waterfall audit with one
+                           correction retry.
     """
     if workflow == "WORKFLOW_A":
         request = nexus.build_sizing_request_from_nl(payload["query"])
