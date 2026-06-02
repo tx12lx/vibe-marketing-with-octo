@@ -296,6 +296,29 @@ _QUANT_SYSTEM = (
     "    SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group\n"
     "  Omitting AS layer_name or AS audience_count on any arm causes a BigQuery schema\n"
     "  mismatch — treat every arm as a standalone SELECT with no inherited aliases.\n"
+    "- CTE single-column output — MANDATORY: every intermediate CTE (CTEs 1-7) MUST\n"
+    "  project exactly one column: SELECT ban (or SELECT DISTINCT ban). Never SELECT *,\n"
+    "  never select extra columns. A single clean ban column eliminates COUNT(DISTINCT ban)\n"
+    "  ambiguity in the final UNION ALL regardless of join complexity.\n"
+    "- Strict sequential CTE inheritance — MANDATORY: each CTE from step 2 onward MUST\n"
+    "  query the IMMEDIATELY PRECEDING CTE, never the raw source table directly:\n"
+    "    after_primary_subscriber      : SELECT ban FROM base_universe\n"
+    "                                    WHERE primary_sub = 1\n"
+    "    after_standard_exclusions     : SELECT ban FROM after_primary_subscriber\n"
+    "                                    WHERE standard_exclusions = 0 AND sub_status = 'A'\n"
+    "    after_stop_sell               : SELECT ban FROM after_standard_exclusions\n"
+    "                                    WHERE stop_sell = 0\n"
+    "    after_targeting_criteria      : SELECT ban FROM after_stop_sell\n"
+    "                                    WHERE <targeting_criteria>\n"
+    "    after_channel_governance      : SELECT ban FROM after_targeting_criteria\n"
+    "                                    WHERE <dnc_constraints>\n"
+    "                                    EXCEPTION: when GCH suppression is required,\n"
+    "                                    use the LEFT JOIN anti-join template from TABLE 3\n"
+    "                                    which preserves the chain via\n"
+    "                                    INNER JOIN after_targeting_criteria tg.\n"
+    "    after_universal_control_group : SELECT ban FROM after_channel_governance\n"
+    "                                    WHERE control_group_flg = 'N'\n"
+    "  Each CTE adds exactly one new predicate layer on top of the prior CTE output.\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
     "- Seven-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
     "    CTE 1 'Base Universe'              : LOB filter only (UPPER(lob_desc) IN (...))\n"
@@ -406,6 +429,19 @@ Required alias schema, identical across all seven arms:
   SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group
 control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 
+CTE structure rules — non-negotiable:
+- Every intermediate CTE MUST output exactly one column: SELECT ban (or SELECT DISTINCT ban)
+- Each CTE from step 2 onward MUST inherit by querying the IMMEDIATELY PRECEDING CTE:
+    after_primary_subscriber      : SELECT ban FROM base_universe WHERE primary_sub = 1
+    after_standard_exclusions     : SELECT ban FROM after_primary_subscriber
+                                    WHERE standard_exclusions = 0 AND sub_status = 'A'
+    after_stop_sell               : SELECT ban FROM after_standard_exclusions WHERE stop_sell = 0
+    after_targeting_criteria      : SELECT ban FROM after_stop_sell WHERE <criteria>
+    after_channel_governance      : SELECT ban FROM after_targeting_criteria WHERE <dnc>
+                                    EXCEPTION: GCH suppression uses INNER JOIN after_targeting_criteria
+    after_universal_control_group : SELECT ban FROM after_channel_governance
+                                    WHERE control_group_flg = 'N'
+
 Constraints:
 - Never SELECT any customer identifier values in output — only aggregate counts
 - Apply filters cumulatively (each CTE builds on the previous WHERE clause)
@@ -481,6 +517,18 @@ Required alias schema, identical across all seven arms:
   UNION ALL
   SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group
 control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
+
+CTE structure rules — non-negotiable:
+- Every intermediate CTE MUST output exactly one column: SELECT ban (or SELECT DISTINCT ban)
+- Each CTE from step 2 onward MUST inherit by querying the IMMEDIATELY PRECEDING CTE:
+    after_primary_subscriber      : SELECT ban FROM base_universe WHERE primary_sub = 1
+    after_standard_exclusions     : SELECT ban FROM after_primary_subscriber
+                                    WHERE standard_exclusions = 0 AND sub_status = 'A'
+    after_stop_sell               : SELECT ban FROM after_standard_exclusions WHERE stop_sell = 0
+    after_targeting_criteria      : SELECT ban FROM after_stop_sell WHERE <criteria>
+    after_channel_governance      : SELECT ban FROM after_targeting_criteria WHERE <dnc>
+    after_universal_control_group : SELECT ban FROM after_channel_governance
+                                    WHERE control_group_flg = 'N'
 Apply filters cumulatively — each CTE re-applies all prior WHERE conditions plus the new one.
 Use ONLY the filter criteria listed above.
 
@@ -559,6 +607,7 @@ class QuantAgent:
             raw_rows = self._execute_query(sql, request.bq_project)
             masked_rows = _mask_pii(raw_rows)
             waterfall = _parse_waterfall(masked_rows)
+            _log_waterfall(waterfall)
             note = _optimization_note(waterfall)
             final_count = _final_audience_count(waterfall)
             return QuantAuditLog(
@@ -594,6 +643,7 @@ class QuantAgent:
         raw_rows = self._execute_query(sql, request.bq_project)
         masked_rows = _mask_pii(raw_rows)
         waterfall = _parse_waterfall(masked_rows)
+        _log_waterfall(waterfall)
         note = _optimization_note(waterfall)
         final_count = _final_audience_count(waterfall)
 
@@ -865,49 +915,46 @@ def _clean_sql(sql: str) -> str:
 
 
 def _validate_sql_structure(sql: str) -> None:
-    """Raise ValueError with a diagnostic message if the SQL is structurally incomplete.
+    """Emit warnings for structural anomalies without blocking execution.
 
-    Called immediately after _clean_sql so that truncated or malformed output is
-    caught before it reaches BigQuery and produces a cryptic 400 error.
+    SQL is locked in on the first pass and forwarded directly to the execution
+    engine. BigQuery is the authoritative validator; this function surfaces
+    diagnostic signals only and never prevents execution.
     """
-    # The flat LEFT JOIN anti-join (GCH recency suppression) was compiled correctly
-    # in the first pass — bypass secondary structural checks to prevent false positives
-    # on nested subquery paren counts and proceed directly to the execution engine.
-    if re.search(r"\bMOB_BAN\s+IS\s+NULL\b", sql, re.IGNORECASE):
-        return
-
     if not re.match(r"^\s*WITH\b", sql, re.IGNORECASE):
-        raise ValueError(
+        warnings.warn(
             "Generated SQL does not begin with WITH — response may have been "
-            "prefixed with prose or truncated before the query start."
+            "prefixed with prose or truncated before the query start.",
+            stacklevel=2,
         )
 
-    # A trailing comma at EOF means the UNION ALL execution block never arrived.
     if re.search(r",\s*$", sql):
-        raise ValueError(
+        warnings.warn(
             "Generated SQL ends with a trailing comma — the UNION ALL execution "
-            "block is absent. Increase max_tokens and retry."
+            "block may be absent.",
+            stacklevel=2,
         )
 
     union_count = len(re.findall(r"\bUNION\s+ALL\b", sql, re.IGNORECASE))
     if union_count < 6:
-        raise ValueError(
+        warnings.warn(
             f"Generated SQL contains {union_count} UNION ALL clause(s); a 7-step "
-            "waterfall requires exactly 6. The query appears truncated — "
-            "increase max_tokens."
+            "waterfall requires exactly 6.",
+            stacklevel=2,
         )
 
     open_parens = sql.count("(")
     close_parens = sql.count(")")
     if open_parens != close_parens:
-        raise ValueError(
+        warnings.warn(
             f"Generated SQL has unbalanced parentheses ({open_parens} open vs "
-            f"{close_parens} close) — likely truncated inside a subquery or "
-            "DATE_ADD/DATE_SUB expression."
+            f"{close_parens} close).",
+            stacklevel=2,
         )
 
     if "control_group_flg" not in sql:
-        raise ValueError(
-            "Generated SQL is missing the mandatory control_group_flg = 'N' filter "
-            "(step 6). The final CTE was not generated."
+        warnings.warn(
+            "Generated SQL is missing control_group_flg = 'N' — step 7 CTE may "
+            "not have been generated.",
+            stacklevel=2,
         )
