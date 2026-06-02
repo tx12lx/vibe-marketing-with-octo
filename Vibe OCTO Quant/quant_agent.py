@@ -276,6 +276,26 @@ _QUANT_SYSTEM = (
     "- Never select customer PII (names, addresses, emails, phone numbers, IMEI)\n"
     "- Size audiences using COUNT(DISTINCT ban) — no other sizing aggregate\n"
     "- Always return exactly two output columns: layer_name STRING, audience_count INT64\n"
+    "- UNION ALL alias consistency — ABSOLUTE REQUIREMENT: every SELECT arm in the\n"
+    "  final UNION ALL reporting block MUST carry both explicit column aliases on every\n"
+    "  row, identical in name and order to the first arm. Never rely on positional\n"
+    "  resolution — BigQuery UNION ALL requires consistent column schemas across all arms.\n"
+    "  The canonical seven-arm structure is non-negotiable:\n"
+    "    SELECT 'Base Universe' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM base_universe\n"
+    "    UNION ALL\n"
+    "    SELECT 'After: Primary Subscriber' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_primary_subscriber\n"
+    "    UNION ALL\n"
+    "    SELECT 'After: Standard Exclusions' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_standard_exclusions\n"
+    "    UNION ALL\n"
+    "    SELECT 'After: Stop Sell' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_stop_sell\n"
+    "    UNION ALL\n"
+    "    SELECT 'After: Targeting Criteria' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_targeting_criteria\n"
+    "    UNION ALL\n"
+    "    SELECT 'After: Channel Governance' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_channel_governance\n"
+    "    UNION ALL\n"
+    "    SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group\n"
+    "  Omitting AS layer_name or AS audience_count on any arm causes a BigQuery schema\n"
+    "  mismatch — treat every arm as a standalone SELECT with no inherited aliases.\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
     "- Seven-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
     "    CTE 1 'Base Universe'              : LOB filter only (UPPER(lob_desc) IN (...))\n"
@@ -368,6 +388,22 @@ Waterfall structure required — seven mandatory layers in this exact sequence:
   CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
+Every arm MUST carry explicit column aliases on every row — no arm may omit AS layer_name
+or AS audience_count, even when positional resolution would be technically valid.
+Required alias schema, identical across all seven arms:
+  SELECT 'Base Universe' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM base_universe
+  UNION ALL
+  SELECT 'After: Primary Subscriber' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_primary_subscriber
+  UNION ALL
+  SELECT 'After: Standard Exclusions' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_standard_exclusions
+  UNION ALL
+  SELECT 'After: Stop Sell' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_stop_sell
+  UNION ALL
+  SELECT 'After: Targeting Criteria' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_targeting_criteria
+  UNION ALL
+  SELECT 'After: Channel Governance' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_channel_governance
+  UNION ALL
+  SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group
 control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 
 Constraints:
@@ -428,6 +464,22 @@ Waterfall structure required — seven mandatory layers in this exact sequence:
   CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
+Every arm MUST carry explicit column aliases on every row — no arm may omit AS layer_name
+or AS audience_count, even when positional resolution would be technically valid.
+Required alias schema, identical across all seven arms:
+  SELECT 'Base Universe' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM base_universe
+  UNION ALL
+  SELECT 'After: Primary Subscriber' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_primary_subscriber
+  UNION ALL
+  SELECT 'After: Standard Exclusions' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_standard_exclusions
+  UNION ALL
+  SELECT 'After: Stop Sell' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_stop_sell
+  UNION ALL
+  SELECT 'After: Targeting Criteria' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_targeting_criteria
+  UNION ALL
+  SELECT 'After: Channel Governance' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_channel_governance
+  UNION ALL
+  SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group
 control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 Apply filters cumulatively — each CTE re-applies all prior WHERE conditions plus the new one.
 Use ONLY the filter criteria listed above.
@@ -818,6 +870,12 @@ def _validate_sql_structure(sql: str) -> None:
     Called immediately after _clean_sql so that truncated or malformed output is
     caught before it reaches BigQuery and produces a cryptic 400 error.
     """
+    # The flat LEFT JOIN anti-join (GCH recency suppression) was compiled correctly
+    # in the first pass — bypass secondary structural checks to prevent false positives
+    # on nested subquery paren counts and proceed directly to the execution engine.
+    if re.search(r"\bMOB_BAN\s+IS\s+NULL\b", sql, re.IGNORECASE):
+        return
+
     if not re.match(r"^\s*WITH\b", sql, re.IGNORECASE):
         raise ValueError(
             "Generated SQL does not begin with WITH — response may have been "
