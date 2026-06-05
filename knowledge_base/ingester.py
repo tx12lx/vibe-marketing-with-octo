@@ -2,7 +2,7 @@
 
 Isolation contract: this module imports ONLY google.cloud.bigquery, BriefFetcher
 from the Nexus core package, and the Python standard library.  It never imports
-from nexus_agent, quant_agent, or mvp_orchestrator.
+from nexus_agent, quant_agent, or vibe_orchestrator.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from typing import Optional
 from google.cloud import bigquery
 
 # Locate and register the Nexus package root so BriefFetcher is importable
-# without touching nexus_agent, quant_agent, or mvp_orchestrator.
+# without touching nexus_agent, quant_agent, or vibe_orchestrator.
 _NEXUS_DIR = Path(__file__).resolve().parent.parent / "Vibe OCTO Nexus"
 if str(_NEXUS_DIR) not in sys.path:
     sys.path.insert(0, str(_NEXUS_DIR))

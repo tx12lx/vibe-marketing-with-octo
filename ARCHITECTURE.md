@@ -31,7 +31,7 @@ Every validated execution currently lives only in engineers' heads. There is no 
 5. **7-step CTE waterfall is non-negotiable.** The linear `SELECT *` inheritance pattern and canonical seven-step sequence are inviolable contracts. No agent may alter the waterfall shape.
 6. **GCH alias contract is immutable.** `a_gch`, `b_gch`, `c_gch` — the three GCH table aliases, their join keys, and the `SELECT DISTINCT b_gch.MOB_BAN` targeting key are frozen. Any deviation is a compilation error.
 7. **ADC everywhere.** No service account key files. All GCP authentication uses Application Default Credentials.
-8. **Ingestion pipeline is isolated from agent code.** `knowledge_base/ingester.py` never imports from `nexus_agent.py`, `quant_agent.py`, or `mvp_orchestrator.py`. Agents consume from pre-built indexes; they do not participate in ingestion.
+8. **Ingestion pipeline is isolated from agent code.** `knowledge_base/ingester.py` never imports from `nexus_agent.py`, `quant_agent.py`, or `vibe_orchestrator.py`. Agents consume from pre-built indexes; they do not participate in ingestion.
 9. **HITL is the only gate for Gold Tier promotion.** No record is ever automatically promoted to Gold Tier. A human must answer `Y` at the audit prompt, which writes to the local `verified_app_registry.json`. The next scheduled ingestion run sweeps it into the compiled `semantic_knowledge_index.json` as a permanent Gold blueprint.
 
 ---
@@ -73,7 +73,7 @@ Every validated execution currently lives only in engineers' heads. There is no 
  ┌──────────────────────────────────────────────────────────────────────────────────────┐
  │  PILLAR 3: GATEWAY ORCHESTRATOR & UNIVERSAL JSON CONTRACT                            │
  │                                                                                      │
- │  mvp_orchestrator.py                                                                 │
+ │  vibe_orchestrator.py                                                                 │
  │    _AGENT_REGISTRY: nexus, quant, briefing                                           │
  │    startup: ingestion + schema discovery                                             │
  │    _run_console(): interactive loop                                                  │
@@ -377,7 +377,7 @@ def to_flat_string(self, url: str) -> str:
   "schedule": {
     "mode": "on_startup",
     "interval_hours": 24,
-    "note": "on_startup triggers refresh each time mvp_orchestrator.py launches"
+    "note": "on_startup triggers refresh each time vibe_orchestrator.py launches"
   },
   "source": {
     "bq_project": "wb-tian-pr-d0dbe6",
@@ -408,7 +408,7 @@ The `knowledge_base/` package imports only:
 - `Vibe OCTO Nexus/core/brief_fetcher.py` (for `BriefFetcher`)
 - Standard library (`json`, `dataclasses`, `pathlib`, `datetime`, `os`, `tempfile`)
 
-It never imports from `nexus_agent.py`, `quant_agent.py`, or `mvp_orchestrator.py`.
+It never imports from `nexus_agent.py`, `quant_agent.py`, or `vibe_orchestrator.py`.
 
 ---
 
@@ -522,7 +522,7 @@ TTL check: `(datetime.now() - datetime.fromisoformat(cached["fetched_at"])).seco
 Called once at orchestrator startup:
 
 ```python
-# mvp_orchestrator.py startup sequence
+# vibe_orchestrator.py startup sequence
 schema_discovery = SchemaDiscoveryLayer(
     project="bi-srv-hsmdet-pr-7b9def",
     datasets=["adobe"],
@@ -548,7 +548,7 @@ nexus.set_runtime_schema_snapshot(snapshot.to_dict())  # new method on NexusAgen
 
 ### Overview
 
-The Gateway Nexus (NexusAgent + mvp_orchestrator.py) is the sole translator between unstructured human input and the structured `UniversalJSONSpec` that all downstream workers consume. Its output is the immutable interface for campaign execution. No worker ever re-interprets the original user prompt.
+The Gateway Nexus (NexusAgent + vibe_orchestrator.py) is the sole translator between unstructured human input and the structured `UniversalJSONSpec` that all downstream workers consume. Its output is the immutable interface for campaign execution. No worker ever re-interprets the original user prompt.
 
 ### 5.1 Schema: `UniversalJSONSpec` (new in `pydantic_schemas.py`)
 
@@ -680,7 +680,7 @@ def _run_discrepancy_audit(
     """
 ```
 
-### 5.4 `mvp_orchestrator.py` Changes
+### 5.4 `vibe_orchestrator.py` Changes
 
 **Updated startup sequence:**
 ```python
@@ -1219,7 +1219,7 @@ def patch_from_failure(self, log_entry: "SemanticFailureLog") -> int:
 ### Startup Sequence
 
 ```
-python mvp_orchestrator.py
+python vibe_orchestrator.py
   │
   ├─ 1. KnowledgeBaseIngester.run_full_refresh()
   │     a. BQ read: wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_knowledge
@@ -1363,7 +1363,7 @@ All schemas reside in `pydantic_schemas.py`. Existing schemas are preserved with
 | File | Changes |
 |---|---|
 | `pydantic_schemas.py` | Add `UniversalJSONSpec`, `BriefingOutput`, `SemanticFailureLog` |
-| `mvp_orchestrator.py` | Import `BriefingAgent`; update `_AGENT_REGISTRY`; update `route()` and `main()` with startup sequence, schema discovery, and HITL |
+| `vibe_orchestrator.py` | Import `BriefingAgent`; update `_AGENT_REGISTRY`; update `route()` and `main()` with startup sequence, schema discovery, and HITL |
 | `Vibe OCTO Nexus/nexus_agent.py` | Add `build_universal_spec()`, `_run_discrepancy_audit()`, `set_runtime_schema_snapshot()`; migrate `_TAXONOMY_BQ_QUERY` and `_find_brief_for_campaign()` to `wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_knowledge` with dynamically resolved column names |
 | `Vibe OCTO Nexus/core/brief_fetcher.py` | Add `to_flat_string()` |
 | `Vibe OCTO Nexus/core/glossary.py` | Add `patch_from_failure()` |
@@ -1434,7 +1434,7 @@ No `roles/bigquery.dataEditor` or `roles/bigquery.admin` is required or should b
 
 ### 13.1 Pillar 1: Knowledge Base
 
-**Isolation:** `import knowledge_base.ingester` in a clean Python shell. Assert that `"nexus_agent"`, `"quant_agent"`, `"mvp_orchestrator"` are absent from `sys.modules`.
+**Isolation:** `import knowledge_base.ingester` in a clean Python shell. Assert that `"nexus_agent"`, `"quant_agent"`, `"vibe_orchestrator"` are absent from `sys.modules`.
 
 **Classification boundary:** Mock a BQ row with non-empty targeting and segment summary fields. Assert `_classify_row(row) == "GOLD"`. Remove one field. Assert `"BRONZE"`.
 

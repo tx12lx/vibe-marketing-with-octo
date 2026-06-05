@@ -42,9 +42,17 @@ for _p in [str(_NEXUS_DIR), str(_ROOT_DIR)]:
 
 load_dotenv(_NEXUS_DIR / ".env")
 
-from pydantic_schemas import AdHocSizingRequest, AudienceSizingRequest, NexusErrorPayload, QuantAuditLog
+from pydantic_schemas import (
+    AdHocSizingRequest,
+    AudienceSizingRequest,
+    NexusErrorPayload,
+    QuantAuditLog,
+    UniversalJSONSpec,
+)
 
 if TYPE_CHECKING:
+    from knowledge_base.tier_index import GoldTierIndex
+    from knowledge_base.ingester import GoldCampaignRecord
     from quant_agent import QuantAgent
 
 _FUELIX_BASE = "https://api.fuelix.ai"
@@ -387,6 +395,47 @@ or parenthetical notes.
 }}"""
 
 
+_LOGIC_DRIFT_PROMPT = """\
+You are a targeting logic auditor for a Canadian telecom marketing platform.
+Compare the CURRENT FILTER LIST against the HISTORICAL GOLD BLUEPRINT SUMMARY.
+Respond with exactly one word: ALIGNED or DRIFTED.
+
+HISTORICAL GOLD BLUEPRINT SUMMARY:
+{targeting_summary}
+
+CURRENT FILTER LIST:
+{filters_text}
+
+Rules:
+- DRIFTED: structural intent has fundamentally changed. Examples: different LOB scope,
+  opposite eligibility direction, removed a core exclusion layer, switched campaign type.
+- ALIGNED: minor parameter adjustments only. Examples: different propensity decile range,
+  province additions or removals, adjusted lookback window, reordered filter list.
+- When uncertain, respond ALIGNED.
+
+Respond with exactly one word — no explanation, no JSON, no punctuation."""
+
+# Column tokens that appear in filter strings but are NOT physical DB column names.
+# Skipped during the unknown_column discrepancy check.
+_SCHEMA_AUDIT_IGNORE = frozenset({
+    # SQL keywords and operators
+    "select", "from", "where", "and", "or", "not", "in", "is", "null",
+    "true", "false", "case", "when", "then", "else", "end", "like", "as",
+    "exists", "between", "distinct",
+    # GCH table aliases (immutable frozen contract)
+    "a_gch", "b_gch", "c_gch",
+    # Common table aliases
+    "t", "t1", "t2", "t3", "inner_t2",
+    # SQL functions (in case function-stripping regex misses an edge case)
+    "upper", "lower", "trim", "date", "current_date", "max", "min", "count",
+    "coalesce", "cast", "substr", "length",
+    # BQ date/interval keywords
+    "interval", "day", "month", "year",
+    # Campaign codes that appear in GCH filter text but are not columns
+    "aal", "aalbau",
+})
+
+
 class NexusAgent:
     def __init__(self) -> None:
         self._api_key = os.getenv("FUELIX_API_KEY")
@@ -479,6 +528,99 @@ class NexusAgent:
 
         print("  Recognized WORKFLOW A: Ad-Hoc Exploratory Request.\n")
         return "WORKFLOW_A", None
+
+    def build_universal_spec(
+        self,
+        brief: dict,
+        gold_index: "GoldTierIndex",
+        schema_snapshot: dict,
+    ) -> Optional[UniversalJSONSpec]:
+        """Build the UniversalJSONSpec from a campaign brief dict.
+
+        1. Derives targeting data via the existing deployment matrix logic.
+        2. Extracts camp_id/sub_camp_id and calls gold_index.lookup().
+        3. Runs _run_discrepancy_audit() to populate discrepancy_flags.
+        4. Assembles brief_agent_inputs for BriefingAgent (Pillar 4).
+        5. Returns a Pydantic-validated UniversalJSONSpec, or None on failure.
+        """
+        # Step 1: Derive the AudienceSizingRequest via existing brief logic
+        sizing_request = self.build_sizing_request_from_brief(brief)
+        if sizing_request is None:
+            return None
+
+        # Step 2: Gold tier lookup
+        camp_id = sizing_request.campaign_code
+        sub_camp_id = sizing_request.campaign_sub_code
+        gold_record = gold_index.lookup(camp_id, sub_camp_id)
+
+        if gold_record is not None:
+            campaign_tier = "GOLD"
+            gold_blueprint_id = f"{camp_id}::{sub_camp_id}"
+            knowledge_source = "brief_text" if gold_record.brief_text else "bq_metadata"
+        else:
+            campaign_tier = "BRONZE"
+            gold_blueprint_id = None
+            knowledge_source = "bq_metadata" if brief.get("deployments") else "nl_only"
+
+        # Step 3: Discrepancy audit (non-blocking; populates advisory flags)
+        filters = list(sizing_request.filters or [])
+        exclusion_layers = list(sizing_request.exclusion_layers or [])
+        discrepancy_flags = self._run_discrepancy_audit(
+            filters=filters,
+            exclusion_layers=exclusion_layers,
+            schema_snapshot=schema_snapshot,
+            gold_record=gold_record,
+            campaign_code=camp_id,
+        )
+
+        # Step 4: Brief agent inputs for BriefingAgent (Pillar 4 consumer)
+        brief_agent_inputs = {
+            "raw_prompt": brief.get("raw_prompt", ""),
+            "campaign_name": sizing_request.campaign_name,
+            "targeting_summary": gold_record.targeting_summary if gold_record else "",
+            "segment_summary": gold_record.segment_summary if gold_record else "",
+            "brief_text": gold_record.brief_text if gold_record else "",
+        }
+
+        # Derive which DNC column governs this channel
+        _dnc_col_map = {"EM": "em_dnc", "SMS": "sms_dnc", "OB": "ob_dnc", "DM": "dm_dnc"}
+        medium_upper = sizing_request.medium.upper().strip()
+        dnc_channels = [_dnc_col_map[medium_upper]] if medium_upper in _dnc_col_map else []
+
+        # Step 5: Validate and return the UniversalJSONSpec
+        try:
+            return UniversalJSONSpec(
+                campaign_name=sizing_request.campaign_name,
+                campaign_code=camp_id,
+                campaign_sub_code=sub_camp_id,
+                cadence=sizing_request.cadence,
+                medium=sizing_request.medium,
+                campaign_tier=campaign_tier,
+                knowledge_source=knowledge_source,
+                gold_blueprint_id=gold_blueprint_id,
+                target_population=sizing_request.target_population,
+                filters=sizing_request.filters,
+                exclusion_layers=sizing_request.exclusion_layers,
+                optimization_context=sizing_request.optimization_context,
+                bq_project=sizing_request.bq_project,
+                bq_dataset=sizing_request.bq_dataset,
+                discrepancy_flags=discrepancy_flags,
+                runtime_schema_snapshot=schema_snapshot if schema_snapshot else None,
+                brief_agent_inputs=brief_agent_inputs,
+                require_gch_suppression=any(
+                    "gch" in e.lower() for e in exclusion_layers
+                ),
+                dnc_channels=dnc_channels,
+            )
+        except ValidationError as exc:
+            print(
+                f"  [Nexus] UniversalJSONSpec validation failed"
+                f" ({exc.error_count()} field error(s))"
+            )
+            return None
+        except Exception as exc:
+            print(f"  [Nexus] Spec build error: {exc.__class__.__name__}: {exc}")
+            return None
 
     def route_with_retry(
         self,
@@ -592,6 +734,130 @@ class NexusAgent:
         except Exception as exc:
             print(f"  [Nexus] Synthesis build error: {exc.__class__.__name__}: {exc}")
             return None
+
+    # ------------------------------------------------------------------
+    # Discrepancy audit — non-blocking, advisory only
+    # ------------------------------------------------------------------
+
+    def _run_discrepancy_audit(
+        self,
+        filters: list[str],
+        exclusion_layers: list[str],
+        schema_snapshot: dict,
+        gold_record: "Optional[GoldCampaignRecord]",
+        campaign_code: str = "",
+    ) -> list[str]:
+        """Non-blocking audit. Returns list of advisory flag strings.
+
+        Execution proceeds regardless of flag content. Four flag types:
+
+          unknown_column
+            Fired when a filter string references a column not found in the
+            live SchemaSnapshot. Column name extracted by parsing the token
+            immediately before =, IN, NOT IN, LIKE, or IS operators.
+
+          missing_standard_exclusion
+            Fired when none of the filters or exclusion_layers contain
+            standard_exclusions, sub_status, or primary_sub patterns.
+            These are applied at CTE steps 2-3 in the waterfall.
+
+          gch_bypass_detected
+            Fired for AAL campaigns when no 'GCH' or 'recency suppression'
+            string is present in exclusion_layers.
+
+          logic_drift
+            Fired for GOLD campaigns when an LLM evaluation detects that the
+            new filters have structurally diverged from the gold_record
+            targeting summary. Uses _call_simple() with a compact prompt.
+        """
+        flags: list[str] = []
+        all_clauses = list(filters) + list(exclusion_layers)
+        blob = " ".join(all_clauses)
+
+        # --- 1. unknown_column ---
+        if schema_snapshot:
+            known_columns: set[str] = set()
+            for col in schema_snapshot.get("columns", []):
+                if isinstance(col, dict):
+                    known_columns.add(col.get("column_name", "").lower())
+                elif hasattr(col, "column_name"):
+                    known_columns.add(col.column_name.lower())
+
+            if known_columns:
+                # Strip function wrappers so UPPER(province) yields "province"
+                clean = re.sub(
+                    r"\b(?:UPPER|LOWER|TRIM|DATE)\s*\(([^)]+)\)",
+                    r"\1",
+                    blob,
+                    flags=re.IGNORECASE,
+                )
+                col_pat = re.compile(
+                    r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*"
+                    r"(?:=|(?:NOT\s+)?IN\b|LIKE\b|IS(?:\s+NOT)?\b)",
+                    re.IGNORECASE,
+                )
+                flagged_cols: set[str] = set()
+                for m in col_pat.finditer(clean):
+                    col_name = m.group(1).lower()
+                    if (
+                        col_name not in _SCHEMA_AUDIT_IGNORE
+                        and col_name not in known_columns
+                        and col_name not in flagged_cols
+                    ):
+                        flagged_cols.add(col_name)
+                        flags.append(
+                            f"unknown_column: '{col_name}' not found in live"
+                            " adobe schema -- verify column name"
+                        )
+
+        # --- 2. missing_standard_exclusion ---
+        _std_patterns = ("standard_exclusions", "sub_status", "primary_sub")
+        if not any(p in blob.lower() for p in _std_patterns):
+            flags.append(
+                "missing_standard_exclusion: no standard suppression pattern"
+                " detected (standard_exclusions / sub_status / primary_sub)"
+                " -- confirm base filters are applied at CTE steps 2-3"
+            )
+
+        # --- 3. gch_bypass_detected — AAL campaigns only ---
+        is_aal = (
+            campaign_code.upper() == "AAL"
+            or (gold_record is not None and gold_record.camp_id.upper() == "AAL")
+        )
+        if is_aal:
+            excl_blob = " ".join(exclusion_layers).lower()
+            if "gch" not in excl_blob and "recency suppression" not in excl_blob:
+                flags.append(
+                    "gch_bypass_detected: AAL campaign has no Global Contact"
+                    " History (GCH) recency suppression layer in"
+                    " exclusion_layers -- GCH anti-join is required for all"
+                    " AAL executions"
+                )
+
+        # --- 4. logic_drift — GOLD path only, LLM-evaluated ---
+        if gold_record is not None and gold_record.targeting_summary:
+            filters_text = (
+                "\n".join(f"  - {f}" for f in filters)
+                if filters
+                else "  (none)"
+            )
+            drift_prompt = _LOGIC_DRIFT_PROMPT.format(
+                targeting_summary=gold_record.targeting_summary[:1200],
+                filters_text=filters_text,
+            )
+            try:
+                response = self._call_simple(drift_prompt)
+                if "DRIFTED" in response.upper():
+                    flags.append(
+                        "logic_drift: filter intent has structurally diverged"
+                        " from the gold blueprint targeting summary"
+                        " -- review side-by-side comparison before execution"
+                    )
+            except Exception:
+                # Non-blocking: skip drift check if the LLM call fails
+                pass
+
+        return flags
 
     # ------------------------------------------------------------------
     # Brief loading — BQ first, local glossary fallback

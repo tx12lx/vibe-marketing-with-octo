@@ -1,5 +1,5 @@
 """
-mvp_orchestrator.py — Vibe Marketing with OCTO
+vibe_orchestrator.py — Vibe Marketing with OCTO
 Central decoupled router.
 
 Design principle: this file is the only wiring layer. It knows which agents
@@ -44,8 +44,10 @@ for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR)]:
 
 from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
-from pydantic_schemas import QuantAuditLog  # noqa: E402
+from pydantic_schemas import NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer  # noqa: E402
+from knowledge_base.ingester import KnowledgeBaseIngester  # noqa: E402
+from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 
 
 def _silence_google_noise() -> None:
@@ -164,11 +166,121 @@ def _build_dynamic_context(query_text: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Agent registry — the ONLY place agent classes are registered.
+# BriefingAgent (briefing_v1) will be added here when Pillar 4 is implemented.
 # ---------------------------------------------------------------------------
 _AGENT_REGISTRY: dict[str, type] = {
     "nexus": NexusAgent,
     "quant": QuantAgent,
 }
+
+
+# ---------------------------------------------------------------------------
+# Discrepancy audit display
+# ---------------------------------------------------------------------------
+
+def _print_discrepancy_audit(spec: UniversalJSONSpec) -> None:
+    """Print advisory flags with structured formatting before any query executes.
+
+    For logic_drift flags, appends a side-by-side comparison between the gold
+    blueprint targeting summary and the current request's filters so the marketer
+    can review the divergence before deciding to proceed.
+    """
+    flags = spec.discrepancy_flags
+    if not flags:
+        return
+
+    sep = "=" * 68
+    thin = "-" * 50
+
+    print(f"\n{sep}")
+    print("  [DISCREPANCY AUDIT]  Advisory Flags Detected Before Execution")
+    print(sep)
+    print()
+
+    has_drift = any(f.startswith("logic_drift:") for f in flags)
+
+    for flag in flags:
+        colon_pos = flag.find(":")
+        if colon_pos == -1:
+            flag_label = "ADVISORY"
+            flag_detail = flag
+        else:
+            flag_label = flag[:colon_pos].strip().upper().replace("_", " ")
+            flag_detail = flag[colon_pos + 1:].strip()
+
+        print(f"  ! [{flag_label}]")
+        # Wrap detail lines at 64 chars for readability
+        while len(flag_detail) > 64:
+            break_at = flag_detail.rfind(" ", 0, 64)
+            if break_at <= 0:
+                break_at = 64
+            print(f"      {flag_detail[:break_at]}")
+            flag_detail = flag_detail[break_at:].lstrip()
+        if flag_detail:
+            print(f"      {flag_detail}")
+        print()
+
+    if has_drift:
+        gold_summary = ""
+        if spec.brief_agent_inputs:
+            gold_summary = spec.brief_agent_inputs.get("targeting_summary", "")
+
+        print(f"  {thin}")
+        print("  LOGIC DRIFT — Targeting Summary Comparison")
+        print(f"  {thin}")
+        print()
+
+        col_w = 30
+        print(f"  {'GOLD BLUEPRINT (Historical)':<{col_w}}  CURRENT REQUEST FILTERS")
+        print(f"  {'─' * col_w}  {'─' * col_w}")
+
+        # Build left column: word-wrapped gold targeting summary
+        gold_lines: list[str] = []
+        if gold_summary:
+            words = gold_summary.split()
+            line = ""
+            for word in words:
+                candidate = (line + " " + word).strip() if line else word
+                if len(candidate) <= col_w:
+                    line = candidate
+                else:
+                    if line:
+                        gold_lines.append(line)
+                    line = word[:col_w]
+            if line:
+                gold_lines.append(line)
+        else:
+            gold_lines = ["(no gold blueprint available)"]
+
+        # Build right column: filters then exclusion layers
+        current_lines: list[str] = []
+        for f in spec.filters or []:
+            f_str = f.strip()
+            while len(f_str) > col_w:
+                current_lines.append(f_str[:col_w])
+                f_str = f_str[col_w:]
+            if f_str:
+                current_lines.append(f_str)
+        if spec.exclusion_layers:
+            current_lines.append("-- Exclusions --")
+            for excl in spec.exclusion_layers:
+                e_str = excl.strip()
+                while len(e_str) > col_w:
+                    current_lines.append(e_str[:col_w])
+                    e_str = e_str[col_w:]
+                if e_str:
+                    current_lines.append(e_str)
+
+        max_rows = max(len(gold_lines), len(current_lines), 1)
+        for i in range(max_rows):
+            left = gold_lines[i] if i < len(gold_lines) else ""
+            right = current_lines[i] if i < len(current_lines) else ""
+            print(f"  {left:<{col_w}}  {right}")
+
+        print()
+
+    print(sep)
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -180,39 +292,24 @@ def route(
     quant: QuantAgent,
     workflow: str,
     payload: dict,
+    gold_index: GoldTierIndex,
+    schema_snapshot: dict,
 ) -> Optional[QuantAuditLog]:
     """Dispatch a classified request to the correct pipeline branch.
 
     workflow 'WORKFLOW_A': Ad-Hoc Exploratory Request — natural language audience
                            sizing. Runs a direct single-row count via Quant.
+                           Unchanged from pre-Pillar 3 behavior.
 
     workflow 'WORKFLOW_B': Structured Campaign Execution Request — named campaign
-                           brief. Retrieves all active, non-cancelled deployment
-                           records from bq_plan_camp_deploy_mdc using:
-                             camp_id = 'AAL', sub_camp_id = 'AALBAU',
-                             UPPER(campaign) = 'AAL MONTHLY EM',
-                             UPPER(data_status) <> 'CANCELLED'
-                           Nexus reads every returned field as the functional
-                           business requirements of the campaign, applies the
-                           Targeting Criteria isolation sieve (discarding copy
-                           splits, language ratios, and creative version rules),
-                           resolves any cross-record targeting discrepancies into
-                           a unified instruction set, prints the Final Recommended
-                           Targeting Criteria block, then hands the sieved payload
-                           to Quant for the 7-stage waterfall audit with one
-                           correction retry.
-                           When the sieved exclusions list contains a GCH recency
-                           suppression entry, Quant compiles the three-table LEFT
-                           JOIN anti-join under the fixed GCH alias contract:
-                             a_gch = bq_campaign_segment
-                             b_gch = bq_campaign_communication  (MOB_BAN source)
-                             c_gch = bq_campaign_description
-                           TARGETING KEY LAW: inner SELECT must always be
-                             SELECT DISTINCT b_gch.MOB_BAN — never a_gch or c_gch.
-                           DATE CASTING LAW : lookback predicate must always be
-                             DATE(a_gch.IN_HOME_DT) >= DATE_SUB(CURRENT_DATE(),
-                             INTERVAL X DAY) — bare IN_HOME_DT comparisons are
-                             a DATETIME/DATE type mismatch.
+                           brief. Builds a UniversalJSONSpec via NexusAgent (Pillar 3
+                           Gateway), runs the discrepancy audit, then dispatches to
+                           Quant via audit_from_spec(). The spec is the immutable
+                           inter-agent contract consumed by all downstream workers.
+
+                           On NexusErrorPayload from Quant, falls back to the
+                           existing route_with_retry() for one taxonomy-guided
+                           correction attempt.
     """
     if workflow == "WORKFLOW_A":
         request = nexus.build_sizing_request_from_nl(payload["query"])
@@ -225,10 +322,25 @@ def route(
         return None
 
     elif workflow == "WORKFLOW_B":
-        request = nexus.build_sizing_request_from_brief(payload)
-        if request is None:
+        # Pillar 3: build the universal inter-agent contract
+        spec = nexus.build_universal_spec(payload, gold_index, schema_snapshot)
+        if spec is None:
             return None
-        return nexus.route_with_retry(request, quant)
+
+        # Surface advisory flags to the marketer before any query executes
+        if spec.discrepancy_flags:
+            _print_discrepancy_audit(spec)
+
+        # Dispatch to Quant via the UniversalJSONSpec entry point
+        result = quant.audit_from_spec(spec)
+
+        if isinstance(result, NexusErrorPayload):
+            # One automated correction pass via the existing taxonomy-guided retry
+            result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
+
+        if isinstance(result, QuantAuditLog):
+            return result
+        return None
 
     else:
         print(f"\n[ERROR]: Unknown workflow '{workflow}'")
@@ -289,7 +401,12 @@ def _format_audit_log(log: QuantAuditLog) -> str:
 # Interactive console — dual-intent engine
 # ---------------------------------------------------------------------------
 
-def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
+def _run_console(
+    nexus: NexusAgent,
+    quant: QuantAgent,
+    gold_index: GoldTierIndex,
+    schema_snapshot: dict,
+) -> None:
     while True:
         print("  How can the OCTO team help you today?\n")
         query = input("  > ").strip()
@@ -309,7 +426,14 @@ def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
 
         print("  [NEXUS AGENT] -> Analyzing intent...\n")
         workflow, payload = nexus.classify_and_route(query)
-        log = route(nexus, quant, workflow, payload if payload is not None else {"query": query})
+        log = route(
+            nexus,
+            quant,
+            workflow,
+            payload if payload is not None else {"query": query},
+            gold_index,
+            schema_snapshot,
+        )
         if log:
             print(_format_audit_log(log))
         print()
@@ -323,8 +447,26 @@ def main() -> None:
     _silence_google_noise()
     os.system("cls" if os.name == "nt" else "clear")
 
-    nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
-    quant: QuantAgent = _AGENT_REGISTRY["quant"]()
+    load_dotenv(_NEXUS_DIR / ".env")
+    load_dotenv(_QUANT_DIR / ".env", override=False)
+
+    # Pillar 1: Knowledge Base — atomic clean-slate refresh on every startup.
+    # Reads BQ campaign_knowledge + verified_app_registry.json, classifies
+    # GOLD/BRONZE, and writes semantic_knowledge_index.json atomically.
+    ingester = KnowledgeBaseIngester(_ROOT / "ingestion_config.json")
+    summary = ingester.run_full_refresh()
+    print(
+        f"\n[KNOWLEDGE BASE] Refresh complete: "
+        f"{summary.gold_count} GOLD, {summary.bronze_count} BRONZE records indexed."
+    )
+    if summary.fetch_errors:
+        print(
+            f"[KNOWLEDGE BASE] {len(summary.fetch_errors)} brief fetch error(s) "
+            f"(skipped): {summary.fetch_errors[:3]}"
+        )
+
+    gold_index = GoldTierIndex()
+    gold_index.load_from_file(_ROOT / "semantic_knowledge_index.json")
 
     # Pillar 2: Schema Discovery — fetch live INFORMATION_SCHEMA metadata for
     # the adobe dataset and inject it into all agents before the console loop.
@@ -342,12 +484,17 @@ def main() -> None:
         f"({status}, {len(snapshot.columns)} columns)."
     )
 
+    # Instantiate agents from registry
+    nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
+    quant: QuantAgent = _AGENT_REGISTRY["quant"]()
+
+    # Inject shared runtime context into all active agents
     quant.set_runtime_schema(schema_str)
     nexus.set_runtime_schema_snapshot(snapshot.to_dict())
     # BriefingAgent injection placeholder — wire here when Pillar 4 is implemented:
     # briefing.set_runtime_schema(schema_str)
 
-    _run_console(nexus, quant)
+    _run_console(nexus, quant, gold_index, snapshot.to_dict())
 
 
 if __name__ == "__main__":

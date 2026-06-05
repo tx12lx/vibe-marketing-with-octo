@@ -2,7 +2,7 @@
   "schedule": {
     "mode": "on_startup",
     "interval_hours": 24,
-    "note": "on_startup triggers refresh each time mvp_orchestrator.py launches"
+    "note": "on_startup triggers refresh each time vibe_orchestrator.py launches"
   },
   "source": {
     "bq_project": "wb-tian-pr-d0dbe6",

@@ -38,6 +38,7 @@ from pydantic_schemas import (
     AudienceSizingRequest,
     NexusErrorPayload,
     QuantAuditLog,
+    UniversalJSONSpec,
     WaterfallLayer,
 )
 
@@ -587,6 +588,17 @@ class QuantAgent:
     # ------------------------------------------------------------------
     # Public API — strict gateway, never raises to orchestrator
     # ------------------------------------------------------------------
+
+    def audit_from_spec(
+        self, spec: UniversalJSONSpec
+    ) -> Union[QuantAuditLog, NexusErrorPayload]:
+        """Accept a UniversalJSONSpec and delegate to the existing audit() pipeline.
+
+        Downcasts spec to AudienceSizingRequest via to_audience_sizing_request().
+        The 7-step CTE waterfall, PII masking, optimization notes, and error
+        boundary logic are entirely unchanged.
+        """
+        return self.audit(spec.to_audience_sizing_request().model_dump())
 
     def audit(self, payload: dict) -> Union[QuantAuditLog, NexusErrorPayload]:
         """Validate payload and run the full audit pipeline.
