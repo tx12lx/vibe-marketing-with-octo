@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import re
 from typing import Optional
 
@@ -11,6 +12,8 @@ import urllib3
 import google.auth
 import google.auth.transport.requests
 
+_log = logging.getLogger(__name__)
+
 # Corporate SSL inspection proxies replace certificates with company-signed ones
 # that Python's bundled CA store doesn't trust. Disable verification to match
 # browser behaviour on the same network.
@@ -19,6 +22,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _GDOC_PATTERN = re.compile(r"docs\.google\.com/document/d/([^/?#]+)")
 _GSHEET_PATTERN = re.compile(r"docs\.google\.com/spreadsheets/d/([^/?#]+)")
 _GDRIVE_PATTERN = re.compile(r"drive\.google\.com/file/d/([^/?#]+)")
+
+
+def _normalise_whitespace(text: str) -> str:
+    """Collapse runs of 3+ newlines to 2 and strip leading/trailing space."""
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _make_session() -> requests.Session:
@@ -124,6 +132,73 @@ class BriefFetcher:
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             pages = [page.extract_text() or "" for page in pdf.pages]
         return "\n".join(pages).strip()
+
+    def to_flat_string(self, url: str) -> str:
+        """Fetch the document at url and return a single clean string.
+
+        Google Sheets (multi-tab): iterates over all sheet tabs via the
+          Sheets API v4 metadata endpoint, fetches each as CSV via the
+          export URL (?format=csv&gid=...), joins them with
+          '\\n\\n--- TAB: {tab_name} ---\\n\\n' separators, strips blank
+          lines from each CSV block.
+        Google Docs / plain text: returns content after whitespace normalisation.
+        PDFs: delegates to _extract_pdf_text().
+        On any fetch error: logs the error and returns "" so the ingestion
+          pipeline continues with an empty brief text rather than aborting.
+        """
+        url = url.strip()
+        if not url:
+            return ""
+        try:
+            if m := _GSHEET_PATTERN.search(url):
+                return self._fetch_sheet_all_tabs(m.group(1))
+            if m := _GDOC_PATTERN.search(url):
+                return _normalise_whitespace(self._fetch_google_doc(m.group(1)))
+            if m := _GDRIVE_PATTERN.search(url):
+                return _normalise_whitespace(self._fetch_drive_file(m.group(1)))
+            if self._looks_like_pdf(url):
+                return self._fetch_pdf(url)
+            return _normalise_whitespace(self._fetch_generic(url))
+        except Exception as exc:
+            _log.warning("to_flat_string failed for %s: %s", url, exc)
+            return ""
+
+    def _fetch_sheet_all_tabs(self, sheet_id: str) -> str:
+        """Fetch every tab of a Google Sheet and join with TAB-labelled separators."""
+        meta_url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
+            "?fields=sheets.properties"
+        )
+        meta_resp = self.session.get(meta_url, timeout=self.timeout)
+        if meta_resp.status_code in (401, 403, 404):
+            raise BriefFetchError(
+                f"Cannot access Sheet metadata for {sheet_id}: "
+                f"HTTP {meta_resp.status_code}"
+            )
+        meta_resp.raise_for_status()
+
+        sheets_data = meta_resp.json().get("sheets", [])
+        blocks: list[str] = []
+
+        for sheet_info in sheets_data:
+            props = sheet_info.get("properties", {})
+            tab_name = props.get("title", "Sheet")
+            gid = props.get("sheetId", 0)
+
+            export_url = (
+                f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+                f"/export?format=csv&gid={gid}"
+            )
+            csv_resp = self.session.get(export_url, timeout=self.timeout)
+            if csv_resp.status_code != 200:
+                continue  # skip inaccessible tabs; do not abort
+
+            lines = [ln for ln in csv_resp.text.splitlines() if ln.strip()]
+            if not lines:
+                continue
+            blocks.append(f"--- TAB: {tab_name} ---\n\n" + "\n".join(lines))
+
+        return "\n\n".join(blocks)
 
     @staticmethod
     def _looks_like_pdf(url: str) -> bool:

@@ -1,0 +1,26 @@
+{
+  "schedule": {
+    "mode": "on_startup",
+    "interval_hours": 24,
+    "note": "on_startup triggers refresh each time mvp_orchestrator.py launches"
+  },
+  "source": {
+    "bq_project": "wb-tian-pr-d0dbe6",
+    "bq_table": "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_knowledge",
+    "active_filter_note": "Column names resolved from INFORMATION_SCHEMA at runtime"
+  },
+  "gold_classification": {
+    "bq_summary_fields": ["targeting_summary", "segment_summary"],
+    "registry_confirmation_field": "hitl_confirmed",
+    "empty_strings_treated_as_null": true
+  },
+  "output_files": {
+    "knowledge_index": "semantic_knowledge_index.json",
+    "verified_registry": "verified_app_registry.json"
+  },
+  "brief_fetch": {
+    "timeout_seconds": 60,
+    "skip_on_error": true,
+    "max_retries": 2
+  }
+}
