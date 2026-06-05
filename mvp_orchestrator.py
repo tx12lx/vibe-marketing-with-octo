@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 _ROOT = Path(__file__).resolve().parent
 _NEXUS_DIR = _ROOT / "Vibe OCTO Nexus"
 _QUANT_DIR = _ROOT / "Vibe OCTO Quant"
+_SCHEMA_DISCOVERY_DIR = _ROOT / "schema_discovery"
 _GLOSSARY_PATH = _ROOT / "glossary.json"
 _QUERY_CATALOG_PATH = _ROOT / "query_catalog.json"
 
@@ -44,6 +45,7 @@ for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR)]:
 from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from pydantic_schemas import QuantAuditLog  # noqa: E402
+from schema_discovery.discovery_layer import SchemaDiscoveryLayer  # noqa: E402
 
 
 def _silence_google_noise() -> None:
@@ -320,8 +322,31 @@ def _run_console(nexus: NexusAgent, quant: QuantAgent) -> None:
 def main() -> None:
     _silence_google_noise()
     os.system("cls" if os.name == "nt" else "clear")
+
     nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
     quant: QuantAgent = _AGENT_REGISTRY["quant"]()
+
+    # Pillar 2: Schema Discovery — fetch live INFORMATION_SCHEMA metadata for
+    # the adobe dataset and inject it into all agents before the console loop.
+    # Cache TTL is 1 hour; subsequent startups within that window skip the BQ call.
+    schema_discovery = SchemaDiscoveryLayer(
+        project="bi-srv-hsmdet-pr-7b9def",
+        datasets=["adobe"],
+        cache_path=_ROOT / ".sdl_schema_cache.json",
+    )
+    snapshot = schema_discovery.get_snapshot()
+    schema_str = schema_discovery.to_prompt_string(snapshot)
+    status = "cache hit" if snapshot.cache_hit else "fresh fetch"
+    print(
+        f"[SCHEMA DISCOVERY] Adobe dataset schema loaded "
+        f"({status}, {len(snapshot.columns)} columns)."
+    )
+
+    quant.set_runtime_schema(schema_str)
+    nexus.set_runtime_schema_snapshot(snapshot.to_dict())
+    # BriefingAgent injection placeholder — wire here when Pillar 4 is implemented:
+    # briefing.set_runtime_schema(schema_str)
+
     _run_console(nexus, quant)
 
 

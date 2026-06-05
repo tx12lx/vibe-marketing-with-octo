@@ -401,10 +401,19 @@ class NexusAgent:
         self._taxonomy: dict = {}
         self.briefs: list[dict] = []
         self._session_context: str = ""
+        self._runtime_schema_snapshot: dict = {}
 
     def set_session_context(self, context: str) -> None:
         """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
         self._session_context = context
+
+    def set_runtime_schema_snapshot(self, snapshot_dict: dict) -> None:
+        """Receive the live INFORMATION_SCHEMA snapshot injected by the orchestrator (Pillar 2).
+
+        Stored for use by _run_discrepancy_audit() to validate that filter column
+        names referenced in targeting summaries still exist in the current schema.
+        """
+        self._runtime_schema_snapshot = snapshot_dict
 
     # ------------------------------------------------------------------
     # Public API

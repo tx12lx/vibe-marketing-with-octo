@@ -567,10 +567,22 @@ class QuantAgent:
         self._schema_cache = _QUANT_DIR / ".schema_cache.json"
         self._last_sql: str = ""
         self._session_context: str = ""
+        self._runtime_schema: str = ""
 
     def set_session_context(self, context: str) -> None:
         """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
         self._session_context = context
+
+    def set_runtime_schema(self, schema_str: str) -> None:
+        """Receive the live INFORMATION_SCHEMA snapshot injected by the orchestrator (Pillar 2).
+
+        Stored for use in SQL generation prompts. The injected string contains
+        live column metadata from INFORMATION_SCHEMA.COLUMNS, distinct from the
+        VIEW DDL fetched by _fetch_schema(). Both can be used together: VIEW DDL
+        provides field types for SQL generation; the snapshot provides structural
+        coverage for zero-shot BRONZE path reasoning.
+        """
+        self._runtime_schema = schema_str
 
     # ------------------------------------------------------------------
     # Public API — strict gateway, never raises to orchestrator
