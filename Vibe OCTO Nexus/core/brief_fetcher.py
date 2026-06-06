@@ -23,6 +23,12 @@ _GDOC_PATTERN = re.compile(r"docs\.google\.com/document/d/([^/?#]+)")
 _GSHEET_PATTERN = re.compile(r"docs\.google\.com/spreadsheets/d/([^/?#]+)")
 _GDRIVE_PATTERN = re.compile(r"drive\.google\.com/file/d/([^/?#]+)")
 
+# Sheets API v4 requires this scope in addition to cloud-platform.
+# Run:  gcloud auth application-default login \
+#           --scopes=https://www.googleapis.com/auth/cloud-platform,\
+#                    https://www.googleapis.com/auth/spreadsheets.readonly
+_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+
 
 def _normalise_whitespace(text: str) -> str:
     """Collapse runs of 3+ newlines to 2 and strip leading/trailing space."""
@@ -30,9 +36,14 @@ def _normalise_whitespace(text: str) -> str:
 
 
 def _make_session() -> requests.Session:
-    """Return a requests session authenticated with ADC credentials where available."""
+    """Return a requests session authenticated with ADC credentials where available.
+
+    Requests the Sheets scope explicitly so that service-account credentials
+    include it.  For authorized_user credentials the scope is set at gcloud
+    login time; see _SHEETS_SCOPE for the required re-login command.
+    """
     try:
-        credentials, _ = google.auth.default()
+        credentials, _ = google.auth.default(scopes=[_SHEETS_SCOPE])
         session = google.auth.transport.requests.AuthorizedSession(credentials)
     except Exception:
         session = requests.Session()
@@ -151,7 +162,13 @@ class BriefFetcher:
             return ""
         try:
             if m := _GSHEET_PATTERN.search(url):
-                return self._fetch_sheet_all_tabs(m.group(1))
+                try:
+                    return self._fetch_sheet_all_tabs(m.group(1))
+                except BriefFetchError:
+                    # Sheets API v4 unavailable (missing scope or API disabled).
+                    # Fall back to the direct CSV export path, which works with
+                    # the cloud-platform token and fetches the tab from the URL.
+                    return _normalise_whitespace(self._fetch_google_sheet(url, m.group(1)))
             if m := _GDOC_PATTERN.search(url):
                 return _normalise_whitespace(self._fetch_google_doc(m.group(1)))
             if m := _GDRIVE_PATTERN.search(url):
