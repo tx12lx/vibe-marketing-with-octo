@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 _ROOT = Path(__file__).resolve().parent
 _NEXUS_DIR = _ROOT / "Vibe OCTO Nexus"
 _QUANT_DIR = _ROOT / "Vibe OCTO Quant"
+_BRIEFING_DIR = _ROOT / "Vibe OCTO Briefing"
 _SCHEMA_DISCOVERY_DIR = _ROOT / "schema_discovery"
 _GLOSSARY_PATH = _ROOT / "glossary.json"
 _QUERY_CATALOG_PATH = _ROOT / "query_catalog.json"
@@ -38,13 +39,14 @@ _GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU"}
 load_dotenv(_NEXUS_DIR / ".env")
 load_dotenv(_QUANT_DIR / ".env", override=False)
 
-for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR)]:
+for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR), str(_BRIEFING_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
-from pydantic_schemas import NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
+from briefing_agent import BriefingAgent  # noqa: E402
+from pydantic_schemas import BriefingOutput, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer  # noqa: E402
 from knowledge_base.ingester import KnowledgeBaseIngester  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
@@ -166,11 +168,12 @@ def _build_dynamic_context(query_text: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Agent registry — the ONLY place agent classes are registered.
-# BriefingAgent (briefing_v1) will be added here when Pillar 4 is implemented.
+# Adding a new worker requires only: (1) implement BaseAgent, (2) add one line here.
 # ---------------------------------------------------------------------------
 _AGENT_REGISTRY: dict[str, type] = {
     "nexus": NexusAgent,
     "quant": QuantAgent,
+    "briefing": BriefingAgent,
 }
 
 
@@ -290,42 +293,45 @@ def _print_discrepancy_audit(spec: UniversalJSONSpec) -> None:
 def route(
     nexus: NexusAgent,
     quant: QuantAgent,
+    briefing: BriefingAgent,
     workflow: str,
     payload: dict,
     gold_index: GoldTierIndex,
     schema_snapshot: dict,
-) -> Optional[QuantAuditLog]:
+) -> tuple[Optional[QuantAuditLog], Optional[BriefingOutput]]:
     """Dispatch a classified request to the correct pipeline branch.
 
     workflow 'WORKFLOW_A': Ad-Hoc Exploratory Request — natural language audience
                            sizing. Runs a direct single-row count via Quant.
-                           Unchanged from pre-Pillar 3 behavior.
+                           BriefingAgent is not invoked on this path.
 
     workflow 'WORKFLOW_B': Structured Campaign Execution Request — named campaign
                            brief. Builds a UniversalJSONSpec via NexusAgent (Pillar 3
-                           Gateway), runs the discrepancy audit, then dispatches to
-                           Quant via audit_from_spec(). The spec is the immutable
-                           inter-agent contract consumed by all downstream workers.
+                           Gateway), runs the discrepancy audit, dispatches to
+                           Quant via audit_from_spec(), then fans out to
+                           BriefingAgent for the campaign intelligence brief.
 
                            On NexusErrorPayload from Quant, falls back to the
                            existing route_with_retry() for one taxonomy-guided
                            correction attempt.
+
+    Returns (QuantAuditLog | None, BriefingOutput | None).
     """
     if workflow == "WORKFLOW_A":
         request = nexus.build_sizing_request_from_nl(payload["query"])
         if request is None:
-            return None
+            return None, None
         result = quant.direct_count(request)
         if isinstance(result, QuantAuditLog):
-            return result
+            return result, None
         print(f"\n  [ERROR]: {result.error_summary}")
-        return None
+        return None, None
 
     elif workflow == "WORKFLOW_B":
         # Pillar 3: build the universal inter-agent contract
         spec = nexus.build_universal_spec(payload, gold_index, schema_snapshot)
         if spec is None:
-            return None
+            return None, None
 
         # Surface advisory flags to the marketer before any query executes
         if spec.discrepancy_flags:
@@ -338,13 +344,18 @@ def route(
             # One automated correction pass via the existing taxonomy-guided retry
             result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
 
-        if isinstance(result, QuantAuditLog):
-            return result
-        return None
+        if not isinstance(result, QuantAuditLog):
+            return None, None
+
+        # Pillar 4: fan out to BriefingAgent with the same UniversalJSONSpec
+        briefing.subscribe(spec)
+        brief_output: BriefingOutput = briefing.execute()
+
+        return result, brief_output
 
     else:
         print(f"\n[ERROR]: Unknown workflow '{workflow}'")
-        return None
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -398,12 +409,37 @@ def _format_audit_log(log: QuantAuditLog) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Brief output formatter
+# ---------------------------------------------------------------------------
+
+def _print_brief(brief: BriefingOutput) -> None:
+    """Print the BriefingAgent Markdown output with a structured wrapper."""
+    if not brief.brief_markdown:
+        return
+    sep = "=" * 66
+    thin = "-" * 44
+    print()
+    print(sep)
+    print("  VIBE OCTO BRIEFING — CAMPAIGN INTELLIGENCE BRIEF")
+    print(sep)
+    print()
+    print(brief.brief_markdown)
+    print()
+    print("  " + thin)
+    tier_label = f"Tier: {brief.tier}"
+    conf_label = f"Confidence: {brief.confidence_score:.0%}"
+    print(f"  {tier_label:<22}  {conf_label}")
+    print(sep)
+
+
+# ---------------------------------------------------------------------------
 # Interactive console — dual-intent engine
 # ---------------------------------------------------------------------------
 
 def _run_console(
     nexus: NexusAgent,
     quant: QuantAgent,
+    briefing: BriefingAgent,
     gold_index: GoldTierIndex,
     schema_snapshot: dict,
 ) -> None:
@@ -426,9 +462,10 @@ def _run_console(
 
         print("  [NEXUS AGENT] -> Analyzing intent...\n")
         workflow, payload = nexus.classify_and_route(query)
-        log = route(
+        log, brief_output = route(
             nexus,
             quant,
+            briefing,
             workflow,
             payload if payload is not None else {"query": query},
             gold_index,
@@ -436,6 +473,8 @@ def _run_console(
         )
         if log:
             print(_format_audit_log(log))
+        if brief_output:
+            _print_brief(brief_output)
         print()
 
 
@@ -449,6 +488,7 @@ def main() -> None:
 
     load_dotenv(_NEXUS_DIR / ".env")
     load_dotenv(_QUANT_DIR / ".env", override=False)
+    load_dotenv(_BRIEFING_DIR / ".env", override=False)
 
     # Pillar 1: Knowledge Base — atomic clean-slate refresh on every startup.
     # Reads BQ campaign_knowledge + verified_app_registry.json, classifies
@@ -487,14 +527,15 @@ def main() -> None:
     # Instantiate agents from registry
     nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
     quant: QuantAgent = _AGENT_REGISTRY["quant"]()
+    briefing: BriefingAgent = _AGENT_REGISTRY["briefing"]()
 
     # Inject shared runtime context into all active agents
     quant.set_runtime_schema(schema_str)
     nexus.set_runtime_schema_snapshot(snapshot.to_dict())
-    # BriefingAgent injection placeholder — wire here when Pillar 4 is implemented:
-    # briefing.set_runtime_schema(schema_str)
+    briefing.set_runtime_schema(schema_str)
+    briefing.set_gold_index(gold_index)
 
-    _run_console(nexus, quant, gold_index, snapshot.to_dict())
+    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict())
 
 
 if __name__ == "__main__":

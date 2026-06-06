@@ -41,6 +41,7 @@ from pydantic_schemas import (
     UniversalJSONSpec,
     WaterfallLayer,
 )
+from core.base_agent import BaseAgent
 
 _FUELIX_BASE = "https://api.fuelix.ai"
 _DEFAULT_MODEL = "claude-sonnet-4"
@@ -557,7 +558,11 @@ OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
 The first character must be 'W' (WITH). Any explanatory text causes a pipeline parse failure."""
 
 
-class QuantAgent:
+class QuantAgent(BaseAgent):
+    WORKER_ID = "quant_v1"
+    INPUT_SCHEMA = UniversalJSONSpec
+    OUTPUT_SCHEMA = QuantAuditLog
+
     def __init__(self) -> None:
         self._api_key = os.getenv("FUELIX_API_KEY")
         if not self._api_key:
@@ -569,6 +574,25 @@ class QuantAgent:
         self._last_sql: str = ""
         self._session_context: str = ""
         self._runtime_schema: str = ""
+
+    # ------------------------------------------------------------------
+    # BaseAgent contract
+    # ------------------------------------------------------------------
+
+    def subscribe(self, spec: UniversalJSONSpec) -> None:
+        """Store the UniversalJSONSpec for the current execution cycle."""
+        self._pending_spec: Optional[UniversalJSONSpec] = spec
+
+    def execute(self) -> QuantAuditLog:
+        """Execute the audit pipeline against the subscribed spec.
+
+        Delegates to audit_from_spec(). If no spec has been subscribed,
+        returns a NexusErrorPayload-equivalent wrapped as an audit failure.
+        """
+        pending = getattr(self, "_pending_spec", None)
+        if pending is None:
+            raise RuntimeError("subscribe() must be called before execute()")
+        return self.audit_from_spec(pending)
 
     def set_session_context(self, context: str) -> None:
         """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
