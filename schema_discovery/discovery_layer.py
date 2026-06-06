@@ -285,8 +285,7 @@ class SchemaDiscoveryLayer:
                 "    table_name,\n"
                 "    column_name,\n"
                 "    data_type,\n"
-                "    CASE WHEN is_nullable = 'YES' THEN TRUE ELSE FALSE END AS is_nullable,\n"
-                "    COALESCE(description, '') AS description\n"
+                "    CASE WHEN is_nullable = 'YES' THEN TRUE ELSE FALSE END AS is_nullable\n"
                 f"FROM `{self._project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`\n"
                 "ORDER BY table_name, ordinal_position"
             )
