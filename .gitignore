@@ -16,6 +16,10 @@ env/
 gcloud/
 application_default_credentials.json
 
+# Generated cache files
+*.cache.json
+.sdl_schema_cache.json
+
 # Editor / OS
 .DS_Store
 Thumbs.db
