@@ -537,12 +537,38 @@ class NexusAgent:
     ) -> Optional[UniversalJSONSpec]:
         """Build the UniversalJSONSpec from a campaign brief dict.
 
+        0. Checks verified_app_registry.json for a manual operator override. If one
+           exists for this camp_id/sub_camp_id, its correction_text is prepended to
+           the session context so the LLM prioritizes those instructions absolutely
+           over any zero-shot reasoning.
         1. Derives targeting data via the existing deployment matrix logic.
         2. Extracts camp_id/sub_camp_id and calls gold_index.lookup().
         3. Runs _run_discrepancy_audit() to populate discrepancy_flags.
         4. Assembles brief_agent_inputs for BriefingAgent (Pillar 4).
         5. Returns a Pydantic-validated UniversalJSONSpec, or None on failure.
         """
+        # Step 0: Check for a previously captured operator override in the registry.
+        # If found, inject it as an absolute authority block before any LLM call runs.
+        deployments = brief.get("deployments", [])
+        if deployments:
+            peek_camp_id = str(deployments[0].get("camp_id", "")).strip()
+            peek_sub_camp_id = str(deployments[0].get("sub_camp_id", "")).strip()
+            if peek_camp_id and peek_sub_camp_id:
+                override_text = self._load_override_from_registry(
+                    peek_camp_id, peek_sub_camp_id
+                )
+                if override_text:
+                    print(
+                        f"\n  [NEXUS AGENT] -> Manual operator override found for "
+                        f"{peek_camp_id}/{peek_sub_camp_id}. Applying as absolute priority.\n"
+                    )
+                    override_block = (
+                        "=== OPERATOR MANUAL OVERRIDE - APPLY THESE INSTRUCTIONS EXACTLY ===\n"
+                        f"{override_text}\n"
+                        "=== END OVERRIDE (this takes absolute precedence over any inferred logic) ===\n\n"
+                    )
+                    self._session_context = override_block + self._session_context
+
         # Step 1: Derive the AudienceSizingRequest via existing brief logic
         sizing_request = self.build_sizing_request_from_brief(brief)
         if sizing_request is None:
@@ -946,6 +972,32 @@ class NexusAgent:
         except Exception:
             pass
 
+        return None
+
+    def _load_override_from_registry(
+        self, camp_id: str, sub_camp_id: str
+    ) -> Optional[str]:
+        """Check verified_app_registry.json for a manual correction override.
+
+        Returns the correction_text string if a record exists for this
+        camp_id/sub_camp_id with a non-empty correction_text field (written by
+        HITLAuditLoop._handle_no()). Returns None if no override is found.
+
+        Silently ignores any read or parse errors so a missing or malformed
+        registry never aborts the build_universal_spec() cycle.
+        """
+        registry_path = _ROOT_DIR / "verified_app_registry.json"
+        try:
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+            for record in data.get("records", []):
+                if (
+                    record.get("camp_id", "").upper() == camp_id.upper()
+                    and record.get("sub_camp_id", "").upper() == sub_camp_id.upper()
+                    and record.get("correction_text")
+                ):
+                    return str(record["correction_text"])
+        except Exception:
+            pass
         return None
 
     # ------------------------------------------------------------------

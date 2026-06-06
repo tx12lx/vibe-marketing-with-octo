@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from pydantic_schemas import SemanticFailureLog
 
 
 class GlossaryManager:
@@ -120,6 +124,74 @@ class GlossaryManager:
         self.path.write_text(
             json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+
+    def patch_from_failure(self, log_entry: "SemanticFailureLog") -> int:
+        """Infer new or corrected terms from a semantic failure and merge into the glossary.
+
+        For each entry in log_entry.glossary_gaps that is not already present:
+          - Adds a stub entry with confidence_score=0.3, source='failure_inference'.
+
+        For 'wrong_column' failures: finds the closest existing term matching
+          any incorrect column reference and reduces its confidence_score by 0.15
+          (floor at 0.05).
+
+        For 'missing_exclusion' failures: extracts the missing term from
+          correction_description and adds a stub exclusion entry.
+
+        Saves the glossary with portfolio='inferred_failure' and returns the count
+        of newly added terms.
+        """
+        added = 0
+        terms = self.data.setdefault("terms", {})
+
+        for gap in log_entry.glossary_gaps:
+            key = gap.lower().strip()
+            if key and key not in terms:
+                terms[key] = {
+                    "meaning": f"Inferred from failure correction: {log_entry.campaign_code}",
+                    "criterion_type": "unknown",
+                    "confidence_score": 0.3,
+                    "source": "failure_inference",
+                    "frequency_in_briefs": 1,
+                    "variations": [],
+                }
+                added += 1
+
+        if log_entry.inferred_failure_type == "wrong_column":
+            # Find column-like tokens in the correction and reduce confidence
+            # of any matching existing term to flag it as potentially wrong.
+            col_tokens = re.findall(
+                r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b",
+                log_entry.correction_description.lower(),
+            )
+            for tok in col_tokens:
+                if tok in terms:
+                    entry = terms[tok]
+                    current = float(entry.get("confidence_score", 0.5))
+                    entry["confidence_score"] = max(0.05, current - 0.15)
+
+        elif log_entry.inferred_failure_type == "missing_exclusion":
+            # Extract the noun phrase after "missing" or "exclusion" as a stub term.
+            m = re.search(
+                r"\b(?:missing|exclusion)\s+([a-z][a-z0-9_\s]{2,30})",
+                log_entry.correction_description.lower(),
+            )
+            if m:
+                new_term = m.group(1).strip().replace(" ", "_")
+                if new_term and new_term not in terms:
+                    terms[new_term] = {
+                        "meaning": "Missing exclusion term inferred from HITL correction.",
+                        "criterion_type": "exclude",
+                        "confidence_score": 0.3,
+                        "source": "failure_inference",
+                        "frequency_in_briefs": 1,
+                        "variations": [],
+                    }
+                    added += 1
+
+        built_from = self.data.get("glossary_metadata", {}).get("built_from_briefs", 0)
+        self.save(portfolio="inferred_failure", built_from=built_from)
+        return added
 
     def to_json_string(self) -> str:
         return json.dumps(self.data, indent=2, ensure_ascii=False)

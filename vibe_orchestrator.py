@@ -50,6 +50,8 @@ from pydantic_schemas import BriefingOutput, NexusErrorPayload, QuantAuditLog, U
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer  # noqa: E402
 from knowledge_base.ingester import KnowledgeBaseIngester  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
+from hitl.audit_loop import HITLAuditLoop  # noqa: E402
+from core.glossary import GlossaryManager  # noqa: E402
 
 
 def _silence_google_noise() -> None:
@@ -298,12 +300,13 @@ def route(
     payload: dict,
     gold_index: GoldTierIndex,
     schema_snapshot: dict,
-) -> tuple[Optional[QuantAuditLog], Optional[BriefingOutput]]:
+) -> tuple[Optional[UniversalJSONSpec], Optional[QuantAuditLog], Optional[BriefingOutput]]:
     """Dispatch a classified request to the correct pipeline branch.
 
     workflow 'WORKFLOW_A': Ad-Hoc Exploratory Request — natural language audience
                            sizing. Runs a direct single-row count via Quant.
                            BriefingAgent is not invoked on this path.
+                           Returns (None, QuantAuditLog | None, None).
 
     workflow 'WORKFLOW_B': Structured Campaign Execution Request — named campaign
                            brief. Builds a UniversalJSONSpec via NexusAgent (Pillar 3
@@ -315,23 +318,26 @@ def route(
                            existing route_with_retry() for one taxonomy-guided
                            correction attempt.
 
-    Returns (QuantAuditLog | None, BriefingOutput | None).
+                           Returns (UniversalJSONSpec, QuantAuditLog, BriefingOutput)
+                           on success so the console can pass spec to HITLAuditLoop.
+
+    Returns (spec | None, QuantAuditLog | None, BriefingOutput | None).
     """
     if workflow == "WORKFLOW_A":
         request = nexus.build_sizing_request_from_nl(payload["query"])
         if request is None:
-            return None, None
+            return None, None, None
         result = quant.direct_count(request)
         if isinstance(result, QuantAuditLog):
-            return result, None
+            return None, result, None
         print(f"\n  [ERROR]: {result.error_summary}")
-        return None, None
+        return None, None, None
 
     elif workflow == "WORKFLOW_B":
         # Pillar 3: build the universal inter-agent contract
         spec = nexus.build_universal_spec(payload, gold_index, schema_snapshot)
         if spec is None:
-            return None, None
+            return None, None, None
 
         # Surface advisory flags to the marketer before any query executes
         if spec.discrepancy_flags:
@@ -345,17 +351,17 @@ def route(
             result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
 
         if not isinstance(result, QuantAuditLog):
-            return None, None
+            return None, None, None
 
         # Pillar 4: fan out to BriefingAgent with the same UniversalJSONSpec
         briefing.subscribe(spec)
         brief_output: BriefingOutput = briefing.execute()
 
-        return result, brief_output
+        return spec, result, brief_output
 
     else:
         print(f"\n[ERROR]: Unknown workflow '{workflow}'")
-        return None, None
+        return None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +448,7 @@ def _run_console(
     briefing: BriefingAgent,
     gold_index: GoldTierIndex,
     schema_snapshot: dict,
+    hitl: HITLAuditLoop,
 ) -> None:
     while True:
         print("  How can the OCTO team help you today?\n")
@@ -462,7 +469,7 @@ def _run_console(
 
         print("  [NEXUS AGENT] -> Analyzing intent...\n")
         workflow, payload = nexus.classify_and_route(query)
-        log, brief_output = route(
+        spec, log, brief_output = route(
             nexus,
             quant,
             briefing,
@@ -475,6 +482,14 @@ def _run_console(
             print(_format_audit_log(log))
         if brief_output:
             _print_brief(brief_output)
+
+        # Pillar 5: HITL gate — only fires on WORKFLOW_B with a successful audit result.
+        # YES continues the session; NO exits after writing the override to the registry.
+        if spec is not None and log is not None:
+            should_continue = hitl.prompt(spec, log, brief_output)
+            if not should_continue:
+                break
+
         print()
 
 
@@ -535,7 +550,17 @@ def main() -> None:
     briefing.set_runtime_schema(schema_str)
     briefing.set_gold_index(gold_index)
 
-    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict())
+    # Pillar 5: HITLAuditLoop — Human-in-the-Loop gate and feedback flywheel.
+    # Shares the same GoldTierIndex and GlossaryManager instances as the rest of
+    # the session so in-memory promotions and glossary patches take effect immediately.
+    hitl = HITLAuditLoop(
+        gold_index=gold_index,
+        glossary_manager=GlossaryManager(str(_GLOSSARY_PATH)),
+        failure_log_path=_ROOT / "semantic_failure_log.json",
+        registry_path=_ROOT / "verified_app_registry.json",
+    )
+
+    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl)
 
 
 if __name__ == "__main__":
