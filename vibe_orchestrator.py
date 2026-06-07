@@ -52,6 +52,47 @@ from knowledge_base.ingester import KnowledgeBaseIngester  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
 from core.glossary import GlossaryManager  # noqa: E402
+from core.brief_fetcher import BriefFetcher  # noqa: E402
+
+
+_ADC_REAUTH_CMD = (
+    "gcloud auth application-default login "
+    "--scopes=https://www.googleapis.com/auth/cloud-platform,"
+    "https://www.googleapis.com/auth/spreadsheets.readonly,"
+    "https://www.googleapis.com/auth/drive.readonly"
+)
+
+
+def _check_sheets_credentials() -> bool:
+    """Probe Sheets API at startup and print actionable guidance on failure.
+
+    Returns True if access is confirmed (or inconclusive due to a 403 on a
+    restricted sheet — scope is present). Returns False when a 401 confirms
+    the ADC token is missing the spreadsheets.readonly scope.
+    """
+    fetcher = BriefFetcher()
+    ok, reason = fetcher.probe_sheets_access()
+    if ok:
+        return True
+
+    sep = "!" * 68
+    print(f"\n{sep}")
+    print("  SHEETS ACCESS ERROR — Brief data will be EMPTY until fixed.")
+    print(sep)
+    print()
+    print(f"  {reason}")
+    print()
+    print("  Run this command in a terminal, then restart Vibe OCTO:")
+    print()
+    print(f"      python refresh_adc_scopes.py")
+    print()
+    print("  OR run gcloud directly:")
+    print()
+    print(f"      {_ADC_REAUTH_CMD}")
+    print()
+    print(sep)
+    print()
+    return False
 
 
 def _silence_google_noise() -> None:
@@ -504,6 +545,10 @@ def main() -> None:
     load_dotenv(_NEXUS_DIR / ".env")
     load_dotenv(_QUANT_DIR / ".env", override=False)
     load_dotenv(_BRIEFING_DIR / ".env", override=False)
+
+    # Preflight: verify ADC token has Sheets/Drive scopes before the KB refresh
+    # attempts to fetch brief URLs. Prints an actionable fix if scopes are missing.
+    _check_sheets_credentials()
 
     # Pillar 1: Knowledge Base — atomic clean-slate refresh on every startup.
     # Reads BQ campaign_knowledge + verified_app_registry.json, classifies

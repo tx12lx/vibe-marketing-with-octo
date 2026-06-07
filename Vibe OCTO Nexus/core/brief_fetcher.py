@@ -321,6 +321,38 @@ class BriefFetcher:
 
         return "\n\n".join(blocks)
 
+    def probe_sheets_access(self) -> tuple[bool, str]:
+        """Return (True, "") if Sheets API is reachable, (False, reason) otherwise.
+
+        Calls the Sheets API v4 spreadsheets.get endpoint on a known public sheet
+        metadata URL. A 401 response means the ADC token is missing the
+        spreadsheets.readonly scope; 403 means the scope is present but the
+        specific sheet is restricted. Either way the probe itself only needs a
+        valid token — it does not matter which sheet is used.
+        """
+        test_url = (
+            "https://sheets.googleapis.com/v4/spreadsheets/"
+            "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+            "?fields=spreadsheetId"
+        )
+        try:
+            resp = self.session.get(test_url, timeout=10)
+        except Exception as exc:
+            return False, f"network error: {exc}"
+
+        if resp.status_code == 200:
+            return True, ""
+        if resp.status_code == 401:
+            return (
+                False,
+                "HTTP 401 — ADC token is missing spreadsheets.readonly scope. "
+                f"Fix with:\n    {_ADC_REAUTH_CMD}",
+            )
+        if resp.status_code == 403:
+            # Scope present but org policy may block. Sheets API itself is reachable.
+            return True, ""
+        return False, f"HTTP {resp.status_code} from Sheets API probe"
+
     @staticmethod
     def _looks_like_pdf(url: str) -> bool:
         lower = url.lower().split("?")[0]
