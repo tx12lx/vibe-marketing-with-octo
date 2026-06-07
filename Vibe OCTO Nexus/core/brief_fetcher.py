@@ -23,11 +23,27 @@ _GDOC_PATTERN = re.compile(r"docs\.google\.com/document/d/([^/?#]+)")
 _GSHEET_PATTERN = re.compile(r"docs\.google\.com/spreadsheets/d/([^/?#]+)")
 _GDRIVE_PATTERN = re.compile(r"drive\.google\.com/file/d/([^/?#]+)")
 
-# Sheets API v4 requires this scope in addition to cloud-platform.
-# Run:  gcloud auth application-default login \
-#           --scopes=https://www.googleapis.com/auth/cloud-platform,\
-#                    https://www.googleapis.com/auth/spreadsheets.readonly
+# Both scopes are required for full Google Workspace access.
+# If ADC was set up without these scopes, re-authenticate once with:
+#
+#   gcloud auth application-default login \
+#       --scopes=https://www.googleapis.com/auth/cloud-platform,\
+#                https://www.googleapis.com/auth/spreadsheets.readonly,\
+#                https://www.googleapis.com/auth/drive.readonly
+#
+# For authorized_user credentials (gcloud user ADC) the scope list is baked
+# in at login time. Passing scopes= to google.auth.default() does NOT
+# retroactively add scopes to an existing authorized_user token.
 _SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+_CLOUD_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+_ADC_REAUTH_CMD = (
+    "gcloud auth application-default login "
+    "--scopes=https://www.googleapis.com/auth/cloud-platform,"
+    "https://www.googleapis.com/auth/spreadsheets.readonly,"
+    "https://www.googleapis.com/auth/drive.readonly"
+)
 
 
 def _normalise_whitespace(text: str) -> str:
@@ -36,14 +52,30 @@ def _normalise_whitespace(text: str) -> str:
 
 
 def _make_session() -> requests.Session:
-    """Return a requests session authenticated with ADC credentials where available.
+    """Return a requests.Session authenticated with ADC credentials.
 
-    Requests the Sheets scope explicitly so that service-account credentials
-    include it.  For authorized_user credentials the scope is set at gcloud
-    login time; see _SHEETS_SCOPE for the required re-login command.
+    Requests Sheets and Drive scopes so service-account credentials get them
+    automatically. For authorized_user credentials (gcloud ADC) the scopes are
+    fixed at login time; this function detects the missing-scope condition and
+    logs a single actionable warning with the exact re-auth command.
     """
     try:
-        credentials, _ = google.auth.default(scopes=[_SHEETS_SCOPE])
+        credentials, _ = google.auth.default(
+            scopes=[_SHEETS_SCOPE, _DRIVE_SCOPE, _CLOUD_SCOPE]
+        )
+        # For authorized_user credentials, scopes=None means the ADC token was
+        # obtained without the Sheets/Drive scopes. The token is valid for BQ
+        # (cloud-platform) but will be rejected by docs.google.com with 401.
+        stored_scopes = getattr(credentials, "scopes", None)
+        if stored_scopes is None:
+            _log.warning(
+                "[BriefFetcher] ADC credentials (%s) have no stored scopes. "
+                "Google Sheets / Docs brief fetching will fail with 401/403. "
+                "Fix: run this once in a terminal, then restart:\n\n"
+                "    %s\n",
+                type(credentials).__name__,
+                _ADC_REAUTH_CMD,
+            )
         session = google.auth.transport.requests.AuthorizedSession(credentials)
     except Exception:
         session = requests.Session()
@@ -83,10 +115,11 @@ class BriefFetcher:
             f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
         )
         resp = self.session.get(export_url, timeout=self.timeout)
-        if resp.status_code == 403:
+        if resp.status_code in (401, 403):
             raise BriefFetchError(
-                f"Access denied for Google Doc {doc_id}. "
-                "Document must be shared publicly or with the service account."
+                f"Access denied (HTTP {resp.status_code}) for Google Doc {doc_id}. "
+                "Document must be shared publicly or with the service account. "
+                f"If using gcloud ADC, re-run: {_ADC_REAUTH_CMD}"
             )
         resp.raise_for_status()
         return resp.text.strip()
@@ -101,10 +134,11 @@ class BriefFetcher:
         if gid:
             export_url += f"&gid={gid}"
         resp = self.session.get(export_url, timeout=self.timeout)
-        if resp.status_code == 403:
+        if resp.status_code in (401, 403):
             raise BriefFetchError(
-                f"Access denied for Google Sheet {sheet_id}. "
-                "Sheet must be shared publicly or with the service account."
+                f"Access denied (HTTP {resp.status_code}) for Google Sheet {sheet_id}. "
+                "Sheet must be shared publicly or with the service account. "
+                f"If using gcloud ADC, re-run: {_ADC_REAUTH_CMD}"
             )
         resp.raise_for_status()
         return resp.text.strip()
@@ -115,10 +149,11 @@ class BriefFetcher:
             f"https://drive.google.com/uc?export=download&id={file_id}"
         )
         resp = self.session.get(download_url, timeout=self.timeout, allow_redirects=True)
-        if resp.status_code == 403:
+        if resp.status_code in (401, 403):
             raise BriefFetchError(
-                f"Access denied for Drive file {file_id}. "
-                "File must be shared publicly or with the service account."
+                f"Access denied (HTTP {resp.status_code}) for Drive file {file_id}. "
+                "File must be shared publicly or with the service account. "
+                f"If using gcloud ADC, re-run: {_ADC_REAUTH_CMD}"
             )
         resp.raise_for_status()
         content_type = resp.headers.get("content-type", "")
@@ -147,30 +182,81 @@ class BriefFetcher:
     def to_flat_string(self, url: str) -> str:
         """Fetch the document at url and return a single clean string.
 
-        Google Sheets (multi-tab): iterates over all sheet tabs via the
-          Sheets API v4 metadata endpoint, fetches each as CSV via the
-          export URL (?format=csv&gid=...), joins them with
-          '\\n\\n--- TAB: {tab_name} ---\\n\\n' separators, strips blank
-          lines from each CSV block.
-        Google Docs / plain text: returns content after whitespace normalisation.
-        PDFs: delegates to _extract_pdf_text().
+        Fetch strategy (three tiers, each tried in order on failure):
+
+        Google Sheets:
+          1. Sheets API v4 — fetches all tabs with proper tab labels.
+             Requires spreadsheets.readonly scope in the ADC token.
+          2. Authenticated CSV export — falls back when Sheets API returns
+             401/403 (scope missing or API disabled). Works when the ADC
+             token includes the correct scope.
+          3. Unauthenticated CSV export — last resort for sheets shared as
+             "Anyone with the link". Does not send an Authorization header,
+             so scope issues cannot cause rejection.
+
+        Google Docs:
+          1. Authenticated txt export.
+          2. Unauthenticated txt export (for publicly shared docs).
+
+        PDFs / generic URLs: single authenticated fetch, no fallback needed.
+
         On any fetch error: logs the error and returns "" so the ingestion
-          pipeline continues with an empty brief text rather than aborting.
+        pipeline continues with an empty brief text rather than aborting.
         """
         url = url.strip()
         if not url:
             return ""
         try:
             if m := _GSHEET_PATTERN.search(url):
+                sheet_id = m.group(1)
+                # Tier 1: Sheets API v4 (all tabs, labelled)
                 try:
-                    return self._fetch_sheet_all_tabs(m.group(1))
+                    return self._fetch_sheet_all_tabs(sheet_id)
                 except BriefFetchError:
-                    # Sheets API v4 unavailable (missing scope or API disabled).
-                    # Fall back to the direct CSV export path, which works with
-                    # the cloud-platform token and fetches the tab from the URL.
-                    return _normalise_whitespace(self._fetch_google_sheet(url, m.group(1)))
+                    pass
+                # Tier 2: authenticated CSV export
+                try:
+                    return _normalise_whitespace(
+                        self._fetch_google_sheet(url, sheet_id)
+                    )
+                except BriefFetchError:
+                    pass
+                # Tier 3: unauthenticated CSV export (publicly shared sheets)
+                text = self._fetch_url_anon(
+                    self._sheet_export_url(url, sheet_id)
+                )
+                if text:
+                    return _normalise_whitespace(text)
+                _log.warning(
+                    "to_flat_string: all three tiers failed for Sheet %s. "
+                    "If the sheet is org-restricted, fix ADC scopes with:\n    %s",
+                    sheet_id,
+                    _ADC_REAUTH_CMD,
+                )
+                return ""
+
             if m := _GDOC_PATTERN.search(url):
-                return _normalise_whitespace(self._fetch_google_doc(m.group(1)))
+                doc_id = m.group(1)
+                # Tier 1: authenticated txt export
+                try:
+                    return _normalise_whitespace(self._fetch_google_doc(doc_id))
+                except BriefFetchError:
+                    pass
+                # Tier 2: unauthenticated txt export (publicly shared docs)
+                export_url = (
+                    f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+                )
+                text = self._fetch_url_anon(export_url)
+                if text:
+                    return _normalise_whitespace(text)
+                _log.warning(
+                    "to_flat_string: both tiers failed for Doc %s. "
+                    "If the doc is org-restricted, fix ADC scopes with:\n    %s",
+                    doc_id,
+                    _ADC_REAUTH_CMD,
+                )
+                return ""
+
             if m := _GDRIVE_PATTERN.search(url):
                 return _normalise_whitespace(self._fetch_drive_file(m.group(1)))
             if self._looks_like_pdf(url):
@@ -179,6 +265,37 @@ class BriefFetcher:
         except Exception as exc:
             _log.warning("to_flat_string failed for %s: %s", url, exc)
             return ""
+
+    def _sheet_export_url(self, url: str, sheet_id: str) -> str:
+        """Build the CSV export URL, preserving the gid tab parameter if present."""
+        gid = None
+        if "#gid=" in url:
+            gid = url.split("#gid=")[1].split("&")[0]
+        export = (
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+        )
+        if gid:
+            export += f"&gid={gid}"
+        return export
+
+    def _fetch_url_anon(self, url: str) -> str:
+        """Fetch a URL without sending any Authorization header.
+
+        Used as a last-resort fallback for documents shared as
+        "Anyone with the link can view". Returns "" on any error.
+        Deliberately does not use self.session so that no Bearer token
+        is attached — sending a token with the wrong scope can cause
+        Google to reject a request that would otherwise succeed
+        anonymously.
+        """
+        try:
+            resp = requests.get(url, timeout=self.timeout, verify=False,
+                                headers={"User-Agent": "VibeBriefing/1.0"})
+            if resp.status_code == 200:
+                return resp.text.strip()
+        except Exception as exc:
+            _log.debug("_fetch_url_anon failed for %s: %s", url, exc)
+        return ""
 
     def _fetch_sheet_all_tabs(self, sheet_id: str) -> str:
         """Fetch every tab of a Google Sheet and join with TAB-labelled separators."""
