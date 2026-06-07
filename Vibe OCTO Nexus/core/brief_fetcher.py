@@ -54,28 +54,15 @@ def _normalise_whitespace(text: str) -> str:
 def _make_session() -> requests.Session:
     """Return a requests.Session authenticated with ADC credentials.
 
-    Requests Sheets and Drive scopes so service-account credentials get them
-    automatically. For authorized_user credentials (gcloud ADC) the scopes are
-    fixed at login time; this function detects the missing-scope condition and
-    logs a single actionable warning with the exact re-auth command.
+    Passes Sheets and Drive scopes so service-account ADC gets them
+    automatically. For authorized_user (gcloud ADC) the scopes are baked
+    into the refresh token at login time; the scopes= argument here is
+    ignored by the google-auth library for that credential type.
     """
     try:
         credentials, _ = google.auth.default(
             scopes=[_SHEETS_SCOPE, _DRIVE_SCOPE, _CLOUD_SCOPE]
         )
-        # For authorized_user credentials, scopes=None means the ADC token was
-        # obtained without the Sheets/Drive scopes. The token is valid for BQ
-        # (cloud-platform) but will be rejected by docs.google.com with 401.
-        stored_scopes = getattr(credentials, "scopes", None)
-        if stored_scopes is None:
-            _log.warning(
-                "[BriefFetcher] ADC credentials (%s) have no stored scopes. "
-                "Google Sheets / Docs brief fetching will fail with 401/403. "
-                "Fix: run this once in a terminal, then restart:\n\n"
-                "    %s\n",
-                type(credentials).__name__,
-                _ADC_REAUTH_CMD,
-            )
         session = google.auth.transport.requests.AuthorizedSession(credentials)
     except Exception:
         session = requests.Session()
