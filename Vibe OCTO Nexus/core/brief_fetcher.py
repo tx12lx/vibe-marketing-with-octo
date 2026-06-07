@@ -349,7 +349,19 @@ class BriefFetcher:
                 f"Fix with:\n    {_ADC_REAUTH_CMD}",
             )
         if resp.status_code == 403:
-            # Scope present but org policy may block. Sheets API itself is reachable.
+            # Google returns 403 for two distinct reasons:
+            #   "Request had insufficient authentication scopes." — scope is MISSING
+            #   "The caller does not have permission"            — scope is valid but
+            #                                                      sheet is private
+            # Check the body to distinguish them.
+            body = resp.text.lower()
+            if "insufficient authentication scopes" in body or "request had insufficient" in body:
+                return (
+                    False,
+                    "HTTP 403 — ADC token is missing spreadsheets.readonly scope. "
+                    f"Fix with:\n    {_ADC_REAUTH_CMD}",
+                )
+            # Scope is valid; this sheet is just org-restricted or private.
             return True, ""
         return False, f"HTTP {resp.status_code} from Sheets API probe"
 

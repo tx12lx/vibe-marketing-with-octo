@@ -100,6 +100,9 @@ def _silence_google_noise() -> None:
     for name in (
         "google", "google.auth", "google.auth.transport",
         "google.cloud", "urllib3", "grpc",
+        # brief_fetcher warnings are redundant — the ingester already
+        # collects fetch_errors and the orchestrator prints them at startup.
+        "core.brief_fetcher",
     ):
         logging.getLogger(name).setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", category=UserWarning)
