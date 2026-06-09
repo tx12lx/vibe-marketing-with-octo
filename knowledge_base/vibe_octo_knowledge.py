@@ -33,6 +33,7 @@ Output artifacts  (knowledge_base/artifacts/)
 Usage
 -----
   python -m knowledge_base.vibe_octo_knowledge --full-refresh
+  python -m knowledge_base.vibe_octo_knowledge --refresh-schema-only
   python -m knowledge_base.vibe_octo_knowledge --validate
 """
 from __future__ import annotations
@@ -684,6 +685,30 @@ class VibeOctoKnowledge:
 
         print("\n=== VALIDATE COMPLETE ===\n")
 
+    def run_refresh_schema_only(self) -> None:
+        """Re-fetch the Adobe schema (views only) and overwrite adobe_schema.json.
+
+        Skips campaign ingestion and brief fetching. Useful when the warehouse
+        schema changes and you want to update the artifact without a full refresh.
+        """
+        print("\n=== VIBE OCTO KNOWLEDGE v3 — REFRESH SCHEMA ONLY ===")
+        adobe_schema = self._phase2_adobe_schema()
+
+        if self.dry_run:
+            print("\n[DRY-RUN] adobe_schema.json not written.")
+            print(f"  Would write: {adobe_schema['view_count']} views, "
+                  f"{adobe_schema['column_count']} columns")
+            print("\n=== REFRESH SCHEMA ONLY COMPLETE ===\n")
+            return
+
+        path = self._artifacts_dir / "adobe_schema.json"
+        _write_atomic(path, adobe_schema)
+        size_kb = path.stat().st_size / 1024
+        print(f"\n  [WRITTEN] adobe_schema.json  ({size_kb:.1f} KB)")
+        print(f"  Views:   {adobe_schema['view_count']}")
+        print(f"  Columns: {adobe_schema['column_count']}")
+        print("\n=== REFRESH SCHEMA ONLY COMPLETE ===\n")
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -904,29 +929,35 @@ class VibeOctoKnowledge:
     # ------------------------------------------------------------------
 
     def _phase2_adobe_schema(self) -> dict:
-        print("\n[PHASE 2] Adobe Schema Ingestion")
+        print("\n[PHASE 2] Adobe Schema Ingestion (views only)")
         print(f"  Dataset: {ADOBE_PROJECT}.{ADOBE_DATASET}")
 
+        # ACC workflows reference only views in this dataset; base tables are
+        # internal implementation detail and not campaign-facing.
         try:
             tables_rows = list(
                 self._adobe_bq.query(
                     f"SELECT table_name, table_type "
                     f"FROM `{ADOBE_PROJECT}.{ADOBE_DATASET}.INFORMATION_SCHEMA.TABLES` "
+                    f"WHERE table_type = 'VIEW' "
                     f"ORDER BY table_name"
                 ).result()
             )
         except Exception as exc:
             _log.warning("TABLES query failed: %s", exc)
-            print(f"  WARNING: Could not fetch tables — {exc}")
+            print(f"  WARNING: Could not fetch views — {exc}")
             tables_rows = []
 
         try:
             columns_rows = list(
                 self._adobe_bq.query(
-                    f"SELECT table_name, column_name, data_type, is_nullable, "
-                    f"ordinal_position "
-                    f"FROM `{ADOBE_PROJECT}.{ADOBE_DATASET}.INFORMATION_SCHEMA.COLUMNS` "
-                    f"ORDER BY table_name, ordinal_position"
+                    f"SELECT c.table_name, c.column_name, c.data_type, "
+                    f"c.is_nullable, c.ordinal_position "
+                    f"FROM `{ADOBE_PROJECT}.{ADOBE_DATASET}.INFORMATION_SCHEMA.COLUMNS` c "
+                    f"JOIN `{ADOBE_PROJECT}.{ADOBE_DATASET}.INFORMATION_SCHEMA.TABLES` t "
+                    f"  ON c.table_name = t.table_name "
+                    f"WHERE t.table_type = 'VIEW' "
+                    f"ORDER BY c.table_name, c.ordinal_position"
                 ).result()
             )
         except Exception as exc:
@@ -941,7 +972,7 @@ class VibeOctoKnowledge:
         for row in columns_rows:
             tbl = row.table_name
             if tbl not in schema:
-                schema[tbl] = {"type": "UNKNOWN", "columns": []}
+                schema[tbl] = {"type": "VIEW", "columns": []}
             schema[tbl]["columns"].append({
                 "name":     row.column_name,
                 "type":     row.data_type,
@@ -949,7 +980,7 @@ class VibeOctoKnowledge:
             })
 
         total_cols = sum(len(v["columns"]) for v in schema.values())
-        print(f"  Tables:  {len(schema)}")
+        print(f"  Views:   {len(schema)}")
         print(f"  Columns: {total_cols}")
         print("[PHASE 2 COMPLETE]")
 
@@ -958,9 +989,10 @@ class VibeOctoKnowledge:
             "snapshot_at": datetime.now(tz=timezone.utc).isoformat(),
             "project": ADOBE_PROJECT,
             "dataset": ADOBE_DATASET,
-            "table_count": len(schema),
+            "scope": "views_only",
+            "view_count": len(schema),
             "column_count": total_cols,
-            "tables": schema,
+            "views": schema,
         }
 
     # ------------------------------------------------------------------
@@ -1164,7 +1196,8 @@ class VibeOctoKnowledge:
             "schema_ingestion": {
                 "adobe_project": ADOBE_PROJECT,
                 "adobe_dataset": ADOBE_DATASET,
-                "table_count":   (adobe_schema or {}).get("table_count", 0),
+                "scope":         "views_only",
+                "view_count":    (adobe_schema or {}).get("view_count", 0),
                 "column_count":  (adobe_schema or {}).get("column_count", 0),
             } if adobe_schema else None,
             "brief_access_diagnostics": {
@@ -1226,6 +1259,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Verify all 5 artifacts exist and contain valid JSON.",
     )
     group.add_argument(
+        "--refresh-schema-only",
+        action="store_true",
+        help=(
+            "Re-fetch the Adobe schema (views only) and overwrite adobe_schema.json. "
+            "Skips campaign ingestion and brief fetching."
+        ),
+    )
+    group.add_argument(
         "--dry-run",
         action="store_true",
         help="Run all phases without writing any files.",
@@ -1280,8 +1321,9 @@ def main() -> None:
         agent.run_full_refresh()
     elif args.validate:
         agent.run_validate()
+    elif args.refresh_schema_only:
+        agent.run_refresh_schema_only()
     elif args.dry_run:
-        # dry_run flag enables dry mode; full-refresh path is used
         agent.run_full_refresh()
 
 
