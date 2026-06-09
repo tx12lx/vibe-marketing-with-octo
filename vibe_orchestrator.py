@@ -51,7 +51,7 @@ from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from briefing_agent import BriefingAgent  # noqa: E402
 from feedback_agent import FeedbackAgent  # noqa: E402
-from pydantic_schemas import BriefingOutput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
+from pydantic_schemas import BriefingOutput, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
@@ -738,6 +738,50 @@ def _print_brief(brief: BriefingOutput) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Ad-hoc feedback helper — FeedbackAgent without a full UniversalJSONSpec
+# ---------------------------------------------------------------------------
+
+def _run_adhoc_feedback(
+    spec: Optional[UniversalJSONSpec],
+    log: Optional[QuantAuditLog],
+    query: str,
+    correction: str,
+) -> None:
+    """Invoke FeedbackAgent for ad-hoc sizing, brief-only, and general-question corrections.
+
+    Builds a minimal FeedbackInput from whatever context is available.  When no
+    campaign spec exists the campaign_code defaults to 'AD_HOC' so FeedbackAgent
+    can still extract and save universal rules that apply to future executions.
+    """
+    try:
+        feedback_input = FeedbackInput(
+            raw_correction=correction,
+            campaign_code=spec.campaign_code if spec is not None else "AD_HOC",
+            campaign_name=spec.campaign_name if spec is not None else "Ad-Hoc Query",
+            medium=spec.medium if spec is not None else "",
+            cadence=spec.cadence if spec is not None else "",
+            campaign_purpose=(
+                (spec.brief_agent_inputs or {}).get("campaign_purpose", "")
+                if spec is not None else ""
+            ),
+            execution_context={
+                "query": query,
+                "final_audience_count": log.final_count if log is not None else None,
+                "waterfall_steps": len(log.waterfall) if log is not None else 0,
+                "has_campaign_context": spec is not None,
+            },
+            existing_rules=[],
+            knowledge_tier=spec.campaign_tier if spec is not None else "BRONZE",
+            raw_input_prompt=query,
+        )
+        agent = FeedbackAgent()
+        agent.subscribe(feedback_input)
+        agent.execute()
+    except Exception:
+        pass  # FeedbackAgent failures must never crash the console loop
+
+
+# ---------------------------------------------------------------------------
 # Interactive console — dual-intent engine
 # ---------------------------------------------------------------------------
 
@@ -808,10 +852,14 @@ def _run_console(
         elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
             response = input("\n  Was everything correct? (Y/N): ").strip().upper()
             if response != "Y":
-                print(
-                    "\n  Thank you for the feedback. For detailed correction tracking,\n"
-                    "  please run a full campaign execution.\n"
-                )
+                correction = input(
+                    "\n  I'd love to understand what went wrong so I can do better"
+                    " next time. Please describe the issue in your own words --"
+                    " no need to be technical.\n\n  > "
+                ).strip()
+                print("\n  Got it! Let me make sure I understand...")
+                if correction:
+                    _run_adhoc_feedback(spec, log, query, correction)
 
         print()
 

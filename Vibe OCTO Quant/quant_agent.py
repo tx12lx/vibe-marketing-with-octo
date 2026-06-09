@@ -68,7 +68,7 @@ _QUANT_SYSTEM = (
     "  init_activation_date\n\n"
     "  WATERFALL FILTER SEQUENCE — apply as sequential cumulative CTE layers in this\n"
     "  exact order. Never collapse them into a single flat WHERE clause.\n"
-    "  Step 1 — Base Universe / LOB   : UPPER(lob_desc) IN (...) only — no other filters\n"
+    "  Step 1 — Base Universe / LOB   : UPPER(lob_desc) IN (...) AND standard_exclusions = 0\n"
     "  Step 2 — Primary Subscriber    : adds primary_sub = 1\n"
     "  Step 3 — Standard Exclusions   : adds standard_exclusions = 0 AND sub_status = 'A'\n"
     "  Step 4 — Stop Sell             : adds stop_sell = 0\n"
@@ -315,6 +315,7 @@ _QUANT_SYSTEM = (
     "  Never project only ban; never go back to the raw mobility_base table after CTE 1.\n"
     "    base_universe                 : SELECT * FROM `<mobility_base>`\n"
     "                                    WHERE UPPER(lob_desc) IN (...)\n"
+    "                                    AND standard_exclusions = 0\n"
     "    after_primary_subscriber      : SELECT * FROM base_universe\n"
     "                                    WHERE primary_sub = 1\n"
     "    after_standard_exclusions     : SELECT * FROM after_primary_subscriber\n"
@@ -337,7 +338,7 @@ _QUANT_SYSTEM = (
     "  COUNT(DISTINCT ban) in the final UNION ALL is therefore unambiguous.\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
     "- Seven-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
-    "    CTE 1 'Base Universe'              : LOB filter only (UPPER(lob_desc) IN (...))\n"
+    "    CTE 1 'Base Universe'              : UPPER(lob_desc) IN (...) AND standard_exclusions = 0\n"
     "    CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1\n"
     "    CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'\n"
     "    CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0\n"
@@ -402,7 +403,7 @@ Available schema:
 {schema_context}
 
 Waterfall structure required — seven mandatory layers in this exact sequence:
-  CTE 1 'Base Universe'              : LOB filter only — UPPER(lob_desc) IN (...)
+  CTE 1 'Base Universe'              : UPPER(lob_desc) IN (...) AND standard_exclusions = 0
   CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
   CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
   CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
@@ -448,7 +449,7 @@ control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 CTE structure rules — non-negotiable:
 - Linear SELECT * inheritance: every CTE selects ALL columns from the immediately preceding
   CTE so that downstream WHERE clauses can reference any column without ambiguity.
-    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...)
+    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0
     after_primary_subscriber      : SELECT * FROM base_universe WHERE primary_sub = 1
     after_standard_exclusions     : SELECT * FROM after_primary_subscriber
                                     WHERE standard_exclusions = 0 AND sub_status = 'A'
@@ -499,7 +500,7 @@ Available schema:
 {schema_context}
 
 Waterfall structure required — seven mandatory layers in this exact sequence:
-  CTE 1 'Base Universe'              : LOB filter only — UPPER(lob_desc) IN (...)
+  CTE 1 'Base Universe'              : UPPER(lob_desc) IN (...) AND standard_exclusions = 0
   CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
   CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
   CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
@@ -541,7 +542,7 @@ control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
 CTE structure rules — non-negotiable:
 - Linear SELECT * inheritance: every CTE selects ALL columns from the immediately preceding
   CTE so that downstream WHERE clauses can reference any column without ambiguity.
-    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...)
+    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0
     after_primary_subscriber      : SELECT * FROM base_universe WHERE primary_sub = 1
     after_standard_exclusions     : SELECT * FROM after_primary_subscriber
                                     WHERE standard_exclusions = 0 AND sub_status = 'A'
@@ -671,19 +672,24 @@ class QuantAgent(BaseAgent):
 
     def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
         """Path 2 — execute a seven-step waterfall count query for an ad-hoc sizing request."""
-        print("[QUANT AGENT] -> Strategizing SQL translation and BigQuery optimization...")
-        print("  Constructing multi-stage sequential CTE blocks. Injecting optimized partition")
-        print("  filters for Model tables and applying baseline marketing exclusions...\n")
+        ThoughtDisplay.progress("I'm calculating your audience now...")
         try:
             schema = self._fetch_schema(request.bq_project, request.bq_dataset)
             sql = self._generate_adhoc_waterfall_sql(request, schema)
-            _print_sql_block(sql)
+            ThoughtDisplay.progress("Step 1 of 7: Finding your base universe...")
+            ThoughtDisplay.progress("Step 2 of 7: Filtering to primary subscribers...")
+            ThoughtDisplay.progress("Step 3 of 7: Applying standard exclusions...")
+            ThoughtDisplay.progress("Step 4 of 7: Checking stop sell rules...")
+            ThoughtDisplay.progress("Step 5 of 7: Applying your targeting criteria...")
+            ThoughtDisplay.progress("Step 6 of 7: Applying channel governance...")
+            ThoughtDisplay.progress("Step 7 of 7: Excluding control group...")
+            ThoughtDisplay.progress("Almost done! Counting your audience...")
             raw_rows = self._execute_query(sql, request.bq_project)
             masked_rows = _mask_pii(raw_rows)
             waterfall = _parse_waterfall(masked_rows)
-            _log_waterfall(waterfall)
             note = _optimization_note(waterfall)
             final_count = _final_audience_count(waterfall)
+            ThoughtDisplay.results_ready(final_count, waterfall, note)
             return QuantAuditLog(
                 request=request,
                 sql=sql,
