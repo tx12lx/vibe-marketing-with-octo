@@ -933,10 +933,14 @@ def _run_console(
         # Simplified HITL fires for ad-hoc sizing, brief-only, and general questions.
         if spec is not None and log is not None:
             should_continue = hitl.prompt(spec, log, brief_output, intent_type=intent.intent_type)
+            if rules_registry is not None:
+                rules_registry._load()
             if not should_continue:
                 break
         elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
             _simplified_hitl(spec, log, brief_output, query, intent.intent_type)
+            if rules_registry is not None:
+                rules_registry._load()
 
         print()
 

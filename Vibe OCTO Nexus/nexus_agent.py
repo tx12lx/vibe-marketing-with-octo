@@ -543,10 +543,6 @@ class NexusAgent:
         """Path 2 — parse a natural language audience description into an ad-hoc sizing request."""
         prompt = _NL_PARSE_PROMPT.format(query=query)
         request = self._parse_to_adhoc_request(prompt)
-        if request and request.optimization_context:
-            thin = "-" * 44
-            print(f"\n  [Nexus Strategy]\n  {thin}")
-            print(f"  {request.optimization_context}\n")
         return request
 
     def classify_intent(self, query: str) -> IntentClassification:
@@ -840,33 +836,13 @@ class NexusAgent:
     def _build_from_deployment_matrix(
         self, deployments: list[dict]
     ) -> Optional[AudienceSizingRequest]:
-        """Orchestrate the variance analysis, print strategy headers, build the request."""
-        print(
-            "  [NEXUS AGENT] -> Analyzing deployment variations and "
-            "synthesizing portfolio strategy...\n"
-        )
-
+        """Orchestrate the variance analysis and build the audience sizing request."""
         analysis = self._analyze_deployment_variance(deployments)
         if analysis is None:
             # Analysis failed — fall back to treating the most recent deployment as a plain brief
             return self.build_sizing_request_from_brief(deployments[0])
 
-        summary = analysis.get("strategy_summary", "")
-        if summary:
-            print(f"  [NEXUS AGENT] -> CAMPAIGN STRATEGY SUMMARY: {summary}\n")
-
-        deltas = [d for d in analysis.get("deployment_deltas", []) if d]
-        if deltas and len(deployments) > 1:
-            thin = "-" * 44
-            print(f"  Deployment Variance Detected Across {len(deployments)} Run(s):")
-            print(f"  {thin}")
-            for delta in deltas[:3]:
-                print(f"    * {delta}")
-            print()
-
         request = self._build_sizing_request_from_analysis(analysis)
-        if request is not None:
-            _print_criteria_block(request)
         return request
 
     def _analyze_deployment_variance(self, deployments: list[dict]) -> Optional[dict]:
@@ -1333,153 +1309,6 @@ class NexusAgent:
         raise ValueError(f"No valid JSON in response. First 300 chars: {text[:300]!r}")
 
 
-def _extract_criteria_fields(request: "AudienceSizingRequest") -> dict:
-    """Parse a validated AudienceSizingRequest into display-ready targeting fields."""
-    all_filters = list(request.filters or []) + list(request.exclusion_layers or [])
-    blob = " ".join(all_filters)
-
-    # Core Product — NBA model classn_nm + predict_modl_id
-    m_classn = re.search(r"classn_nm\s*=\s*['\"]([^'\"]+)['\"]", blob, re.IGNORECASE)
-    if not m_classn:
-        # Fallback: unquoted value (e.g. classn_nm = ADD_A_LINE)
-        m_classn = re.search(r"classn_nm\s*=\s*([A-Z][A-Z_0-9]+)", blob, re.IGNORECASE)
-    m_modl   = re.search(r"predict_modl_id\s*=\s*(\d+)", blob, re.IGNORECASE)
-    if m_classn and m_modl:
-        core_product = f"{m_classn.group(1).upper()} (Model {m_modl.group(1)})"
-    elif m_classn:
-        core_product = m_classn.group(1).upper()
-    else:
-        core_product = (request.target_population or "N/A").split(".")[0].strip()
-
-    # Propensity tiers — seg_nm IN ('reco_1', ...); fallback: any reco_N reference in blob
-    m_seg = re.search(r"seg_nm\s+in\s*\(([^)]+)\)", blob, re.IGNORECASE)
-    if m_seg:
-        reco_nums = sorted(int(n) for n in re.findall(r"reco_(\d+)", m_seg.group(1), re.IGNORECASE))
-    else:
-        reco_nums = sorted(set(int(n) for n in re.findall(r"reco_(\d+)", blob, re.IGNORECASE)))
-    if reco_nums:
-        propensity = (
-            f"Deciles {reco_nums[0]}-{reco_nums[-1]} "
-            f"(reco_{reco_nums[0]} to reco_{reco_nums[-1]})"
-        )
-    else:
-        propensity = "N/A"
-
-    # Regional Scope — province IN / NOT IN patterns; national fallback with ON/QC annotation
-    m_prov_in = re.search(
-        r"UPPER\s*\(\s*province\s*\)\s+IN\s*\(([^)]+)\)",
-        blob, re.IGNORECASE
-    )
-    m_prov_not_in = re.search(
-        r"UPPER\s*\(\s*province\s*\)\s+NOT\s+IN\s*\(([^)]+)\)",
-        blob, re.IGNORECASE
-    )
-    if m_prov_in:
-        raw_codes = re.findall(r"['\"]([A-Za-z]{2})['\"]", m_prov_in.group(1))
-        codes = sorted(set(c.upper().replace("PQ", "QC") for c in raw_codes))
-        regional_scope = "Regional: " + ", ".join(codes)
-    elif m_prov_not_in:
-        raw_codes = re.findall(r"['\"]([A-Za-z]{2})['\"]", m_prov_not_in.group(1))
-        codes = sorted(set(c.upper().replace("PQ", "QC") for c in raw_codes))
-        regional_scope = "National excl. " + ", ".join(codes)
-    else:
-        has_on = bool(re.search(r"\bON\b", blob))
-        has_qc = bool(re.search(r"\b(?:QC|PQ)\b", blob))
-        if has_on and has_qc:
-            regional_scope = "National (ON & QC highlighted)"
-        elif has_on:
-            regional_scope = "National (ON highlighted)"
-        elif has_qc:
-            regional_scope = "National (QC highlighted)"
-        else:
-            regional_scope = "National"
-
-    # Primary Channel Guard — medium label + governing DNC flag
-    _medium_labels = {"EM": "Email", "SMS": "SMS", "OB": "Outbound Dialing", "DM": "Direct Mail"}
-    channel_label = _medium_labels.get(request.medium.upper().strip(), request.medium)
-    _dnc_col = {"EM": "em_dnc", "SMS": "sms_dnc", "OB": "ob_dnc", "DM": "dm_dnc"}
-    dnc_col = _dnc_col.get(request.medium.upper().strip(), "")
-    if dnc_col and re.search(rf"\b{dnc_col}\s*=\s*0\b", blob, re.IGNORECASE):
-        channel_guard = f"{channel_label} ({dnc_col} = 0)"
-    else:
-        channel_guard = channel_label
-
-    # Dynamic Exclusions — behavioral self-join lookback windows and non-DNC exclusion layers
-    dynamic_parts: list[str] = []
-    m_aal = re.search(
-        r"init_activation_date.*?INTERVAL\s+(\d+)\s+MONTH",
-        blob,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if m_aal:
-        dynamic_parts.append(
-            f"Exclude secondary line activations within trailing {m_aal.group(1)} months."
-        )
-    # GCH recency suppression — render before the generic exclusion pass so it gets a
-    # clean formatted line rather than falling into the raw-string filter below.
-    _gch_entry = next(
-        (e for e in (request.exclusion_layers or []) if e and "gch recency suppression" in e.lower()),
-        None,
-    )
-    if _gch_entry:
-        _m_days = re.search(r"within\s+(\d+)\s+days?", _gch_entry, re.IGNORECASE)
-        _m_codes = re.search(r"via\s+([\w/]+)", _gch_entry, re.IGNORECASE)
-        _days = _m_days.group(1) if _m_days else "30"
-        _codes = _m_codes.group(1).upper() if _m_codes else "AAL/AALBAU"
-        dynamic_parts.append(f"{_days}-Day GCH Recency Suppression ({_codes} Matrix Applied)")
-    if request.exclusion_layers:
-        for excl in request.exclusion_layers:
-            if not excl:
-                continue
-            lower = excl.lower()
-            if (
-                "dnc" not in lower
-                and "init_activation_date" not in lower
-                and "gch recency suppression" not in lower
-            ):
-                clean = excl.strip()
-                # Drop raw SQL filter strings (contain BQ operators) — they are not
-                # human-readable labels and bloat the terminal card.
-                if re.search(r"\b(AND|OR)\b|=\s*[01'\"]", clean, re.IGNORECASE):
-                    continue
-                if len(clean) > 100:
-                    clean = clean[:97] + "..."
-                dynamic_parts.append(clean)
-    dynamic_exclusions = ", ".join(dynamic_parts) if dynamic_parts else "None"
-
-    return {
-        "portfolio":          f"{request.campaign_code} / {request.campaign_sub_code}",
-        "core_product":       core_product,
-        "propensity":         propensity,
-        "regional_scope":     regional_scope,
-        "channel_guard":      channel_guard,
-        "dynamic_exclusions": dynamic_exclusions,
-    }
-
-
-def _print_criteria_block(request: "AudienceSizingRequest") -> None:
-    """Print the structured Nexus handoff banner before Quant begins SQL generation."""
-    f = _extract_criteria_fields(request)
-    sep  = "=" * 70
-    thin = "-" * 70
-    lw   = 23  # label column width
-    lines = [
-        "",
-        sep,
-        "[NEXUS AGENT] -> FINAL RECOMMENDED TARGETING CRITERIA FOR QUANT SIZE",
-        sep,
-        "",
-        f"  {'Portfolio / Initiative':<{lw}}: {f['portfolio']}",
-        f"  {'Target Core Product':<{lw}}: {f['core_product']}",
-        f"  {'Target Propensity':<{lw}}: {f['propensity']}",
-        f"  {'Regional Scope':<{lw}}: {f['regional_scope']}",
-        f"  {'Primary Channel Guard':<{lw}}: {f['channel_guard']}",
-        f"  {'Dynamic Exclusions':<{lw}}: {f['dynamic_exclusions']}",
-        "",
-        thin,
-        "",
-    ]
-    print("\n".join(lines))
 
 
 def _print_terminal_error() -> None:
