@@ -1,0 +1,59 @@
+{
+  "schema_version": "3.0",
+  "generated_at": "2026-06-09T03:48:08.921783+00:00",
+  "summary": {
+    "total_campaigns": 35,
+    "gold_count": 35,
+    "silver_count": 0,
+    "bronze_count": 0,
+    "briefs_fetched_successfully": 34,
+    "briefs_inaccessible": 1,
+    "inaccessibility_rate_percent": 2.8571
+  },
+  "gold_insights_extracted": {
+    "targeting_patterns": 12,
+    "exclusion_patterns": 10,
+    "standard_rules": 3,
+    "personalization_fields": 0
+  },
+  "schema_ingestion": {
+    "adobe_project": "bi-srv-hsmdet-pr-7b9def",
+    "adobe_dataset": "adobe",
+    "table_count": 13923,
+    "column_count": 1148569
+  },
+  "brief_access_diagnostics": {
+    "total_attempted": 35,
+    "fetched_successfully": 34,
+    "failed": 1,
+    "failure_rate_percent": 2.8571,
+    "failures_by_error_type": {
+      "403_forbidden": {
+        "count": 1,
+        "root_cause": "The authenticated identity does not have permission to access the specific document. Share the sheet with the ADC identity.",
+        "affected_campaigns": [
+          {
+            "camp_id": "Quebec SHS Organic Rate Increase EM",
+            "campaign_name": "Quebec SHS Organic Rate Increase EM",
+            "url": "https://docs.google.com/spreadsheets/d/1cmzB9qmT-uCmh86zoWSPI3hkHKan3vB56xqsjuG5Uec/edit?gid=1871460492#gid=1871460492",
+            "http_code": 403,
+            "error_message": "Access denied (HTTP 403) for Google Sheet 1cmzB9qmT-uCmh86zoWSPI3hkHKan3vB56xqsjuG5Uec. Sheet must be shared publicly or with the service account. If using gcloud ADC, re-run: gcloud auth application-"
+          }
+        ],
+        "remediation": {
+          "steps": [
+            "Run `gcloud config get-value account` to identify the ADC identity.",
+            "Open each affected databrief_link, click Share, add the ADC identity as Viewer."
+          ],
+          "severity": "MEDIUM"
+        }
+      }
+    }
+  },
+  "constraints_verified": {
+    "no_brief_files_on_disk": true,
+    "all_briefs_in_memory_only": true,
+    "all_campaigns_indexed": true,
+    "graceful_degradation": true
+  }
+}

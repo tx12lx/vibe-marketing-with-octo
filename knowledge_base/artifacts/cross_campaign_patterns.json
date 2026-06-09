@@ -1,0 +1,250 @@
+{
+  "extracted_at": "2026-06-09T03:49:35.416535+00:00",
+  "source_campaigns_gold": 35,
+  "insights": {
+    "targeting_patterns": [
+      {
+        "pattern": "primary",
+        "frequency": 27,
+        "gold_examples": [
+          "Penny CX DM2 AMHT-FRFX-RGNT-TRTY",
+          "RECO CX DM1 2026-27 V1",
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY",
+          "Penny CX EM1 AMHT-FRFX-RGNT-TRTY",
+          "Penny CX EM1 HMLK-NWMR-RCMD-WHLY"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.77
+      },
+      {
+        "pattern": "product",
+        "frequency": 24,
+        "gold_examples": [
+          "Penny CX DM1 HMLK-NWMR-RCMD-WHLY",
+          "Penny CX DM1 AMHT-FRFX-RGNT-TRTY",
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY",
+          "PureFibre In-Term Upsell",
+          "KI Cart Abandon"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.69
+      },
+      {
+        "pattern": "service",
+        "frequency": 20,
+        "gold_examples": [
+          "Penny CX EM1 HMLK-NWMR-RCMD-WHLY",
+          "RECO CX EM1 2026-27 V1",
+          "PureFibre In-Term Upsell",
+          "Add Mobility - FFH Renewal Journey",
+          "M&H Add Mobility EM Automation - TELUS Interaction Workflow / Naked FFH & SHS / Daily"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.57
+      },
+      {
+        "pattern": "active",
+        "frequency": 18,
+        "gold_examples": [
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY",
+          "PureFibre In-Term Upsell",
+          "KI Cart Abandon",
+          "M&H Add Mobility EM Automation - TELUS Interaction Workflow / Naked FFH & SHS / Daily",
+          "*Catch-all* MNP Add Mobility $35/150GB March 30 2026 Ad Hoc"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.51
+      },
+      {
+        "pattern": "eligible",
+        "frequency": 13,
+        "gold_examples": [
+          "Falcon Pre-Sell EM",
+          "KI Cart Abandon",
+          "M&H Add Mobility EM Automation - TELUS Interaction Workflow / Naked FFH & SHS / Daily",
+          "*Catch-all* MNP Add Mobility $35/150GB March 30 2026 Ad Hoc",
+          "Add Mobility STIM $35/100GB March 30"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.37
+      },
+      {
+        "pattern": "contract",
+        "frequency": 8,
+        "gold_examples": [
+          "PureFibre In-Term Upsell",
+          "Add Mobility - FFH Renewal Journey",
+          "M&H Add Mobility EM Automation - TELUS Interaction Workflow / Naked FFH & SHS / Daily",
+          "Quebec SHS Organic Rate Increase EM",
+          "Quebec SHS Legacy Rate Increase EM"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.23
+      },
+      {
+        "pattern": "internet",
+        "frequency": 7,
+        "gold_examples": [
+          "Falcon Pre-Sell EM",
+          "PureFibre In-Term Upsell",
+          "KI Cart Abandon",
+          "Add Mob BAU STIM - $40/100GB TELUS Offer",
+          "HSIA High-Risk Triggers Email Daily"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.2
+      },
+      {
+        "pattern": "resident",
+        "frequency": 3,
+        "gold_examples": [
+          "PureFibre In-Term Upsell",
+          "KI Cart Abandon",
+          "M&H Add Mobility EM Automation - TELUS Interaction Workflow / Naked FFH & SHS / Daily"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.09
+      },
+      {
+        "pattern": "subscriber",
+        "frequency": 2,
+        "gold_examples": [
+          "KI Cart Abandon",
+          "KP2P AUTO SMS"
+        ],
+        "bq_column_used": null,
+        "confidence": 0.06
+      }
+    ],
+    "exclusion_patterns": [
+      {
+        "pattern": "exclude",
+        "frequency": 29,
+        "gold_examples": [
+          "Penny CX DM2 AMHT-FRFX-RGNT-TRTY",
+          "Penny CX DM1 AMHT-FRFX-RGNT-TRTY",
+          "RECO CX DM1 2026-27 V1",
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY",
+          "Penny CX EM1 AMHT-FRFX-RGNT-TRTY"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.83
+      },
+      {
+        "pattern": "control group",
+        "frequency": 28,
+        "gold_examples": [
+          "Penny CX DM2 AMHT-FRFX-RGNT-TRTY",
+          "Penny CX DM1 HMLK-NWMR-RCMD-WHLY",
+          "Penny CX DM1 AMHT-FRFX-RGNT-TRTY",
+          "RECO CX DM1 2026-27 V1",
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.8
+      },
+      {
+        "pattern": "exclusion",
+        "frequency": 25,
+        "gold_examples": [
+          "Penny CX EM1 HMLK-NWMR-RCMD-WHLY",
+          "RECO CX EM1 2026-27 V1",
+          "Falcon Pre-Sell EM",
+          "PureFibre In-Term Upsell",
+          "KI Cart Abandon"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.71
+      },
+      {
+        "pattern": "exclusions",
+        "frequency": 23,
+        "gold_examples": [
+          "Penny CX EM1 HMLK-NWMR-RCMD-WHLY",
+          "RECO CX EM1 2026-27 V1",
+          "Falcon Pre-Sell EM",
+          "PureFibre In-Term Upsell",
+          "KI Cart Abandon"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.66
+      },
+      {
+        "pattern": "opt-out",
+        "frequency": 8,
+        "gold_examples": [
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY",
+          "M&H Add Mobility EM Automation - TELUS Interaction Workflow / Naked FFH & SHS / Daily",
+          "*Catch-all* MNP Add Mobility $35/150GB March 30 2026 Ad Hoc",
+          "Add Mobility STIM $35/100GB March 30",
+          "MNPBELL Add Mob Q1 Adhoc"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.23
+      },
+      {
+        "pattern": "suppress",
+        "frequency": 5,
+        "gold_examples": [
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY",
+          "RECO CX EM1 2026-27 V1",
+          "Public to Add Mob - Bad Debt or Collections",
+          "Quebec SHS Organic Rate Increase EM",
+          "Quebec SHS Legacy Rate Increase EM"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.14
+      },
+      {
+        "pattern": "suppression",
+        "frequency": 3,
+        "gold_examples": [
+          "Penny CX DM2 HMLK-NWMR-RCMD-WHLY",
+          "Public to Add Mob - Bad Debt or Collections",
+          "Quebec SHS Organic Rate Increase EM"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.09
+      },
+      {
+        "pattern": "dnc",
+        "frequency": 2,
+        "gold_examples": [
+          "Add Mob BAU STIM - $40/100GB TELUS Offer",
+          "KP2P AUTO SMS"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.06
+      },
+      {
+        "pattern": "do not contact",
+        "frequency": 2,
+        "gold_examples": [
+          "Add Mob BAU STIM - $40/100GB TELUS Offer",
+          "KP2P AUTO SMS"
+        ],
+        "typical_lookback": null,
+        "confidence": 0.06
+      }
+    ],
+    "telecom_standards": {
+      "always_required": [
+        "control_group_exclusion",
+        "active_subscriber_filter",
+        "dnc_suppression"
+      ],
+      "by_channel": {
+        "EM": [
+          "unsubscribe_handling"
+        ],
+        "SMS": [
+          "stop_handling",
+          "crtc_compliance"
+        ],
+        "PUSH": [
+          "device_frequency_cap"
+        ]
+      }
+    }
+  }
+}
