@@ -185,10 +185,17 @@ _QUANT_SYSTEM = (
     "  `bi-srv-hsmdet-pr-7b9def.adobe.bq_dly_dbm_customer_profl`\n"
     "  Use for: all FFH (Fixed and Home) and Home Solutions customer queries — residential\n"
     "  internet, TV, home phone, SHS, and MNP (Mobile-to-Home / Home-to-Mobile) campaigns.\n"
-    "  Sizing aggregate: COUNT(DISTINCT ban) only.\n"
-    "  Key confirmed columns: ban, province, mnh_mob_ban (NULL = no linked mobility BAN),\n"
-    "  sub_status, standard_exclusions, primary_sub, stop_sell, control_group_flg,\n"
-    "  em_dnc, sms_dnc, ob_dnc, dm_dnc.\n\n"
+    "  Sizing aggregate: COUNT(DISTINCT BACCT_NUM) — NEVER use ban (column does not exist).\n"
+    "  CONFIRMED FFH columns: BACCT_NUM (account key, INT64), SERV_PROV (province, STRING),\n"
+    "  MNH_MOB_BAN (mobility BAN link, INT64 — IS NULL = no linked mobility plan),\n"
+    "  EX_STANDARD_EX (standard exclusions, INT64: 0 = not excluded),\n"
+    "  FFH_STOPSELL_IND (stop sell flag, INT64: 0 = not stop-sold),\n"
+    "  CONTROL_GROUP_FLG (STRING: 'N' = not in control group),\n"
+    "  CC_DNEM (email DNC, INT64), CC_DNSM (SMS DNC), CC_DNRS (outbound DNC),\n"
+    "  CC_DNDM (direct mail DNC).\n"
+    "  COLUMNS ABSENT FROM FFH TABLE — DO NOT USE for FFH queries:\n"
+    "    ban, province, standard_exclusions, primary_sub, sub_status, stop_sell,\n"
+    "    lob_desc, em_dnc, sms_dnc, ob_dnc, dm_dnc, control_group_flg (lowercase).\n\n"
     "  TABLE SELECTION ROUTING — evaluate BEFORE writing any query:\n"
     "  - Mobility / wireless / postpaid / prepaid / Koodo / TELUS mobile → TABLE 1\n"
     "  - FFH / Home Solutions / residential / internet / TV / home phone → TABLE 4\n"
@@ -232,7 +239,8 @@ _QUANT_SYSTEM = (
     "    Filter : mnh_ffh_ban = 0\n"
     "  'naked FFH' = FFH/Home Solutions customer with NO linked mobility plan\n"
     "    Table  : TABLE 4 — `bq_dly_dbm_customer_profl`\n"
-    "    Filter : mnh_mob_ban IS NULL\n"
+    "    Filter : MNH_MOB_BAN IS NULL   [NOTE: FFH table uses UPPERCASE column names]\n"
+    "    Size   : COUNT(DISTINCT BACCT_NUM)  [NOT ban — FFH table uses BACCT_NUM]\n"
     "  Context signals — choose TABLE 4 (naked FFH) when request contains: 'FFH customers',\n"
     "  'Home Solutions customers', 'naked FFH', 'naked home', 'residential customers'.\n"
     "  Choose TABLE 1 (naked mobility) when: 'mobility customers', 'wireless customers',\n"
@@ -507,6 +515,92 @@ Constraints:
 OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
 The first character must be 'W' (WITH). Any explanatory text causes a pipeline parse failure."""
 
+# ---------------------------------------------------------------------------
+# FFH table awareness — injected whenever a query targets bq_dly_dbm_customer_profl
+# ---------------------------------------------------------------------------
+
+_FFH_TABLE = "bq_dly_dbm_customer_profl"
+
+# Lowercase signals that identify an FFH/Home Solutions request
+_FFH_SIGNALS_LOWER = frozenset([
+    "ffh", "home solutions", "naked ffh", "dbm", "customer_profl",
+    "bq_dly_dbm_customer_profl", "mnh_mob_ban", "naked home",
+    "home phone customer", "internet customer", "residential customer",
+])
+
+# Runtime override injected into the prompt when an FFH table is detected.
+# Supersedes the mobility-centric waterfall template above.
+_FFH_WATERFALL_OVERRIDE = """\
+
+=== FFH TABLE COLUMN OVERRIDE (HIGHEST AUTHORITY — supersedes ALL definitions above) ===
+This request targets HOME SOLUTIONS (FFH) customers.
+MANDATORY base table: `{bq_project}.adobe.bq_dly_dbm_customer_profl`
+
+CONFIRMED column names for this table (use ONLY these — ignore TABLE 4 column list above):
+  SIZE AGGREGATE  : COUNT(DISTINCT BACCT_NUM)  — NEVER use ban (does not exist)
+  BACCT_NUM       : the account key (replaces ban everywhere)
+  EX_STANDARD_EX  : standard exclusions flag (INT64, 0 = not excluded)
+  FFH_STOPSELL_IND: stop sell flag (INT64, 0 = not stop-sold)
+  CONTROL_GROUP_FLG: control group (STRING, 'N' = not in control group)
+  SERV_PROV       : province (STRING, 2-letter code)
+  MNH_MOB_BAN     : mobility BAN link (IS NULL = naked FFH, no linked mobility plan)
+  CC_DNEM         : email DNC (replaces em_dnc)
+  CC_DNSM         : SMS DNC (replaces sms_dnc)
+  CC_DNRS         : outbound DNC (replaces ob_dnc)
+  CC_DNDM         : direct mail DNC (replaces dm_dnc)
+
+COLUMNS THAT DO NOT EXIST IN THIS TABLE — do not reference them:
+  ban, standard_exclusions, primary_sub, sub_status, stop_sell, lob_desc,
+  em_dnc, sms_dnc, ob_dnc, dm_dnc, province, control_group_flg (lowercase)
+
+WATERFALL CTE STRUCTURE FOR FFH (mandatory — replaces the mobility template above):
+  base_universe:
+    SELECT * FROM `{bq_project}.adobe.bq_dly_dbm_customer_profl`
+    WHERE EX_STANDARD_EX = 0
+    [NO lob_desc filter — lob_desc does not exist in this table]
+
+  after_primary_subscriber:
+    SELECT * FROM base_universe
+    [NO WHERE clause — primary_sub does not exist; count equals base_universe]
+
+  after_standard_exclusions:
+    SELECT * FROM after_primary_subscriber
+    WHERE EX_STANDARD_EX = 0
+    [NO sub_status filter — sub_status does not exist in this table]
+
+  after_stop_sell:
+    SELECT * FROM after_standard_exclusions
+    WHERE FFH_STOPSELL_IND = 0
+
+  after_targeting_criteria:
+    SELECT * FROM after_stop_sell WHERE <targeting criteria from request>
+    [Use SERV_PROV for province, MNH_MOB_BAN for mobility link checks]
+
+  after_channel_governance:
+    SELECT * FROM after_targeting_criteria
+    WHERE CC_DNEM = 0 [and/or other CC_ DNC flags as specified]
+
+  after_universal_control_group:
+    SELECT * FROM after_channel_governance
+    WHERE CONTROL_GROUP_FLG = 'N'
+
+FINAL SELECT: UNION ALL of COUNT(DISTINCT BACCT_NUM) from each CTE.
+All seven layer_name strings remain unchanged ('Base Universe', 'After: Primary Subscriber', etc.).
+"""
+
+
+def _is_ffh_request(
+    request: "AudienceSizingRequest",
+) -> bool:
+    """Return True if the request targets the FFH/Home Solutions table."""
+    text = " ".join(filter(None, [
+        request.target_population or "",
+        " ".join(request.filters or []),
+        request.optimization_context or "",
+    ])).lower()
+    return any(sig in text for sig in _FFH_SIGNALS_LOWER)
+
+
 _EXTREME_DROP = 0.60
 _HIGH_SCRUB_RATE = 0.80
 
@@ -709,23 +803,37 @@ class QuantAgent(BaseAgent):
         try:
             schema = self._fetch_schema(request.bq_project, request.bq_dataset)
             sql = self._generate_adhoc_waterfall_sql(request, schema)
-            if "bq_dly_dbm_customer_profl" in sql:
+
+            is_ffh = _is_ffh_request(request)
+            if is_ffh:
                 table_label = "TABLE 4 (FFH / Home Solutions customer profile)"
+                skipped_steps = [
+                    "Step 2: Primary subscriber filter (not applicable to Home Solutions)",
+                    "Step 1 LOB filter: lob_desc column absent from FFH table",
+                ]
+                applied_rules = [
+                    "Using EX_STANDARD_EX for standard exclusions",
+                    "Using FFH_STOPSELL_IND for stop sell",
+                    "Using BACCT_NUM as account key (not ban)",
+                ]
             else:
                 table_label = "TABLE 1 (Mobility subscriber base)"
+                skipped_steps = None
+                applied_rules = None
+
+            # Show corrections being applied when optimization_context is set
+            opt_ctx = (request.optimization_context or "").strip()
+            if opt_ctx and applied_rules is None:
+                applied_rules = [l.strip() for l in opt_ctx.splitlines() if l.strip()][:3]
+
             ThoughtDisplay.execution_plan(
                 target_population=request.target_population or "unspecified",
                 table_label=table_label,
                 filters=[f for f in (request.filters or []) if f][:4],
+                skipped_steps=skipped_steps,
+                applied_rules=applied_rules,
             )
-            ThoughtDisplay.progress("Step 1 of 7: Finding your base universe...")
-            ThoughtDisplay.progress("Step 2 of 7: Filtering to primary subscribers...")
-            ThoughtDisplay.progress("Step 3 of 7: Applying standard exclusions...")
-            ThoughtDisplay.progress("Step 4 of 7: Checking stop sell rules...")
-            ThoughtDisplay.progress("Step 5 of 7: Applying your targeting criteria...")
-            ThoughtDisplay.progress("Step 6 of 7: Applying channel governance...")
-            ThoughtDisplay.progress("Step 7 of 7: Excluding control group...")
-            ThoughtDisplay.progress("Almost done! Counting your audience...")
+            ThoughtDisplay.progress("Running the waterfall query now...")
             raw_rows = self._execute_query(sql, request.bq_project)
             masked_rows = _mask_pii(raw_rows)
             waterfall = _parse_waterfall(masked_rows)
@@ -805,6 +913,18 @@ class QuantAgent(BaseAgent):
             bq_dataset=request.bq_dataset,
             schema_context=schema[:6000] if schema else "(not available)",
         )
+        # Fix 1: Append FFH column override when the request targets the Home Solutions table.
+        if _is_ffh_request(request):
+            ffh_project = request.bq_project or self._default_project
+            prompt = prompt + "\n" + _FFH_WATERFALL_OVERRIDE.format(bq_project=ffh_project)
+        # Fix 2: Apply optimization_context corrections when present.
+        opt_ctx = (request.optimization_context or "").strip()
+        if opt_ctx:
+            prompt = (
+                prompt
+                + f"\n\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
+                f" Apply these substitutions exactly as stated:\n{opt_ctx}\n"
+            )
         system = (
             _QUANT_SYSTEM + "\n\n" + self._session_context
             if self._session_context
@@ -836,11 +956,23 @@ class QuantAgent(BaseAgent):
 
     def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
         opt_ctx = (request.optimization_context or "").strip()
-        optimization_context_section = (
-            f"\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
-            f" Apply these substitutions exactly as stated:\n{opt_ctx}\n"
-            if opt_ctx else ""
-        )
+
+        # Fix 1: Inject FFH column override when the request targets the Home Solutions table.
+        # This supersedes the mobility-centric waterfall template in the prompt above.
+        override_parts: list[str] = []
+        if _is_ffh_request(request):
+            ffh_project = request.bq_project or self._default_project
+            override_parts.append(_FFH_WATERFALL_OVERRIDE.format(bq_project=ffh_project))
+
+        # Fix 2: Apply accumulated corrections on every retry.
+        if opt_ctx:
+            override_parts.append(
+                f"\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
+                f" Apply these substitutions exactly as stated:\n{opt_ctx}\n"
+            )
+
+        optimization_context_section = "\n".join(override_parts) if override_parts else ""
+
         prompt = _ADHOC_WATERFALL_PROMPT.format(
             target_population=request.target_population or "UNSPECIFIED",
             filters_json=json.dumps(

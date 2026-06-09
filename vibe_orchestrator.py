@@ -17,7 +17,9 @@ import json
 import logging
 import os
 import sys
+import uuid
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
@@ -51,7 +53,7 @@ from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from briefing_agent import BriefingAgent  # noqa: E402
 from feedback_agent import FeedbackAgent  # noqa: E402
-from pydantic_schemas import AdHocSizingRequest, BriefingOutput, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
+from pydantic_schemas import AdHocSizingRequest, BriefingOutput, BusinessRule, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
@@ -495,22 +497,102 @@ def _is_column_error(error_summary: str) -> bool:
     )
 
 
+def _save_execution_corrections(
+    corrections: list[str],
+    request: AdHocSizingRequest,
+    rules_registry: "BusinessRulesRegistry",
+) -> int:
+    """Parse correction strings accumulated during recovery and persist as BusinessRules.
+
+    Returns the number of rules saved.
+    """
+    # Infer the table from the request text so the saved rule is table-scoped.
+    all_text = " ".join(filter(None, [
+        request.target_population or "",
+        " ".join(request.filters or []),
+        " ".join(corrections),
+    ])).lower()
+    if any(s in all_text for s in ("ffh", "home solutions", "naked ffh", "dbm", "mnh_mob_ban",
+                                    "ex_standard_ex", "ffh_stopsell", "bacct_num")):
+        table_hint = "bq_dly_dbm_customer_profl"
+    else:
+        table_hint = "bq_fda_mob_mobility_base"
+
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
+    saved = 0
+    for correction in corrections:
+        if not correction.strip():
+            continue
+        rule_id = f"correction_{uuid.uuid4().hex[:8]}"
+        desc = f"Column correction applied during execution: {correction[:120]}"
+        if table_hint:
+            desc = f"[{table_hint}] {desc}"
+        rule = BusinessRule(
+            rule_id=rule_id,
+            created_at=now_iso,
+            verified_by="user_correction_during_execution",
+            raw_correction=correction,
+            rule_description=desc,
+            rule_type="general",
+            structured_value={"note": correction, "table": table_hint or "unknown"},
+            scope="universal",
+            confidence=1.0,
+            source="user_correction_during_execution",
+            clarification_rounds=0,
+            applies_to_future=True,
+            overrides_acc_summary=False,
+            priority=1,
+        )
+        try:
+            rules_registry.add_rule(rule)
+            saved += 1
+        except Exception:
+            pass
+    return saved
+
+
 def _direct_count_with_recovery(
-    quant: QuantAgent, request: AdHocSizingRequest
+    quant: QuantAgent,
+    request: AdHocSizingRequest,
+    rules_registry: Optional["BusinessRulesRegistry"] = None,
 ) -> Union[QuantAuditLog, NexusErrorPayload]:
-    """Run direct_count with up to 3 HITL recovery attempts on column-not-found errors."""
+    """Run direct_count with up to 3 HITL recovery attempts on column-not-found errors.
+
+    Fix 2: Corrections are applied immediately to each retry (accumulated in optimization_context).
+    Fix 3: After successful recovery, corrections are saved to business_rules.json.
+    """
     result = quant.direct_count(request)
+    corrections_made: list[str] = []
+
     for _ in range(3):
         if isinstance(result, QuantAuditLog):
+            # Fix 3: Persist corrections that led to this success.
+            if corrections_made and rules_registry is not None:
+                saved = _save_execution_corrections(corrections_made, request, rules_registry)
+                if saved:
+                    corrections_text = " ".join(corrections_made).lower()
+                    table = "bq_dly_dbm_customer_profl" if any(
+                        s in corrections_text
+                        for s in ("ex_standard_ex", "ffh_stopsell", "bacct_num", "serv_prov")
+                    ) else "bq_fda_mob_mobility_base"
+                    ThoughtDisplay.correction_rules_saved(table, saved)
             return result
+
         if not _is_column_error(result.error_summary):
             return result
+
         correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
         if not correction:
             return result
+
+        corrections_made.append(correction)
+        # Fix 2: Accumulate all corrections so every retry benefits from all prior guidance.
         ctx = ((request.optimization_context or "") + "\n" + correction).strip()
         request = request.model_copy(update={"optimization_context": ctx})
         result = quant.direct_count(request)
+
+    # All retries exhausted -- show graceful recovery instead of crashing.
+    ThoughtDisplay.graceful_recovery()
     return result
 
 
@@ -554,7 +636,7 @@ def route(
         request = nexus.build_sizing_request_from_nl(payload["query"])
         if request is None:
             return None, None, None
-        result = _direct_count_with_recovery(quant, request)
+        result = _direct_count_with_recovery(quant, request, rules_registry)
         if isinstance(result, QuantAuditLog):
             return None, result, None
         ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -733,7 +815,7 @@ def route_by_intent(
                         )
                     if updates:
                         request = request.model_copy(update=updates)
-            result = _direct_count_with_recovery(quant, request)
+            result = _direct_count_with_recovery(quant, request, rules_registry)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
             ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -774,7 +856,7 @@ def route_by_intent(
             request = nexus.build_sizing_request_from_nl(query)
             if request is None:
                 return None, None, None
-            result = _direct_count_with_recovery(quant, request)
+            result = _direct_count_with_recovery(quant, request, rules_registry)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
             ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -1047,45 +1129,50 @@ def _run_console(
                 print("  No query available yet. Run a campaign sizing first.\n")
             continue
 
-        # Step 1: Glossary keyword injection (always runs; enriches session context)
-        ctx = _build_dynamic_context(query, gold_index)
-        if ctx:
-            nexus.set_session_context(ctx)
-            quant.set_session_context(ctx)
+        try:
+            # Step 1: Glossary keyword injection (always runs; enriches session context)
+            ctx = _build_dynamic_context(query, gold_index)
+            if ctx:
+                nexus.set_session_context(ctx)
+                quant.set_session_context(ctx)
 
-        # Step 2: Intent classification — always consults knowledge layer
-        intent = nexus.classify_intent(query)
+            # Step 2: Intent classification — always consults knowledge layer
+            intent = nexus.classify_intent(query)
 
-        # Steps 3-5: Unified knowledge-grounded pipeline
-        spec, log, brief_output = route_by_intent(
-            nexus,
-            quant,
-            briefing,
-            intent,
-            query,
-            gold_index,
-            schema_snapshot,
-            rules_registry,
-        )
-        if log:
-            last_log = log
-            print(_format_audit_log(log))
-        if brief_output:
-            _print_brief(brief_output)
+            # Steps 3-5: Unified knowledge-grounded pipeline
+            spec, log, brief_output = route_by_intent(
+                nexus,
+                quant,
+                briefing,
+                intent,
+                query,
+                gold_index,
+                schema_snapshot,
+                rules_registry,
+            )
+            if log:
+                last_log = log
+                print(_format_audit_log(log))
+            if brief_output:
+                _print_brief(brief_output)
 
-        # Step 7: HITL — always triggered for any execution that produced output.
-        # Full HITL (spec + log) fires for campaign sizing and execution.
-        # Simplified HITL fires for ad-hoc sizing, brief-only, and general questions.
-        if spec is not None and log is not None:
-            should_continue = hitl.prompt(spec, log, brief_output, intent_type=intent.intent_type)
-            if rules_registry is not None:
-                rules_registry._load()
-            if not should_continue:
-                break
-        elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
-            _simplified_hitl(spec, log, brief_output, query, intent.intent_type)
-            if rules_registry is not None:
-                rules_registry._load()
+            # Step 7: HITL — always triggered for any execution that produced output.
+            # Full HITL (spec + log) fires for campaign sizing and execution.
+            # Simplified HITL fires for ad-hoc sizing, brief-only, and general questions.
+            if spec is not None and log is not None:
+                should_continue = hitl.prompt(spec, log, brief_output, intent_type=intent.intent_type)
+                if rules_registry is not None:
+                    rules_registry._load()
+                if not should_continue:
+                    break
+            elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
+                _simplified_hitl(spec, log, brief_output, query, intent.intent_type)
+                if rules_registry is not None:
+                    rules_registry._load()
+
+        except Exception as _exc:
+            # Fix 4: Never exit the console loop due to an agent failure.
+            ThoughtDisplay.graceful_recovery()
 
         print()
 

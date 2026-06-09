@@ -420,6 +420,8 @@ class ThoughtDisplay:
         target_population: str,
         table_label: str,
         filters: Optional[list[str]] = None,
+        skipped_steps: Optional[list[str]] = None,
+        applied_rules: Optional[list[str]] = None,
     ) -> None:
         """Show the table selection and key filters before the waterfall query executes."""
         body = [
@@ -429,8 +431,41 @@ class ThoughtDisplay:
         if filters:
             parts = [f[:50] + ("..." if len(f) > 50 else "") for f in filters[:4]]
             body += _label_rows("Key filters", " | ".join(parts))
-        body += [_blank(), _row("  Running the 7-step waterfall now...")]
+        if applied_rules:
+            body.append(_blank())
+            for rule in applied_rules[:3]:
+                body.append(_row(f"  {_CHECK}  {rule[:58]}"))
+        if skipped_steps:
+            body.append(_blank())
+            body.append(_row("  Skipping steps not applicable to this table:"))
+            for step in skipped_steps[:3]:
+                body.append(_row(f"    {step[:60]}"))
+        body += [_blank(), _row("  Running the waterfall now...")]
         cls._box("Here is my plan before I run the query:", body)
+
+    @classmethod
+    def correction_rules_saved(cls, table_name: str, rules_count: int) -> None:
+        """Show that corrections were saved as business rules for future sessions."""
+        body = [
+            _row(f"  {_CHECK}  {rules_count} correction(s) saved for {table_name[:38]}"),
+            _row("  I'll apply these automatically next time."),
+        ]
+        cls._box("Got it! I've learned from your corrections.", body)
+
+    @classmethod
+    def graceful_recovery(cls) -> None:
+        """Show recovery options when all retries are exhausted without a crash."""
+        body = [
+            _row("  I tried several approaches but couldn't complete this query."),
+            _blank(),
+            _row("  What would you like to do?"),
+            _row("  1  Rephrase your question"),
+            _row("  2  Try a simpler version"),
+            _row("  3  Contact the OCTO team"),
+            _blank(),
+            _row("  The console is still open -- type your next question."),
+        ]
+        cls._box("I hit a roadblock -- but I'm still here!", body)
 
     @classmethod
     def column_not_found_ask(cls, error_summary: str) -> Optional[str]:
