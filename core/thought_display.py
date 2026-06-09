@@ -29,8 +29,10 @@ _ML   = "├" if _U else "+"
 _MR   = "┤" if _U else "+"
 _H    = "─" if _U else "-"
 _V    = "│" if _U else "|"
-_FILL = "█" if _U else "#"
-_OPEN = "░" if _U else "."
+_FILL  = "█" if _U else "#"
+_OPEN  = "░" if _U else "."
+_CHECK = "✅" if _U else "[OK]"
+_ARR   = "→"  if _U else "->"
 
 
 def _bar(pct: float, width: int = 10) -> str:
@@ -108,13 +110,87 @@ class ThoughtDisplay:
 
     @classmethod
     def show_sql(cls, sql: str) -> None:
-        """Display the SQL query for audit mode (only when explicitly requested)."""
+        """Display the SQL query (only when explicitly requested)."""
         divider = "  " + _H * 62
-        print(f"\n  Here's the query I used to build your audience:\n")
+        print(f"\n  Here's how I built your audience:\n")
         print(divider)
         for line in sql.splitlines():
             print(f"  {line}")
         print(divider)
+        print()
+
+    @classmethod
+    def show_hitl_summary_box(
+        cls,
+        intent_type: str,
+        campaign_name: Optional[str] = None,
+        audience_count: Optional[int] = None,
+        confidence: Optional[float] = None,
+        data_sources: Optional[list] = None,
+    ) -> None:
+        """Show warm summary box with numbered menu before the HITL prompt."""
+        body: list[str] = [_blank()]
+        save_label = f"  1 {_ARR} Looks good! Save this result"
+        option2: Optional[str] = None
+
+        if intent_type == "sizing_request":
+            body += [
+                _row(f"  {_CHECK}  Understood your request"),
+                _row(f"  {_CHECK}  Built and ran your audience query"),
+            ]
+            if audience_count is not None:
+                body.append(_row(f"  {_CHECK}  Final audience: {audience_count:,} contacts"))
+            option2 = f"  2 {_ARR} Show me how the audience was built"
+
+        elif intent_type == "campaign_execution":
+            if campaign_name:
+                body.append(_row(f"  {_CHECK}  Found campaign: {campaign_name[:40]}"))
+            body.append(_row(f"  {_CHECK}  Applied your verified business rules"))
+            if audience_count is not None:
+                body.append(_row(f"  {_CHECK}  Built your audience: {audience_count:,} contacts"))
+            body.append(_row(f"  {_CHECK}  Generated your campaign brief"))
+            save_label = f"  1 {_ARR} Looks good! Save this as a verified blueprint"
+            option2 = f"  2 {_ARR} Show me how the audience was built"
+
+        elif intent_type in ("brief_generation", "brief_qa"):
+            if campaign_name:
+                body.append(_row(f"  {_CHECK}  Generated campaign brief for {campaign_name[:28]}"))
+            src_count = len(data_sources) if data_sources else 0
+            body.append(_row(f"  {_CHECK}  Used {src_count} data sources"))
+            if confidence is not None:
+                body.append(_row(f"  {_CHECK}  Confidence: {confidence:.0%}"))
+            save_label = f"  1 {_ARR} Looks good! Save this brief"
+            option2 = f"  2 {_ARR} Show me the data sources I used"
+
+        else:
+            body.append(_row(f"  {_CHECK}  Answered from the knowledge base"))
+
+        body.append(_blank())
+        body.append(_row("  What would you like to do next?"))
+        body.append(_blank())
+        body.append(_row(save_label))
+        if option2:
+            body.append(_row(option2))
+        body.append(_row(f"  3 {_ARR} Something doesn't look right"))
+
+        cls._box("Here's a summary of what I did:", body)
+
+    @classmethod
+    def show_brief_sources(cls, briefing_output: Optional[object]) -> None:
+        """Display data sources used to build a brief."""
+        print("\n  Here's what I used to build this brief:\n")
+        if briefing_output is None:
+            print(f"  {_CHECK}  Campaign knowledge base")
+            print()
+            return
+        sources = getattr(briefing_output, "data_sources_cited", None) or []
+        tier = getattr(briefing_output, "tier", "")
+        tier_label = f" ({tier} tier)" if tier else ""
+        print(f"  {_CHECK}  Campaign knowledge base{tier_label}")
+        for src in sources:
+            print(f"  {_CHECK}  {src}")
+        if not sources:
+            print(f"  {_CHECK}  Available campaign brief context")
         print()
 
     # ------------------------------------------------------------------

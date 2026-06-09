@@ -782,6 +782,93 @@ def _run_adhoc_feedback(
 
 
 # ---------------------------------------------------------------------------
+# Simplified HITL — numbered menu for ad-hoc sizing, brief-only, and Q&A
+# ---------------------------------------------------------------------------
+
+def _collect_correction_and_feedback(
+    spec: Optional[UniversalJSONSpec],
+    log: Optional[QuantAuditLog],
+    query: str,
+) -> None:
+    print(
+        "\n  No problem! I'd love to understand what went wrong"
+        " so I can do better next time.\n"
+        "\n  Please describe the issue in your own words -- no need"
+        " to be technical.\n"
+    )
+    correction = input("  > ").strip()
+    print("\n  Got it! Let me make sure I understand...\n")
+    if correction:
+        _run_adhoc_feedback(spec, log, query, correction)
+
+
+def _simplified_hitl(
+    spec: Optional[UniversalJSONSpec],
+    log: Optional[QuantAuditLog],
+    brief_output: Optional[BriefingOutput],
+    query: str,
+    intent_type: str,
+) -> None:
+    """Numbered HITL menu for ad-hoc sizing, brief-only, and general questions."""
+    audience_count = log.final_count if log is not None else None
+    campaign_name = spec.campaign_name if spec is not None else None
+    confidence = brief_output.confidence_score if brief_output is not None else None
+    data_sources = brief_output.data_sources_cited if brief_output is not None else None
+
+    ThoughtDisplay.show_hitl_summary_box(
+        intent_type=intent_type,
+        campaign_name=campaign_name,
+        audience_count=audience_count,
+        confidence=confidence,
+        data_sources=data_sources,
+    )
+
+    has_sql = log is not None and bool(getattr(log, "sql", None))
+    has_sources = brief_output is not None
+    show_option2 = has_sql or has_sources
+
+    while True:
+        prompt_str = "  Enter 1, 2, or 3: " if show_option2 else "  Enter 1 or 3: "
+        response = input(prompt_str).strip()
+
+        if response == "1":
+            print("\n  Wonderful! Moving on.\n")
+            break
+
+        elif response == "2" and show_option2:
+            if intent_type in ("brief_generation", "brief_qa") and brief_output is not None:
+                ThoughtDisplay.show_brief_sources(brief_output)
+            elif has_sql:
+                ThoughtDisplay.show_sql(log.sql)
+            print("  Does everything look correct?\n")
+            print("  What would you like to do?")
+            print("  1  Looks good! Move on")
+            print("  3  Something doesn't look right")
+            print()
+            while True:
+                r2 = input("  Enter 1 or 3: ").strip()
+                if r2 == "1":
+                    print("\n  Wonderful! Moving on.\n")
+                    break
+                elif r2 == "3":
+                    _collect_correction_and_feedback(spec, log, query)
+                    break
+                else:
+                    print("  Please enter 1 or 3.")
+            break
+
+        elif response == "3":
+            _collect_correction_and_feedback(spec, log, query)
+            break
+
+        else:
+            if show_option2:
+                print("  Please enter 1, 2, or 3.")
+            else:
+                print("  Please enter 1 or 3.")
+
+
+# ---------------------------------------------------------------------------
 # Interactive console — dual-intent engine
 # ---------------------------------------------------------------------------
 
@@ -845,21 +932,11 @@ def _run_console(
         # Full HITL (spec + log) fires for campaign sizing and execution.
         # Simplified HITL fires for ad-hoc sizing, brief-only, and general questions.
         if spec is not None and log is not None:
-            ThoughtDisplay.hitl_gate(spec.campaign_name, log.final_count, spec.campaign_tier)
-            should_continue = hitl.prompt(spec, log, brief_output)
+            should_continue = hitl.prompt(spec, log, brief_output, intent_type=intent.intent_type)
             if not should_continue:
                 break
         elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
-            response = input("\n  Was everything correct? (Y/N): ").strip().upper()
-            if response != "Y":
-                correction = input(
-                    "\n  I'd love to understand what went wrong so I can do better"
-                    " next time. Please describe the issue in your own words --"
-                    " no need to be technical.\n\n  > "
-                ).strip()
-                print("\n  Got it! Let me make sure I understand...")
-                if correction:
-                    _run_adhoc_feedback(spec, log, query, correction)
+            _simplified_hitl(spec, log, brief_output, query, intent.intent_type)
 
         print()
 

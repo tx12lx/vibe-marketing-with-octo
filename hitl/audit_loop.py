@@ -74,22 +74,45 @@ class HITLAuditLoop:
         spec: UniversalJSONSpec,
         audit_log: QuantAuditLog,
         briefing_output: Optional[BriefingOutput] = None,
+        intent_type: Optional[str] = None,
     ) -> bool:
-        """Present the HITL gate and dispatch to the YES or NO handler.
+        """Present the HITL gate with a numbered menu.
 
         Returns True to continue the console loop, False to exit it.
         The console loop must break when this returns False.
         """
-        response = input(
-            "\n  Was everything correct? (Y/N): "
-        ).strip().upper()
+        self._show_summary_box(spec, audit_log, briefing_output, intent_type)
 
-        if response == "Y":
-            self._handle_yes(spec, audit_log, briefing_output)
-            return True
-        else:
-            self._handle_no(spec, audit_log)
-            return False
+        while True:
+            response = input("  Enter 1, 2, or 3: ").strip()
+
+            if response == "1":
+                self._handle_yes(spec, audit_log, briefing_output)
+                return True
+
+            elif response == "2":
+                self._handle_review(audit_log, briefing_output, intent_type)
+                print("  What would you like to do?\n")
+                print("  1  Looks good! Save this result")
+                print("  3  Something doesn't look right")
+                print()
+                while True:
+                    response2 = input("  Enter 1 or 3: ").strip()
+                    if response2 == "1":
+                        self._handle_yes(spec, audit_log, briefing_output)
+                        return True
+                    elif response2 == "3":
+                        self._handle_no(spec, audit_log)
+                        return False
+                    else:
+                        print("  Please enter 1 or 3.")
+
+            elif response == "3":
+                self._handle_no(spec, audit_log)
+                return False
+
+            else:
+                print("  Please enter 1, 2, or 3.")
 
     # ------------------------------------------------------------------
     # YES path — confirm, promote, flywheel
@@ -139,9 +162,13 @@ class HITLAuditLoop:
     # ------------------------------------------------------------------
 
     def _handle_no(self, spec: UniversalJSONSpec, audit_log: QuantAuditLog) -> None:
-        correction = input(
-            "\n  What was wrong? Please be specific (e.g. 'Lookback should be 90 days' or 'Missing exclusion for legacy customers'): "
-        ).strip()
+        print(
+            "\n  No problem! I'd love to understand what went wrong"
+            " so I can do better next time.\n"
+            "\n  Please describe the issue in your own words -- no need"
+            " to be technical.\n"
+        )
+        correction = input("  > ").strip()
 
         # Run FeedbackAgent to extract and save verified business rules.
         # This is non-blocking: any failure is silently caught so the existing
@@ -198,6 +225,53 @@ class HITLAuditLoop:
         )
 
         ThoughtDisplay.campaign_rejected(spec.campaign_name)
+
+    # ------------------------------------------------------------------
+    # HITL display helpers
+    # ------------------------------------------------------------------
+
+    def _show_summary_box(
+        self,
+        spec: UniversalJSONSpec,
+        audit_log: QuantAuditLog,
+        briefing_output: Optional[BriefingOutput],
+        intent_type: Optional[str],
+    ) -> None:
+        """Render the warm summary box before the numbered menu."""
+        campaign_name = spec.campaign_name if spec is not None else None
+        audience_count = audit_log.final_count if audit_log is not None else None
+        confidence = briefing_output.confidence_score if briefing_output is not None else None
+        data_sources = briefing_output.data_sources_cited if briefing_output is not None else None
+
+        effective_intent = intent_type or (
+            "campaign_execution" if (spec is not None and audit_log is not None)
+            else "brief_generation" if (spec is not None and briefing_output is not None)
+            else "sizing_request"
+        )
+
+        ThoughtDisplay.show_hitl_summary_box(
+            intent_type=effective_intent,
+            campaign_name=campaign_name,
+            audience_count=audience_count,
+            confidence=confidence,
+            data_sources=data_sources,
+        )
+
+    def _handle_review(
+        self,
+        audit_log: QuantAuditLog,
+        briefing_output: Optional[BriefingOutput],
+        intent_type: Optional[str],
+    ) -> None:
+        """Show SQL or data sources when the user selects option 2."""
+        if intent_type in ("brief_generation", "brief_qa"):
+            ThoughtDisplay.show_brief_sources(briefing_output)
+        else:
+            if audit_log and audit_log.sql:
+                ThoughtDisplay.show_sql(audit_log.sql)
+            else:
+                print("\n  No query details available.\n")
+        print("  Does everything look correct?\n")
 
     # ------------------------------------------------------------------
     # FeedbackAgent integration
