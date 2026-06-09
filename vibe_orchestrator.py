@@ -19,7 +19,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from dotenv import load_dotenv
 
@@ -51,7 +51,7 @@ from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from briefing_agent import BriefingAgent  # noqa: E402
 from feedback_agent import FeedbackAgent  # noqa: E402
-from pydantic_schemas import BriefingOutput, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
+from pydantic_schemas import AdHocSizingRequest, BriefingOutput, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
@@ -483,6 +483,35 @@ def _print_discrepancy_audit(spec: UniversalJSONSpec) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Error recovery helpers
+# ---------------------------------------------------------------------------
+
+def _is_column_error(error_summary: str) -> bool:
+    lower = error_summary.lower()
+    return (
+        "unknown column" in lower
+        or "unrecognized name" in lower
+        or "column not found" in lower
+    )
+
+
+def _direct_count_with_recovery(
+    quant: QuantAgent, request: AdHocSizingRequest
+) -> Union[QuantAuditLog, NexusErrorPayload]:
+    """Run direct_count with one recovery attempt on column-not-found errors."""
+    result = quant.direct_count(request)
+    if isinstance(result, QuantAuditLog):
+        return result
+    if _is_column_error(result.error_summary):
+        correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
+        if correction:
+            ctx = ((request.optimization_context or "") + "\n" + correction).strip()
+            request = request.model_copy(update={"optimization_context": ctx})
+            return quant.direct_count(request)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Router — stateless, workflow-dispatch only
 # ---------------------------------------------------------------------------
 
@@ -522,7 +551,7 @@ def route(
         request = nexus.build_sizing_request_from_nl(payload["query"])
         if request is None:
             return None, None, None
-        result = quant.direct_count(request)
+        result = _direct_count_with_recovery(quant, request)
         if isinstance(result, QuantAuditLog):
             return None, result, None
         ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -648,6 +677,14 @@ def route_by_intent(
                 result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
             if isinstance(result, QuantAuditLog):
                 return spec, result, None
+            if _is_column_error(getattr(result, "error_summary", "")):
+                correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
+                if correction:
+                    ctx = ((spec.optimization_context or "") + "\n" + correction).strip()
+                    spec = spec.model_copy(update={"optimization_context": ctx})
+                    result = quant.audit_from_spec(spec)
+            if isinstance(result, QuantAuditLog):
+                return spec, result, None
             ThoughtDisplay.error(
                 "I was unable to complete the audience sizing request. "
                 "The system attempted a correction but could not reconcile the targeting rules."
@@ -690,7 +727,7 @@ def route_by_intent(
                         )
                     if updates:
                         request = request.model_copy(update=updates)
-            result = quant.direct_count(request)
+            result = _direct_count_with_recovery(quant, request)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
             ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -731,7 +768,7 @@ def route_by_intent(
             request = nexus.build_sizing_request_from_nl(query)
             if request is None:
                 return None, None, None
-            result = quant.direct_count(request)
+            result = _direct_count_with_recovery(quant, request)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
             ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -741,11 +778,18 @@ def route_by_intent(
         if isinstance(result, NexusErrorPayload):
             result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
         if not isinstance(result, QuantAuditLog):
-            ThoughtDisplay.error(
-                "I was unable to complete the audience sizing request. "
-                "The system attempted a correction but could not reconcile the targeting rules."
-            )
-            return None, None, None
+            if _is_column_error(getattr(result, "error_summary", "")):
+                correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
+                if correction:
+                    ctx = ((spec.optimization_context or "") + "\n" + correction).strip()
+                    spec = spec.model_copy(update={"optimization_context": ctx})
+                    result = quant.audit_from_spec(spec)
+            if not isinstance(result, QuantAuditLog):
+                ThoughtDisplay.error(
+                    "I was unable to complete the audience sizing request. "
+                    "The system attempted a correction but could not reconcile the targeting rules."
+                )
+                return None, None, None
 
         briefing.subscribe(spec)
         brief_output = briefing.execute()

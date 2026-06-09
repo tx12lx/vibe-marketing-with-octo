@@ -709,6 +709,15 @@ class QuantAgent(BaseAgent):
         try:
             schema = self._fetch_schema(request.bq_project, request.bq_dataset)
             sql = self._generate_adhoc_waterfall_sql(request, schema)
+            if "bq_dly_dbm_customer_profl" in sql:
+                table_label = "TABLE 4 (FFH / Home Solutions customer profile)"
+            else:
+                table_label = "TABLE 1 (Mobility subscriber base)"
+            ThoughtDisplay.execution_plan(
+                target_population=request.target_population or "unspecified",
+                table_label=table_label,
+                filters=[f for f in (request.filters or []) if f][:4],
+            )
             ThoughtDisplay.progress("Step 1 of 7: Finding your base universe...")
             ThoughtDisplay.progress("Step 2 of 7: Filtering to primary subscribers...")
             ThoughtDisplay.progress("Step 3 of 7: Applying standard exclusions...")

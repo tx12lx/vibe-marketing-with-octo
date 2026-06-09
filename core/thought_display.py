@@ -7,6 +7,7 @@ consoles. No SQL, column names, schema identifiers, or stack traces are shown.
 """
 from __future__ import annotations
 
+import re
 import sys
 from typing import Optional
 
@@ -412,6 +413,66 @@ class ThoughtDisplay:
             ),
         ]
         cls._box("Thank you for the feedback! I've recorded your correction.", body)
+
+    @classmethod
+    def execution_plan(
+        cls,
+        target_population: str,
+        table_label: str,
+        filters: Optional[list[str]] = None,
+    ) -> None:
+        """Show the table selection and key filters before the waterfall query executes."""
+        body = [
+            *_label_rows("Query target", target_population[:80]),
+            *_label_rows("Data source", table_label),
+        ]
+        if filters:
+            parts = [f[:50] + ("..." if len(f) > 50 else "") for f in filters[:4]]
+            body += _label_rows("Key filters", " | ".join(parts))
+        body += [_blank(), _row("  Running the 7-step waterfall now...")]
+        cls._box("Here is my plan before I run the query:", body)
+
+    @classmethod
+    def column_not_found_ask(cls, error_summary: str) -> Optional[str]:
+        """Show an interactive recovery prompt when a column is missing.
+
+        Parses the BigQuery error to surface the field name, then asks the
+        user for guidance. Returns the user's correction string, or None if
+        they press Enter to skip.
+        """
+        match = re.search(
+            r"unrecognized name[:\s]+([^\s;,@\[\]]+)", error_summary, re.IGNORECASE
+        )
+        missing = match.group(1).strip(".,;()") if match else None
+
+        body: list[str] = []
+        if missing:
+            body += _label_rows("Missing field", missing)
+            body += _label_rows(
+                "What happened",
+                f"The data field '{missing}' could not be found in the current "
+                "environment. The column name may have changed or may not exist "
+                "in the selected table.",
+            )
+        else:
+            body += _label_rows(
+                "What happened",
+                "A data field referenced in the query could not be found "
+                "in the current environment.",
+            )
+        body += [
+            _blank(),
+            _row("  I can try again if you help me understand what you meant."),
+            _row("  Example: 'use ban instead' or 'remove that filter'."),
+        ]
+        cls._box("I hit a snag -- can you help me fix it?", body)
+
+        try:
+            correction = input("\n  Your guidance (or press Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            correction = ""
+        print()
+        return correction if correction else None
 
     # ------------------------------------------------------------------
     # Error translation
