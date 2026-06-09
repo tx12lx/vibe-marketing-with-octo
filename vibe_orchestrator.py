@@ -35,7 +35,7 @@ _BUSINESS_RULES_PATH = _ROOT / "business_rules.json"
 _ARTIFACTS_DIR = _ROOT / "knowledge_base" / "artifacts"
 
 # Keywords that trigger dynamic glossary/catalog injection.
-_GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU"}
+_GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU", "NAKED"}
 
 # Load all agent environments before any agent code is imported.
 # override=False means the first file wins on conflicts.
@@ -258,6 +258,29 @@ def _build_dynamic_context(query_text: str) -> str:
             parts.append(
                 f"  {key} — Business Meaning: {defn.get('business_meaning', '')}\n"
             )
+            if defn.get("special_notes"):
+                parts.append(f"       Special Notes: {defn['special_notes']}\n")
+            indicators = defn.get("database_indicators") or []
+            if indicators:
+                parts.append("       Database Indicators:\n")
+                for ind in indicators:
+                    parts.append(
+                        f"         {ind['column']} = {ind['value']} ({ind['meaning']})\n"
+                    )
+        parts.append("\n")
+
+    business_terms = glossary.get("business_terms", {})
+    matched_terms = {k: v for k, v in business_terms.items() if k.upper() in detected}
+    if matched_terms:
+        parts.append(
+            "BUSINESS TERM DEFINITIONS (authoritative — override any inferred meaning):\n"
+        )
+        for key, defn in matched_terms.items():
+            parts.append(
+                f"  '{key}' — Business Meaning: {defn.get('business_meaning', '')}\n"
+            )
+            if defn.get("sql_filter"):
+                parts.append(f"       SQL Filter: {defn['sql_filter']}\n")
             if defn.get("special_notes"):
                 parts.append(f"       Special Notes: {defn['special_notes']}\n")
             indicators = defn.get("database_indicators") or []
@@ -597,6 +620,27 @@ def route_by_intent(
             request = nexus.build_sizing_request_from_nl(query)
             if request is None:
                 return None, None, None
+            # Apply universal business rules to ad-hoc requests (campaign-scoped
+            # rules are skipped because there is no campaign_code context here).
+            if rules_registry is not None:
+                universal_rules = [
+                    r for r in rules_registry._rules
+                    if r.applies_to_future and r.scope.lower() == "universal"
+                ]
+                if universal_rules:
+                    ThoughtDisplay.show_rules_being_applied(
+                        rules_registry.get_display_summary(universal_rules)
+                    )
+                    extra_filters = []
+                    for rule in universal_rules:
+                        rt = rule.rule_type.lower()
+                        sql = rule.structured_value.get("sql") or rule.structured_value.get("filter", "")
+                        if rt in ("filter_add", "exclusion_add") and sql and sql not in (request.filters or []):
+                            extra_filters.append(sql)
+                    if extra_filters:
+                        request = request.model_copy(
+                            update={"filters": list(request.filters or []) + extra_filters}
+                        )
             result = quant.direct_count(request)
             if isinstance(result, QuantAuditLog):
                 return None, result, None

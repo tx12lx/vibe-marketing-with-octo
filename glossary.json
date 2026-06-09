@@ -17,6 +17,16 @@
       ]
     }
   },
+  "business_terms": {
+    "naked": {
+      "business_meaning": "Mobility-only customer with no bundled FFH household — the customer has no linked fixed-home product.",
+      "sql_filter": "mnh_ffh_ban = 0",
+      "special_notes": "CRITICAL: use mnh_ffh_ban = 0 (INT64, 0 = no FFH household). Never substitute individual product indicator columns (shs_ind, optik_ind, etc.). The column name is mnh_ffh_ban — note the 'n' after 'm': m-n-h, not m-h-h.",
+      "database_indicators": [
+        {"column": "mnh_ffh_ban", "value": "0", "meaning": "Customer has no linked FFH household (naked mobility)"}
+      ]
+    }
+  },
   "campaigns": {
     "AALBAU": {
       "portfolio": "AAL",
