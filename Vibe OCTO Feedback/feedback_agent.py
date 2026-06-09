@@ -205,9 +205,22 @@ class FeedbackAgent(BaseAgent):
         # Stage 2 — LLM interpretation
         interpretation = self._stage2_interpret(inp)
         if interpretation is None:
-            return self._error_output(
-                "I wasn't able to interpret the correction automatically. "
-                "Your original text has been logged for review."
+            # LLM interpretation failed — save the raw correction verbatim so feedback
+            # is never silently lost.  The rule goes in as a general/universal rule so
+            # it surfaces in optimization_context on future ad-hoc queries.
+            fallback_rule = self._make_verbatim_rule(inp)
+            self._registry.add_rule(fallback_rule)
+            print(
+                "\n  Your feedback has been saved and will be applied to future queries.\n"
+                "  (Automated interpretation was unavailable; the full text has been stored.)"
+            )
+            return FeedbackOutput(
+                rules_extracted=[fallback_rule],
+                rules_confirmed=[fallback_rule],
+                rules_pending=[],
+                new_glossary_terms=[],
+                interpretation_summary="Feedback saved verbatim (LLM interpretation unavailable).",
+                success=True,
             )
 
         rules_raw: list[dict] = interpretation.get("rules", [])
@@ -661,6 +674,37 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _make_verbatim_rule(self, inp: FeedbackInput) -> BusinessRule:
+        """Create a BusinessRule directly from the raw correction text.
+
+        Used as a fallback when LLM interpretation (Stage 2) is unavailable.
+        Scope defaults to 'universal' for AD_HOC corrections so the rule is
+        applied to all future ad-hoc queries via optimization_context.
+        """
+        scope = "campaign" if inp.campaign_code not in ("", "AD_HOC") else "universal"
+        priority_map = {"campaign": 3, "pattern": 2, "universal": 1}
+        return BusinessRule(
+            rule_id=str(uuid.uuid4()),
+            created_at=datetime.now(tz=timezone.utc).isoformat(),
+            verified_by="hitl_no_response",
+            raw_correction=inp.raw_correction,
+            rule_description=inp.raw_correction,
+            rule_type="general",
+            structured_value={
+                "note": inp.raw_correction,
+                "description": "Verbatim user correction from HITL NO response",
+            },
+            scope=scope,
+            campaign_code=inp.campaign_code if scope == "campaign" else None,
+            campaign_name=inp.campaign_name if scope == "campaign" else None,
+            medium=inp.medium if scope in ("campaign", "pattern") else None,
+            cadence=inp.cadence if scope in ("campaign", "pattern") else None,
+            priority=priority_map.get(scope, 1),
+            applies_to_future=True,
+            source="hitl_feedback_verbatim",
+            confidence=0.7,
+        )
 
     def _dict_to_rule(self, rule_dict: dict, inp: FeedbackInput) -> BusinessRule:
         scope = rule_dict.get("scope_detected", "campaign")

@@ -19,12 +19,28 @@
   },
   "business_terms": {
     "naked": {
-      "business_meaning": "Mobility-only customer with no bundled FFH household — the customer has no linked fixed-home product.",
+      "business_meaning": "MOBILITY-ONLY customer with no bundled FFH household. This definition applies ONLY to mobility/wireless queries — see 'naked_ffh' for the reverse concept (FFH customers with no mobility).",
       "sql_filter": "mnh_ffh_ban = 0",
-      "special_notes": "CRITICAL: use mnh_ffh_ban = 0 (INT64, 0 = no FFH household). Never substitute individual product indicator columns (shs_ind, optik_ind, etc.). The column name is mnh_ffh_ban — note the 'n' after 'm': m-n-h, not m-h-h.",
+      "base_table": "bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base",
+      "special_notes": "CRITICAL disambiguation — two opposite 'naked' populations exist: (1) 'naked mobility' = mobility customer with no FFH -> TABLE bq_fda_mob_mobility_base, filter mnh_ffh_ban = 0. (2) 'naked FFH' = FFH/Home Solutions customer with no mobility -> TABLE bq_dly_dbm_customer_profl, filter mnh_mob_ban IS NULL. When the user says 'naked FFH customers' or 'naked home solutions customers', use the naked_ffh definition below, NOT this one.",
       "database_indicators": [
-        {"column": "mnh_ffh_ban", "value": "0", "meaning": "Customer has no linked FFH household (naked mobility)"}
+        {"column": "mnh_ffh_ban", "value": "0", "meaning": "Customer has no linked FFH household (naked mobility — mobility base only)"}
       ]
+    },
+    "naked_ffh": {
+      "business_meaning": "FFH (Home Solutions / Fixed and Home) customer with NO linked mobility subscription — the customer has no wireless/mobile line on the account.",
+      "sql_filter": "mnh_mob_ban IS NULL",
+      "base_table": "bi-srv-hsmdet-pr-7b9def.adobe.bq_dly_dbm_customer_profl",
+      "special_notes": "CRITICAL: naked FFH customers MUST be queried from bq_dly_dbm_customer_profl — NOT bq_fda_mob_mobility_base. The filter is mnh_mob_ban IS NULL (NULL = no mobility BAN linked to this FFH account). Never apply mnh_ffh_ban to this table.",
+      "database_indicators": [
+        {"column": "mnh_mob_ban", "value": "NULL", "meaning": "FFH customer has no linked mobility BAN (naked FFH)"}
+      ]
+    },
+    "FFH": {
+      "business_meaning": "Fixed and Home (also called Home Solutions) — residential customers on internet, TV, home phone, or SHS products.",
+      "base_table": "bi-srv-hsmdet-pr-7b9def.adobe.bq_dly_dbm_customer_profl",
+      "special_notes": "When targeting FFH/Home Solutions customers, use bq_dly_dbm_customer_profl as the base table, NOT the mobility base. Key linking column to mobility: mnh_mob_ban (NULL = no linked mobility account = naked FFH).",
+      "database_indicators": []
     }
   },
   "campaigns": {

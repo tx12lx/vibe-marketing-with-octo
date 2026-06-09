@@ -181,6 +181,22 @@ _QUANT_SYSTEM = (
     "  these values are resolved at runtime from the active campaign configuration.\n"
     "  Replace <dnc_constraints> with the applicable DNC flag predicates (e.g. em_dnc = 0).\n"
     "  GCH table aliases a_gch / b_gch / c_gch are fixed and must never be changed.\n\n"
+    "TABLE 4 (FFH / Home Solutions Customer Profile):\n"
+    "  `bi-srv-hsmdet-pr-7b9def.adobe.bq_dly_dbm_customer_profl`\n"
+    "  Use for: all FFH (Fixed and Home) and Home Solutions customer queries — residential\n"
+    "  internet, TV, home phone, SHS, and MNP (Mobile-to-Home / Home-to-Mobile) campaigns.\n"
+    "  Sizing aggregate: COUNT(DISTINCT ban) only.\n"
+    "  Key confirmed columns: ban, province, mnh_mob_ban (NULL = no linked mobility BAN),\n"
+    "  sub_status, standard_exclusions, primary_sub, stop_sell, control_group_flg,\n"
+    "  em_dnc, sms_dnc, ob_dnc, dm_dnc.\n\n"
+    "  TABLE SELECTION ROUTING — evaluate BEFORE writing any query:\n"
+    "  - Mobility / wireless / postpaid / prepaid / Koodo / TELUS mobile → TABLE 1\n"
+    "  - FFH / Home Solutions / residential / internet / TV / home phone → TABLE 4\n"
+    "  Context signals for FFH: user says 'FFH', 'Home Solutions', 'internet customers',\n"
+    "  'TV customers', 'MNP', 'home phone', 'residential', 'DBM', or references\n"
+    "  mnh_mob_ban / bq_dly_dbm_customer_profl directly.\n"
+    "  NEVER use bq_fda_mob_mobility_base for FFH customer queries — it lacks mnh_mob_ban\n"
+    "  and will return zero results or incorrect counts.\n\n"
     "=== BUSINESS RULE MATRICES ===\n\n"
     "LINE OF BUSINESS (lob_desc) MAPPING — always use UPPER(lob_desc) IN (...):\n"
     "  'Postpaid'  -> UPPER(lob_desc) IN ('TELUS POSTPAID', 'KOODO POSTPAID', 'TELUS EPP')\n"
@@ -210,8 +226,19 @@ _QUANT_SYSTEM = (
     "    Include Quebec  : UPPER(province) IN ('QC', 'PQ')\n"
     "    Exclude Quebec  : UPPER(province) NOT IN ('QC', 'PQ')\n"
     "  Filtering only UPPER(province) = 'QC' or LIKE '%QC%' silently drops 'PQ' records.\n\n"
-    "NAKED MOBILITY — when a request targets 'naked' customers (mobility-only, no bundled\n"
-    "  FFH household), apply exactly one filter: mnh_ffh_ban = 0.\n"
+    "NAKED DISAMBIGUATION — two structurally opposite populations, two different tables:\n"
+    "  'naked mobility' = mobility customer with NO linked FFH household\n"
+    "    Table  : TABLE 1 — `bq_fda_mob_mobility_base`\n"
+    "    Filter : mnh_ffh_ban = 0\n"
+    "  'naked FFH' = FFH/Home Solutions customer with NO linked mobility plan\n"
+    "    Table  : TABLE 4 — `bq_dly_dbm_customer_profl`\n"
+    "    Filter : mnh_mob_ban IS NULL\n"
+    "  Context signals — choose TABLE 4 (naked FFH) when request contains: 'FFH customers',\n"
+    "  'Home Solutions customers', 'naked FFH', 'naked home', 'residential customers'.\n"
+    "  Choose TABLE 1 (naked mobility) when: 'mobility customers', 'wireless customers',\n"
+    "  'postpaid customers', or plain 'naked customers' with no home-service context.\n\n"
+    "NAKED MOBILITY — when a request targets 'naked' MOBILITY customers (mobility-only, no\n"
+    "  bundled FFH household), apply exactly one filter: mnh_ffh_ban = 0.\n"
     "  mnh_ffh_ban is an INT64 flag: 0 = no linked FFH household, 1 = has FFH bundle.\n"
     "  CRITICAL: never substitute individual product indicator columns (shs_ind, optik_ind,\n"
     "  stream_ind, tos_ind, smart_energy_ind, lwc_ind, hp_ind) for this filter — they are\n"
@@ -501,7 +528,7 @@ Population : {target_population}
 Filters    : {filters_json}
 BQ Project : {bq_project}
 BQ Dataset : {bq_dataset}
-
+{optimization_context_section}
 Available schema:
 {schema_context}
 
@@ -799,6 +826,11 @@ class QuantAgent(BaseAgent):
         return sql
 
     def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
+        opt_ctx = (request.optimization_context or "").strip()
+        optimization_context_section = (
+            f"\nAdditional instructions from prior user feedback (authoritative — apply these):\n{opt_ctx}\n"
+            if opt_ctx else ""
+        )
         prompt = _ADHOC_WATERFALL_PROMPT.format(
             target_population=request.target_population or "UNSPECIFIED",
             filters_json=json.dumps(
@@ -808,6 +840,7 @@ class QuantAgent(BaseAgent):
             bq_project=request.bq_project or self._default_project,
             bq_dataset=request.bq_dataset or self._default_dataset,
             schema_context=schema[:6000] if schema else "(not available)",
+            optimization_context_section=optimization_context_section,
         )
         system = (
             _QUANT_SYSTEM + "\n\n" + self._session_context

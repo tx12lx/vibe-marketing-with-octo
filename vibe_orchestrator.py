@@ -35,7 +35,7 @@ _BUSINESS_RULES_PATH = _ROOT / "business_rules.json"
 _ARTIFACTS_DIR = _ROOT / "knowledge_base" / "artifacts"
 
 # Keywords that trigger dynamic glossary/catalog injection.
-_GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU", "NAKED"}
+_GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU", "NAKED", "FFH", "MNH", "MNP"}
 
 # Load all agent environments before any agent code is imported.
 # override=False means the first file wins on conflicts.
@@ -216,7 +216,7 @@ def _load_query_catalog() -> list:
         return []
 
 
-def _build_dynamic_context(query_text: str) -> str:
+def _build_dynamic_context(query_text: str, gold_index=None) -> str:
     """Scan the user prompt for known glossary keywords and assemble an injection block.
 
     Prints [LEARNING DISCOVERY] headers for each asset pulled. Returns an empty
@@ -319,6 +319,43 @@ def _build_dynamic_context(query_text: str) -> str:
             parts.append(
                 f"  SQL Template:\n{blueprint.get('sql_template', '')}\n\n"
             )
+
+    # Compound override: NAKED + FFH together means "naked FFH customers" —
+    # FFH/Home Solutions customers with no mobility, NOT naked mobility customers.
+    if "NAKED" in detected and ("FFH" in detected or "MNH" in detected or "MNP" in detected):
+        print(
+            "  [LEARNING DISCOVERY] -> Detected NAKED + FFH context: injecting naked FFH override."
+        )
+        parts.append(
+            "COMPOUND CONTEXT OVERRIDE — NAKED FFH (both 'naked' and 'FFH'/'home' signals present):\n"
+            "  The request is about FFH (Home Solutions) customers with NO linked mobility plan.\n"
+            "  This is the REVERSE of naked mobility — do NOT use bq_fda_mob_mobility_base.\n\n"
+            "  MANDATORY BASE TABLE : `bi-srv-hsmdet-pr-7b9def.adobe.bq_dly_dbm_customer_profl`\n"
+            "  MANDATORY FILTER     : mnh_mob_ban IS NULL\n"
+            "  Ignore any prior injection of mnh_ffh_ban for this request — that filter applies\n"
+            "  only to the mobility base and is irrelevant here.\n\n"
+        )
+
+    # FFH / MNP gold campaign examples from knowledge index.
+    if gold_index is not None and ("FFH" in detected or "MNH" in detected or "MNP" in detected):
+        _FFH_SIGNALS = {"FFH", "MNP", "DBM", "CUSTOMER_PROFL", "HOME_SOL", "HOME SOLUTIONS"}
+        ffh_examples = [
+            rec for rec in gold_index._index.values()
+            if any(
+                sig in (rec.targeting_summary or "").upper()
+                or sig in (rec.campaign_name or "").upper()
+                for sig in _FFH_SIGNALS
+            )
+        ][:3]
+        if ffh_examples:
+            print(
+                "  [LEARNING DISCOVERY] -> Injected FFH/MNP gold campaign examples from knowledge index."
+            )
+            parts.append("GOLD CAMPAIGN EXAMPLES — FFH / MNP targeting (authoritative reference):\n")
+            for rec in ffh_examples:
+                ts = (rec.targeting_summary or "")[:400]
+                parts.append(f"  Campaign : {rec.campaign_name}\n")
+                parts.append(f"  Targeting: {ts}\n\n")
 
     print()
     return "".join(parts)
@@ -632,15 +669,27 @@ def route_by_intent(
                         rules_registry.get_display_summary(universal_rules)
                     )
                     extra_filters = []
+                    rule_notes = []
                     for rule in universal_rules:
                         rt = rule.rule_type.lower()
                         sql = rule.structured_value.get("sql") or rule.structured_value.get("filter", "")
                         if rt in ("filter_add", "exclusion_add") and sql and sql not in (request.filters or []):
                             extra_filters.append(sql)
+                        elif rt in ("general", "population_note"):
+                            note = rule.structured_value.get("note") or rule.rule_description
+                            if note:
+                                rule_notes.append(note)
+                    updates: dict = {}
                     if extra_filters:
-                        request = request.model_copy(
-                            update={"filters": list(request.filters or []) + extra_filters}
+                        updates["filters"] = list(request.filters or []) + extra_filters
+                    if rule_notes:
+                        existing_ctx = request.optimization_context or ""
+                        notes_str = "\n".join(f"[BUSINESS RULE] {n}" for n in rule_notes)
+                        updates["optimization_context"] = (
+                            (existing_ctx + "\n" + notes_str).strip() if existing_ctx else notes_str
                         )
+                    if updates:
+                        request = request.model_copy(update=updates)
             result = quant.direct_count(request)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
@@ -822,7 +871,9 @@ def _run_adhoc_feedback(
         agent.subscribe(feedback_input)
         agent.execute()
     except Exception:
-        pass  # FeedbackAgent failures must never crash the console loop
+        # FeedbackAgent failures must never crash the console loop.
+        # Print a minimal confirmation so the user knows their feedback was captured.
+        print("\n  Your feedback has been noted. I'll use it to guide future responses.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -947,7 +998,7 @@ def _run_console(
             continue
 
         # Step 1: Glossary keyword injection (always runs; enriches session context)
-        ctx = _build_dynamic_context(query)
+        ctx = _build_dynamic_context(query, gold_index)
         if ctx:
             nexus.set_session_context(ctx)
             quant.set_session_context(ctx)
