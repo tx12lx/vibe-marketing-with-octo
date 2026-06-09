@@ -42,6 +42,7 @@ from pydantic_schemas import (
     WaterfallLayer,
 )
 from core.base_agent import BaseAgent
+from core.thought_display import ThoughtDisplay  # noqa: E402
 
 _FUELIX_BASE = "https://api.fuelix.ai"
 _DEFAULT_MODEL = "claude-sonnet-4"
@@ -707,9 +708,11 @@ class QuantAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _run_audit(self, request: AudienceSizingRequest) -> QuantAuditLog:
-        print("[QUANT AGENT] -> Strategizing SQL translation and BigQuery optimization...")
-        print("  Constructing multi-stage sequential CTE blocks. Injecting optimized partition")
-        print("  filters for Model tables and applying baseline marketing exclusions...\n")
+        ThoughtDisplay.sql_generation(
+            request.campaign_name,
+            len(request.filters or []),
+            len(request.exclusion_layers or []),
+        )
         schema = self._fetch_schema(request.bq_project, request.bq_dataset)
         sql = self._generate_waterfall_sql(request, schema)
         _print_sql_block(sql)
@@ -719,6 +722,7 @@ class QuantAgent(BaseAgent):
         _log_waterfall(waterfall)
         note = _optimization_note(waterfall)
         final_count = _final_audience_count(waterfall)
+        ThoughtDisplay.results_ready(final_count, note)
 
         return QuantAuditLog(
             request=request,

@@ -53,6 +53,7 @@ from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
 from core.glossary import GlossaryManager  # noqa: E402
 from core.brief_fetcher import BriefFetcher  # noqa: E402
+from core.thought_display import ThoughtDisplay  # noqa: E402
 
 
 _ADC_REAUTH_CMD = (
@@ -374,7 +375,7 @@ def route(
         result = quant.direct_count(request)
         if isinstance(result, QuantAuditLog):
             return None, result, None
-        print(f"\n  [ERROR]: {result.error_summary}")
+        ThoughtDisplay.translate_nexus_error(result.error_summary)
         return None, None, None
 
     elif workflow == "WORKFLOW_B":
@@ -385,6 +386,7 @@ def route(
 
         # Surface advisory flags to the marketer before any query executes
         if spec.discrepancy_flags:
+            ThoughtDisplay.discrepancy_check(len(spec.discrepancy_flags), spec.discrepancy_flags)
             _print_discrepancy_audit(spec)
 
         # Dispatch to Quant via the UniversalJSONSpec entry point
@@ -395,6 +397,10 @@ def route(
             result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
 
         if not isinstance(result, QuantAuditLog):
+            ThoughtDisplay.error(
+                "I was unable to complete the audience sizing request. "
+                "The system attempted a correction but could not reconcile the targeting rules."
+            )
             return None, None, None
 
         # Pillar 4: fan out to BriefingAgent with the same UniversalJSONSpec
@@ -530,6 +536,7 @@ def _run_console(
         # Pillar 5: HITL gate — only fires on WORKFLOW_B with a successful audit result.
         # YES continues the session; NO exits after writing the override to the registry.
         if spec is not None and log is not None:
+            ThoughtDisplay.hitl_gate(spec.campaign_name, log.final_count, spec.campaign_tier)
             should_continue = hitl.prompt(spec, log, brief_output)
             if not should_continue:
                 break

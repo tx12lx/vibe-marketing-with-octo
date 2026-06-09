@@ -36,6 +36,7 @@ from pydantic_schemas import (  # noqa: E402
     SemanticFailureLog,
     UniversalJSONSpec,
 )
+from core.thought_display import ThoughtDisplay  # noqa: E402
 
 if TYPE_CHECKING:
     from core.glossary import GlossaryManager
@@ -128,14 +129,7 @@ class HITLAuditLoop:
             segment_summary=segment_summary,
         )
 
-        print(
-            f"\n[FLYWHEEL] Campaign '{spec.campaign_name}' validated and saved "
-            "to local App Registry."
-        )
-        print(
-            "[FLYWHEEL] It will be compiled as a permanent GOLD tier blueprint "
-            "on the next scheduled refresh."
-        )
+        ThoughtDisplay.campaign_approved(spec.campaign_name)
 
     # ------------------------------------------------------------------
     # NO path — capture correction, log failure, update registry override
@@ -195,19 +189,7 @@ class HITLAuditLoop:
             spec.campaign_code, spec.campaign_sub_code, override_entry
         )
 
-        print(
-            "\n[AUDIT] Override instructions captured. "
-            "Semantic failure logged to 'semantic_failure_log.json'."
-        )
-        print(
-            "[AUDIT] 'verified_app_registry.json' updated with operator correction "
-            "as absolute blueprint override."
-        )
-        print(
-            "[FLYWHEEL] Semantic failure logged. Glossary updated. "
-            "Zero-code self-learning applied."
-        )
-        print("\n[AUDIT] Memory layer updated. Session closed.\n")
+        ThoughtDisplay.campaign_rejected(spec.campaign_name)
 
     # ------------------------------------------------------------------
     # Registry: safe atomic upsert by camp_id + sub_camp_id

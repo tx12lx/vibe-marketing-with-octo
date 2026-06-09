@@ -49,6 +49,7 @@ from pydantic_schemas import (
     QuantAuditLog,
     UniversalJSONSpec,
 )
+from core.thought_display import ThoughtDisplay  # noqa: E402
 
 if TYPE_CHECKING:
     from knowledge_base.tier_index import GoldTierIndex
@@ -519,14 +520,13 @@ class NexusAgent:
 
         if workflow == "WORKFLOW_B":
             campaign_hint = (data.get("campaign_hint") or "").strip()
-            print(f"  Recognized WORKFLOW B: Structured Campaign Execution Request.")
-            print(f"  Searching for campaign: '{campaign_hint}'...\n")
+            ThoughtDisplay.intent_classified("WORKFLOW_B", query, campaign_hint)
             brief = self._find_brief_for_campaign(campaign_hint)
             if brief:
                 return "WORKFLOW_B", brief
             return "WORKFLOW_A", None
 
-        print("  Recognized WORKFLOW A: Ad-Hoc Exploratory Request.\n")
+        ThoughtDisplay.intent_classified("WORKFLOW_A", query)
         return "WORKFLOW_A", None
 
     def build_universal_spec(
@@ -587,6 +587,12 @@ class NexusAgent:
             campaign_tier = "BRONZE"
             gold_blueprint_id = None
             knowledge_source = "bq_metadata" if brief.get("deployments") else "nl_only"
+
+        ThoughtDisplay.knowledge_lookup(
+            sizing_request.campaign_name,
+            campaign_tier,
+            0.90 if campaign_tier == "GOLD" else 0.60,
+        )
 
         # Step 3: Discrepancy audit (non-blocking; populates advisory flags)
         filters = list(sizing_request.filters or [])

@@ -42,6 +42,7 @@ load_dotenv(_BRIEFING_DIR / ".env")
 from pydantic_schemas import BriefingOutput, UniversalJSONSpec  # noqa: E402
 from core.base_agent import BaseAgent  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
+from core.thought_display import ThoughtDisplay  # noqa: E402
 
 _FUELIX_BASE = "https://api.fuelix.ai"
 
@@ -194,6 +195,7 @@ class BriefingAgent(BaseAgent):
 
         spec = self._spec
         try:
+            ThoughtDisplay.brief_generating(spec.campaign_name, spec.campaign_tier)
             if spec.campaign_tier == "GOLD" and self._gold_index is not None:
                 gold_record = self._gold_index.lookup(
                     spec.campaign_code, spec.campaign_sub_code
