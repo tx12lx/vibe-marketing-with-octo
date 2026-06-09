@@ -1,8 +1,9 @@
 {
   "schedule": {
-    "mode": "on_startup",
-    "interval_hours": 24,
-    "note": "on_startup triggers refresh each time vibe_orchestrator.py launches"
+    "mode": "disabled",
+    "note": "Auto-ingestion disabled until service account is configured. Run manually when needed.",
+    "re_enable_when": "Service account configured",
+    "manual_command": "python -m knowledge_base.vibe_octo_knowledge --full-refresh"
   },
   "source": {
     "bq_project": "wb-tian-pr-d0dbe6",

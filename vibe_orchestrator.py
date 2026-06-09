@@ -32,6 +32,7 @@ _SCHEMA_DISCOVERY_DIR = _ROOT / "schema_discovery"
 _GLOSSARY_PATH = _ROOT / "glossary.json"
 _QUERY_CATALOG_PATH = _ROOT / "query_catalog.json"
 _BUSINESS_RULES_PATH = _ROOT / "business_rules.json"
+_ARTIFACTS_DIR = _ROOT / "knowledge_base" / "artifacts"
 
 # Keywords that trigger dynamic glossary/catalog injection.
 _GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU"}
@@ -51,8 +52,7 @@ from quant_agent import QuantAgent  # noqa: E402
 from briefing_agent import BriefingAgent  # noqa: E402
 from feedback_agent import FeedbackAgent  # noqa: E402
 from pydantic_schemas import BriefingOutput, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
-from schema_discovery.discovery_layer import SchemaDiscoveryLayer  # noqa: E402
-from knowledge_base.ingester import KnowledgeBaseIngester  # noqa: E402
+from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
 from core.glossary import GlossaryManager  # noqa: E402
@@ -113,6 +113,89 @@ def _silence_google_noise() -> None:
         logging.getLogger(name).setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", category=UserWarning)
     warnings.filterwarnings("ignore", category=ResourceWarning)
+
+
+# ---------------------------------------------------------------------------
+# Disk-based artifact loaders (used at startup instead of live BQ ingestion)
+# ---------------------------------------------------------------------------
+
+def _load_adobe_schema_from_disk(artifacts_path: Path) -> Optional[SchemaSnapshot]:
+    """Build a SchemaSnapshot from the pre-built adobe_schema.json artifact.
+
+    Returns None if the file is missing or malformed so callers can fall back
+    to a live SchemaDiscoveryLayer fetch.
+    """
+    adobe_path = artifacts_path / "adobe_schema.json"
+    if not adobe_path.exists():
+        return None
+    try:
+        data = json.loads(adobe_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    project = data.get("project", "bi-srv-hsmdet-pr-7b9def")
+    dataset = data.get("dataset", "adobe")
+    snapshot_at = data.get("snapshot_at", "")
+
+    columns: list[SchemaColumn] = []
+    for view_name, view_data in data.get("views", {}).items():
+        is_view = view_data.get("type") == "VIEW"
+        for col in view_data.get("columns", []):
+            columns.append(SchemaColumn(
+                table_name=view_name,
+                column_name=col.get("name", ""),
+                data_type=col.get("type", ""),
+                is_nullable=col.get("nullable", True),
+                description="",
+                is_view=is_view,
+            ))
+
+    return SchemaSnapshot(
+        project=project,
+        datasets=[dataset],
+        columns=columns,
+        fetched_at=snapshot_at,
+        cache_hit=True,
+    )
+
+
+def _print_kb_status(
+    gold_index: GoldTierIndex,
+    snapshot: SchemaSnapshot,
+    rule_count: int,
+) -> None:
+    """Print the warm startup banner showing knowledge base readiness."""
+    kb_meta: dict = {}
+    try:
+        kb_meta = json.loads((_ROOT / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
+    except Exception:
+        pass
+
+    total = (kb_meta.get("gold_count") or 0) + (kb_meta.get("bronze_count") or 0)
+    gold = kb_meta.get("gold_count") or 0
+    generated_at = kb_meta.get("generated_at") or ""
+    ts_display = generated_at[:16].replace("T", " ") + " UTC" if generated_at else "unknown"
+    view_count = len({c.table_name for c in snapshot.columns})
+
+    sep = "=" * 66
+    print()
+    print(sep)
+    print("  Welcome to Vibe Marketing with OCTO!")
+    print(sep)
+    print()
+    print("  Knowledge base loaded successfully:")
+    print(f"    [OK] {total:,} campaigns ready")
+    print(f"    [OK] {gold} GOLD tier blueprints")
+    print(f"    [OK] {rule_count} verified business rules")
+    print(f"    [OK] Adobe schema: {view_count} views ready")
+    print()
+    print(f"  Knowledge base last refreshed: {ts_display}")
+    print()
+    print("  To refresh knowledge base manually:")
+    print("    python -m knowledge_base.vibe_octo_knowledge --full-refresh")
+    print()
+    print(sep)
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -573,43 +656,23 @@ def main() -> None:
     load_dotenv(_BRIEFING_DIR / ".env", override=False)
     load_dotenv(_FEEDBACK_DIR / ".env", override=False)
 
-    # Preflight: verify ADC token has Sheets/Drive scopes before the KB refresh
-    # attempts to fetch brief URLs. Prints an actionable fix if scopes are missing.
-    _check_sheets_credentials()
-
-    # Pillar 1: Knowledge Base — atomic clean-slate refresh on every startup.
-    # Reads BQ campaign_knowledge + verified_app_registry.json, classifies
-    # GOLD/BRONZE, and writes semantic_knowledge_index.json atomically.
-    ingester = KnowledgeBaseIngester(_ROOT / "ingestion_config.json")
-    summary = ingester.run_full_refresh()
-    print(
-        f"\n[KNOWLEDGE BASE] Refresh complete: "
-        f"{summary.gold_count} GOLD, {summary.bronze_count} BRONZE records indexed."
-    )
-    if summary.fetch_errors:
-        print(
-            f"[KNOWLEDGE BASE] {len(summary.fetch_errors)} brief fetch error(s) "
-            f"(skipped): {summary.fetch_errors[:3]}"
-        )
-
+    # Knowledge ingestion is disabled until service account is configured.
+    # Run manually when needed:
+    #   python -m knowledge_base.vibe_octo_knowledge --full-refresh
     gold_index = GoldTierIndex()
     gold_index.load_from_file(_ROOT / "semantic_knowledge_index.json")
 
-    # Pillar 2: Schema Discovery — fetch live INFORMATION_SCHEMA metadata for
-    # the adobe dataset and inject it into all agents before the console loop.
-    # Cache TTL is 1 hour; subsequent startups within that window skip the BQ call.
+    # Pillar 2: Schema Discovery — load from pre-built artifact for instant startup.
+    # Falls back to a live INFORMATION_SCHEMA BQ query only if the artifact is missing.
     schema_discovery = SchemaDiscoveryLayer(
         project="bi-srv-hsmdet-pr-7b9def",
         datasets=["adobe"],
         cache_path=_ROOT / ".sdl_schema_cache.json",
     )
-    snapshot = schema_discovery.get_snapshot()
+    snapshot = _load_adobe_schema_from_disk(_ARTIFACTS_DIR)
+    if snapshot is None:
+        snapshot = schema_discovery.get_snapshot()
     schema_str = schema_discovery.to_prompt_string(snapshot)
-    status = "cache hit" if snapshot.cache_hit else "fresh fetch"
-    print(
-        f"[SCHEMA DISCOVERY] Adobe dataset schema loaded "
-        f"({status}, {len(snapshot.columns)} columns)."
-    )
 
     # Instantiate agents from registry
     nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
@@ -636,8 +699,8 @@ def main() -> None:
     # FeedbackAgent after HITL NO responses. Applied automatically before Quant.
     rules_registry = BusinessRulesRegistry(_BUSINESS_RULES_PATH)
     rule_count = len(rules_registry._rules)
-    if rule_count:
-        print(f"[BUSINESS RULES] {rule_count} verified rule(s) loaded.")
+
+    _print_kb_status(gold_index, snapshot, rule_count)
 
     _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl, rules_registry)
 

@@ -651,6 +651,18 @@ class VibeOctoKnowledge:
 
     def run_full_refresh(self) -> None:
         """Cleanup stale files, ingest all data, extract GOLD insights, write 5 artifacts."""
+        _config_path = Path(__file__).resolve().parent.parent / "ingestion_config.json"
+        if _config_path.exists():
+            try:
+                _cfg = json.loads(_config_path.read_text(encoding="utf-8"))
+                if _cfg.get("schedule", {}).get("mode") == "disabled":
+                    print(
+                        "\n  Auto-ingestion is currently disabled.\n"
+                        "  Running manual refresh..."
+                    )
+            except Exception:
+                pass
+
         print("\n=== VIBE OCTO KNOWLEDGE v3 — FULL REFRESH ===")
         run_at = datetime.now(tz=timezone.utc).isoformat()
 
