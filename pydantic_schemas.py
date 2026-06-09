@@ -184,3 +184,61 @@ class SemanticFailureLog(BaseModel):
         "schema_gap",
     ]
     glossary_gaps: list[str]
+
+
+class BusinessRule(BaseModel):
+    """A human-verified business rule extracted from HITL NO feedback."""
+
+    rule_id: str
+    created_at: str
+    verified_by: str
+
+    raw_correction: str
+    rule_description: str
+    rule_type: str          # filter_add | exclusion_add | lookback_days | population_note | general
+    structured_value: dict  # rule-type-specific payload
+
+    scope: str              # campaign | pattern | universal
+    campaign_code: Optional[str] = None
+    campaign_name: Optional[str] = None
+    medium: Optional[str] = None
+    cadence: Optional[str] = None
+    pattern_description: Optional[str] = None
+    pattern_match_logic: Optional[str] = None
+
+    confidence: float
+    source: str
+    clarification_rounds: int
+
+    applies_to_future: bool
+    overrides_acc_summary: bool
+    priority: int           # campaign=3, pattern=2, universal=1
+
+    applied_count: int = 0
+    last_applied_at: Optional[str] = None
+
+
+class FeedbackInput(BaseModel):
+    """Input contract for FeedbackAgent — all context needed to interpret a correction."""
+
+    raw_correction: str       # User's exact words
+    campaign_code: str
+    campaign_name: str
+    medium: str
+    cadence: str
+    campaign_purpose: str
+    execution_context: dict   # filters applied, tables used, audience count, waterfall steps
+    existing_rules: list[dict]
+    knowledge_tier: str       # GOLD | SILVER | BRONZE
+    raw_input_prompt: str     # What user originally asked
+
+
+class FeedbackOutput(BaseModel):
+    """Output produced by FeedbackAgent.execute()."""
+
+    rules_extracted: list[BusinessRule]
+    rules_confirmed: list[BusinessRule]
+    rules_pending: list[BusinessRule]
+    new_glossary_terms: list[dict]
+    interpretation_summary: str
+    success: bool

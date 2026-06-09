@@ -27,25 +27,29 @@ _ROOT = Path(__file__).resolve().parent
 _NEXUS_DIR = _ROOT / "Vibe OCTO Nexus"
 _QUANT_DIR = _ROOT / "Vibe OCTO Quant"
 _BRIEFING_DIR = _ROOT / "Vibe OCTO Briefing"
+_FEEDBACK_DIR = _ROOT / "Vibe OCTO Feedback"
 _SCHEMA_DISCOVERY_DIR = _ROOT / "schema_discovery"
 _GLOSSARY_PATH = _ROOT / "glossary.json"
 _QUERY_CATALOG_PATH = _ROOT / "query_catalog.json"
+_BUSINESS_RULES_PATH = _ROOT / "business_rules.json"
 
 # Keywords that trigger dynamic glossary/catalog injection.
 _GLOSSARY_KEYWORDS = {"PFE", "KI", "TWA", "AALBAU"}
 
-# Load both agent environments before any agent code is imported.
+# Load all agent environments before any agent code is imported.
 # override=False means the first file wins on conflicts.
 load_dotenv(_NEXUS_DIR / ".env")
 load_dotenv(_QUANT_DIR / ".env", override=False)
+load_dotenv(_FEEDBACK_DIR / ".env", override=False)
 
-for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR), str(_BRIEFING_DIR)]:
+for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR), str(_BRIEFING_DIR), str(_FEEDBACK_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from briefing_agent import BriefingAgent  # noqa: E402
+from feedback_agent import FeedbackAgent  # noqa: E402
 from pydantic_schemas import BriefingOutput, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer  # noqa: E402
 from knowledge_base.ingester import KnowledgeBaseIngester  # noqa: E402
@@ -54,6 +58,7 @@ from hitl.audit_loop import HITLAuditLoop  # noqa: E402
 from core.glossary import GlossaryManager  # noqa: E402
 from core.brief_fetcher import BriefFetcher  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
+from core.business_rules_registry import BusinessRulesRegistry  # noqa: E402
 
 
 _ADC_REAUTH_CMD = (
@@ -221,6 +226,7 @@ _AGENT_REGISTRY: dict[str, type] = {
     "nexus": NexusAgent,
     "quant": QuantAgent,
     "briefing": BriefingAgent,
+    "feedback": FeedbackAgent,
 }
 
 
@@ -345,6 +351,7 @@ def route(
     payload: dict,
     gold_index: GoldTierIndex,
     schema_snapshot: dict,
+    rules_registry: Optional["BusinessRulesRegistry"] = None,
 ) -> tuple[Optional[UniversalJSONSpec], Optional[QuantAuditLog], Optional[BriefingOutput]]:
     """Dispatch a classified request to the correct pipeline branch.
 
@@ -388,6 +395,21 @@ def route(
         if spec.discrepancy_flags:
             ThoughtDisplay.discrepancy_check(len(spec.discrepancy_flags), spec.discrepancy_flags)
             _print_discrepancy_audit(spec)
+
+        # Apply verified business rules before dispatching to Quant.
+        if rules_registry is not None:
+            applicable_rules = rules_registry.get_rules_for_execution(
+                camp_id=spec.campaign_code,
+                medium=spec.medium,
+                cadence=spec.cadence,
+                campaign_purpose=(spec.brief_agent_inputs or {}).get("campaign_purpose", ""),
+                spec=spec,
+            )
+            if applicable_rules:
+                ThoughtDisplay.show_rules_being_applied(
+                    rules_registry.get_display_summary(applicable_rules)
+                )
+                spec = rules_registry.apply_rules_to_spec(spec, applicable_rules)
 
         # Dispatch to Quant via the UniversalJSONSpec entry point
         result = quant.audit_from_spec(spec)
@@ -482,6 +504,7 @@ def _run_console(
     gold_index: GoldTierIndex,
     schema_snapshot: dict,
     hitl: HITLAuditLoop,
+    rules_registry: Optional[BusinessRulesRegistry] = None,
 ) -> None:
     last_log: Optional[QuantAuditLog] = None
 
@@ -518,6 +541,7 @@ def _run_console(
             payload if payload is not None else {"query": query},
             gold_index,
             schema_snapshot,
+            rules_registry,
         )
         if log:
             last_log = log
@@ -547,6 +571,7 @@ def main() -> None:
     load_dotenv(_NEXUS_DIR / ".env")
     load_dotenv(_QUANT_DIR / ".env", override=False)
     load_dotenv(_BRIEFING_DIR / ".env", override=False)
+    load_dotenv(_FEEDBACK_DIR / ".env", override=False)
 
     # Preflight: verify ADC token has Sheets/Drive scopes before the KB refresh
     # attempts to fetch brief URLs. Prints an actionable fix if scopes are missing.
@@ -607,7 +632,14 @@ def main() -> None:
         registry_path=_ROOT / "verified_app_registry.json",
     )
 
-    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl)
+    # Pillar 6: BusinessRulesRegistry — load verified business rules extracted by
+    # FeedbackAgent after HITL NO responses. Applied automatically before Quant.
+    rules_registry = BusinessRulesRegistry(_BUSINESS_RULES_PATH)
+    rule_count = len(rules_registry._rules)
+    if rule_count:
+        print(f"[BUSINESS RULES] {rule_count} verified rule(s) loaded.")
+
+    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl, rules_registry)
 
 
 if __name__ == "__main__":

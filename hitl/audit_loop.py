@@ -32,11 +32,14 @@ for _p in [str(_ROOT_DIR), str(_NEXUS_DIR)]:
 
 from pydantic_schemas import (  # noqa: E402
     BriefingOutput,
+    FeedbackInput,
     QuantAuditLog,
     SemanticFailureLog,
     UniversalJSONSpec,
 )
 from core.thought_display import ThoughtDisplay  # noqa: E402
+
+_FEEDBACK_DIR = _ROOT_DIR / "Vibe OCTO Feedback"
 
 if TYPE_CHECKING:
     from core.glossary import GlossaryManager
@@ -140,6 +143,11 @@ class HITLAuditLoop:
             "\n  What was wrong? Please be specific (e.g. 'Lookback should be 90 days' or 'Missing exclusion for legacy customers'): "
         ).strip()
 
+        # Run FeedbackAgent to extract and save verified business rules.
+        # This is non-blocking: any failure is silently caught so the existing
+        # NO path (failure log + registry override) always completes.
+        self._run_feedback_agent(spec, audit_log, correction)
+
         failure_type = self._infer_failure_type(correction, spec)
         glossary_gaps = self._find_glossary_gaps(
             spec.filters, spec.exclusion_layers or []
@@ -190,6 +198,53 @@ class HITLAuditLoop:
         )
 
         ThoughtDisplay.campaign_rejected(spec.campaign_name)
+
+    # ------------------------------------------------------------------
+    # FeedbackAgent integration
+    # ------------------------------------------------------------------
+
+    def _run_feedback_agent(
+        self,
+        spec: UniversalJSONSpec,
+        audit_log: QuantAuditLog,
+        correction: str,
+    ) -> None:
+        """Invoke FeedbackAgent to interpret the correction and extract business rules.
+
+        Wrapped in a broad except so a FeedbackAgent failure never interrupts the
+        existing NO path (failure log write + registry override).
+        """
+        try:
+            if str(_FEEDBACK_DIR) not in sys.path:
+                sys.path.insert(0, str(_FEEDBACK_DIR))
+
+            from feedback_agent import FeedbackAgent  # noqa: PLC0415
+
+            brief_inputs = spec.brief_agent_inputs or {}
+            feedback_input = FeedbackInput(
+                raw_correction=correction,
+                campaign_code=spec.campaign_code,
+                campaign_name=spec.campaign_name,
+                medium=spec.medium,
+                cadence=spec.cadence,
+                campaign_purpose=brief_inputs.get("campaign_purpose", ""),
+                execution_context={
+                    "filters_applied": spec.filters,
+                    "exclusion_layers": spec.exclusion_layers or [],
+                    "final_audience_count": audit_log.final_count,
+                    "waterfall_steps": len(audit_log.waterfall),
+                    "campaign_tier": spec.campaign_tier,
+                },
+                existing_rules=[],
+                knowledge_tier=spec.campaign_tier,
+                raw_input_prompt=brief_inputs.get("raw_prompt", ""),
+            )
+
+            agent = FeedbackAgent()
+            agent.subscribe(feedback_input)
+            agent.execute()
+        except Exception:
+            pass  # FeedbackAgent failures must never break the HITL NO path
 
     # ------------------------------------------------------------------
     # Registry: safe atomic upsert by camp_id + sub_camp_id

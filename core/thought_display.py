@@ -316,6 +316,31 @@ class ThoughtDisplay:
         cls._box("I ran into an issue and wasn't able to complete this.", body)
 
     @classmethod
+    def feedback_acknowledging(cls, campaign_name: str, raw_correction: str) -> None:
+        short = f'"{raw_correction[:60]}..."' if len(raw_correction) > 60 else f'"{raw_correction}"'
+        body = [
+            *_label_rows("Campaign", campaign_name),
+            *_label_rows("Correction", short),
+            _blank(),
+            _row("  Let me make sure I understand this correctly before saving."),
+        ]
+        cls._box(
+            "Thank you for the feedback. Let me interpret this for you.",
+            body,
+        )
+
+    @classmethod
+    def show_rules_being_applied(cls, summary: str) -> None:
+        """Display verified business rules that are being applied to this execution."""
+        lines = summary.splitlines()
+        body: list[str] = []
+        for line in lines:
+            body.append(_row(line))
+        if not body:
+            return
+        cls._box("Applying your verified business rules to this campaign.", body)
+
+    @classmethod
     def translate_nexus_error(cls, error_summary: str) -> None:
         lower = error_summary.lower()
         if "unknown column" in lower or "unrecognized name" in lower:

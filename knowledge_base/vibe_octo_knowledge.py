@@ -238,6 +238,42 @@ def _classify_error(http_code: Optional[int], msg: str) -> str:
     return f"http_{http_code}"
 
 
+def _attach_business_rules(campaign_records: list[dict]) -> None:
+    """Attach applicable verified business rules to each campaign record.
+
+    Reads business_rules.json from the project root. Universal rules attach to
+    every campaign; campaign-scope rules attach only to their matching camp_id.
+    Rules are marked confidence=1.0 (human verified). Runs silently on any error
+    so a missing or corrupt rules file never blocks the knowledge base refresh.
+    """
+    _root = Path(__file__).resolve().parent.parent
+    rules_path = _root / "business_rules.json"
+    if not rules_path.exists():
+        return
+    try:
+        data = json.loads(rules_path.read_text(encoding="utf-8"))
+        rules: list[dict] = data.get("rules", [])
+        if not rules:
+            return
+    except Exception:
+        return
+
+    for camp in campaign_records:
+        camp_id = camp.get("camp_id", "").upper()
+        applicable: list[dict] = []
+        for rule in rules:
+            if not rule.get("applies_to_future", True):
+                continue
+            scope = rule.get("scope", "").lower()
+            if scope == "universal":
+                applicable.append({**rule, "confidence": 1.0})
+            elif scope == "campaign":
+                if rule.get("campaign_code", "").upper() == camp_id:
+                    applicable.append({**rule, "confidence": 1.0})
+        if applicable:
+            camp["verified_business_rules"] = applicable
+
+
 def _classify_tier(targeting_summary: str, segment_summary: str, brief_accessible: bool) -> str:
     has_ts = bool(targeting_summary and targeting_summary.strip())
     has_ss = bool(segment_summary and segment_summary.strip())
@@ -1097,6 +1133,9 @@ class VibeOctoKnowledge:
             print("[PHASE 3] DRY-RUN — no files written.")
             self._print_summary(report)
             return
+
+        # Attach verified business rules to campaign records before writing.
+        _attach_business_rules(campaign_records)
 
         # Write 5 artifacts atomically (no brief_texts.json)
         artifacts = {
