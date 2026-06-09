@@ -715,14 +715,13 @@ class QuantAgent(BaseAgent):
         )
         schema = self._fetch_schema(request.bq_project, request.bq_dataset)
         sql = self._generate_waterfall_sql(request, schema)
-        _print_sql_block(sql)
+        ThoughtDisplay.progress("Audience blueprint ready. Running the analysis now...")
         raw_rows = self._execute_query(sql, request.bq_project)
         masked_rows = _mask_pii(raw_rows)
         waterfall = _parse_waterfall(masked_rows)
-        _log_waterfall(waterfall)
         note = _optimization_note(waterfall)
         final_count = _final_audience_count(waterfall)
-        ThoughtDisplay.results_ready(final_count, note)
+        ThoughtDisplay.results_ready(final_count, waterfall, note)
 
         return QuantAuditLog(
             request=request,

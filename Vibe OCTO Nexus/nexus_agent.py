@@ -521,9 +521,12 @@ class NexusAgent:
         if workflow == "WORKFLOW_B":
             campaign_hint = (data.get("campaign_hint") or "").strip()
             ThoughtDisplay.intent_classified("WORKFLOW_B", query, campaign_hint)
+            ThoughtDisplay.progress("Looking up your campaign in the knowledge base...")
             brief = self._find_brief_for_campaign(campaign_hint)
             if brief:
+                ThoughtDisplay.progress("Found it! Preparing your targeting blueprint...")
                 return "WORKFLOW_B", brief
+            ThoughtDisplay.progress("Couldn't locate that campaign. Switching to custom audience mode...")
             return "WORKFLOW_A", None
 
         ThoughtDisplay.intent_classified("WORKFLOW_A", query)
@@ -570,6 +573,7 @@ class NexusAgent:
                     self._session_context = override_block + self._session_context
 
         # Step 1: Derive the AudienceSizingRequest via existing brief logic
+        ThoughtDisplay.progress("Translating your campaign brief into targeting rules...")
         sizing_request = self.build_sizing_request_from_brief(brief)
         if sizing_request is None:
             return None

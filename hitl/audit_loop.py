@@ -78,7 +78,7 @@ class HITLAuditLoop:
         The console loop must break when this returns False.
         """
         response = input(
-            "\nDo you want to approve this campaign blueprint for production execution? (Y/N): "
+            "\n  Was everything correct? (Y/N): "
         ).strip().upper()
 
         if response == "Y":
@@ -137,7 +137,7 @@ class HITLAuditLoop:
 
     def _handle_no(self, spec: UniversalJSONSpec, audit_log: QuantAuditLog) -> None:
         correction = input(
-            "\nPlease enter your manual correction or operational override instructions: "
+            "\n  What was wrong? Please be specific (e.g. 'Lookback should be 90 days' or 'Missing exclusion for legacy customers'): "
         ).strip()
 
         failure_type = self._infer_failure_type(correction, spec)

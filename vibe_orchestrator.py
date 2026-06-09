@@ -424,39 +424,22 @@ def _format_audit_log(log: QuantAuditLog) -> str:
     lines = [
         "",
         sep,
-        "  VIBE OCTO QUANT — AUDIENCE AUDIT LOG",
+        "  Vibe OCTO Quant — Audience Audit Log",
         sep,
         "",
         f"  Campaign : {log.request.campaign_name}",
         f"  Code     : {log.request.campaign_code}  /  {log.request.campaign_sub_code}",
         f"  Cadence  : {log.request.cadence}   |   Medium: {log.request.medium}",
-        f"  Target Core Product : {log.request.target_population}",
-        "",
-        "  AUDIENCE WATERFALL",
-        "  " + thin,
-    ]
-
-    if log.waterfall:
-        max_label = max(len(lyr.layer_name) for lyr in log.waterfall)
-        for lyr in log.waterfall:
-            marker = "=" if "Universal Control Group" in lyr.layer_name else "-"
-            lines.append(
-                f"  {marker} {lyr.layer_name:<{max_label}}  {lyr.audience_count:>14,}"
-            )
-    else:
-        lines.append("  (no waterfall rows returned — check BQ connectivity)")
-
-    lines += [
-        "",
-        f"  FINAL COUNT : {log.final_count:,}",
+        f"  Audience : {log.final_count:,} qualified contacts",
         "",
     ]
 
-    if log.optimization_note:
+    if log.optimization_note and "clean" not in log.optimization_note.lower():
+        note_text = log.optimization_note.removeprefix("Optimization Note: ")
         lines += [
-            "  AUDIT NOTE",
+            "  Note",
             "  " + thin,
-            f"  {log.optimization_note}",
+            f"  {note_text}",
             "",
         ]
 
@@ -500,6 +483,8 @@ def _run_console(
     schema_snapshot: dict,
     hitl: HITLAuditLoop,
 ) -> None:
+    last_log: Optional[QuantAuditLog] = None
+
     while True:
         print("  How can the OCTO team help you today?\n")
         query = input("  > ").strip()
@@ -512,12 +497,18 @@ def _run_console(
             print("  Session closed.\n")
             break
 
+        if query.lower() in ("audit", "show query", "show sql"):
+            if last_log and last_log.sql:
+                ThoughtDisplay.show_sql(last_log.sql)
+            else:
+                print("  No query available yet. Run a campaign sizing first.\n")
+            continue
+
         ctx = _build_dynamic_context(query)
         if ctx:
             nexus.set_session_context(ctx)
             quant.set_session_context(ctx)
 
-        print("  [NEXUS AGENT] -> Analyzing intent...\n")
         workflow, payload = nexus.classify_and_route(query)
         spec, log, brief_output = route(
             nexus,
@@ -529,6 +520,7 @@ def _run_console(
             schema_snapshot,
         )
         if log:
+            last_log = log
             print(_format_audit_log(log))
         if brief_output:
             _print_brief(brief_output)

@@ -1,9 +1,9 @@
 """
 core/thought_display.py -- User-facing thought display for Vibe OCTO agents.
 
-Renders each pipeline step in plain business language. On UTF-8 terminals uses
-Unicode box-drawing characters; falls back to ASCII on legacy Windows consoles.
-No SQL, column names, schema identifiers, or stack traces are surfaced.
+Renders each pipeline step in plain, warm business language. On UTF-8 terminals
+uses Unicode box-drawing characters; falls back to ASCII on legacy Windows
+consoles. No SQL, column names, schema identifiers, or stack traces are shown.
 """
 from __future__ import annotations
 
@@ -98,6 +98,26 @@ class ThoughtDisplay:
         print("\n" + "\n".join(parts))
 
     # ------------------------------------------------------------------
+    # Inline helpers (no box)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def progress(message: str) -> None:
+        """Print a simple inline progress line (no box)."""
+        print(f"  {message}")
+
+    @classmethod
+    def show_sql(cls, sql: str) -> None:
+        """Display the SQL query for audit mode (only when explicitly requested)."""
+        divider = "  " + _H * 62
+        print(f"\n  Here's the query I used to build your audience:\n")
+        print(divider)
+        for line in sql.splitlines():
+            print(f"  {line}")
+        print(divider)
+        print()
+
+    # ------------------------------------------------------------------
     # Pipeline step displays
     # ------------------------------------------------------------------
 
@@ -110,41 +130,43 @@ class ThoughtDisplay:
             body = [
                 *_label_rows("I heard", short_q),
                 *_label_rows("Campaign", campaign_hint or "Searching..."),
-                *_label_rows("Next step", "Building a full audience targeting blueprint."),
-                _row(f"{'Confidence':<{_LW}}: {_bar(0.85)} 85%"),
             ]
-            cls._box("VIBE OCTO -- CAMPAIGN REQUEST RECOGNIZED", body)
+            cls._box("Got it! I'm looking up the campaign for you...", body)
         else:
             body = [
                 *_label_rows("I heard", short_q),
-                *_label_rows("Next step", "Running a custom audience query based on your description."),
-                _row(f"{'Confidence':<{_LW}}: {_bar(0.65)} 65%"),
             ]
-            cls._box("VIBE OCTO -- CUSTOM AUDIENCE LOOKUP", body)
+            cls._box("Understood. Let me find the best audience for your request...", body)
 
     @classmethod
     def knowledge_lookup(
         cls, campaign_name: str, tier: str, confidence: float
     ) -> None:
         if tier == "GOLD":
-            title = "KNOWLEDGE CHECK -- GOLD TIER BLUEPRINT FOUND"
-            source = "Verified blueprint from past executions"
+            title = "Great news! I found a proven blueprint for this campaign."
+            body = [
+                *_label_rows("Campaign", campaign_name),
+                *_label_rows("Blueprint", "Verified from past executions"),
+                *_label_rows("Confidence", f"{_bar(confidence)} {confidence:.0%}"),
+            ]
         else:
-            title = "KNOWLEDGE CHECK -- BUILDING FROM CAMPAIGN BRIEF"
-            source = "No verified blueprint. Using campaign brief data."
-        body = [
-            *_label_rows("Campaign", campaign_name),
-            *_label_rows("Source", source),
-            _row(f"{'Confidence':<{_LW}}: {_bar(confidence)} {confidence:.0%}"),
-        ]
+            title = "Building your campaign from the data brief."
+            body = [
+                *_label_rows("Campaign", campaign_name),
+                *_label_rows(
+                    "Status",
+                    f"No verified blueprint found. Confidence: {_bar(confidence)} {confidence:.0%}",
+                ),
+                *_label_rows("Note", "I'll do my best with the available information."),
+            ]
         cls._box(title, body)
 
     @classmethod
     def discrepancy_check(cls, flag_count: int, flags: list[str]) -> None:
         if not flag_count:
             return
-        noun = "item" if flag_count == 1 else "items"
-        title = f"PATTERN CHECK -- {flag_count} {noun.upper()} FLAGGED FOR REVIEW"
+        noun = "thing" if flag_count == 1 else "things"
+        title = f"I noticed {flag_count} {noun} to flag before we proceed."
         body = [
             *_label_rows(
                 "What I found",
@@ -152,7 +174,7 @@ class ThoughtDisplay:
             ),
             *_label_rows(
                 "What's next",
-                "Showing you the differences below. No action needed unless something looks wrong.",
+                "Please review the details below. No action needed unless something looks wrong.",
             ),
         ]
         cls._box(title, body)
@@ -164,23 +186,56 @@ class ThoughtDisplay:
         body = [
             *_label_rows("Campaign", campaign_name),
             *_label_rows(
-                "Filters",
-                f"{filter_count} targeting rules, {exclusion_count} audience exclusions",
+                "Applying",
+                f"{filter_count} targeting rules and {exclusion_count} audience exclusions",
             ),
             *_label_rows("Method", "7-step audience funnel with control group"),
-            *_label_rows("What's next", "Running the query against the customer database."),
         ]
-        cls._box("AUDIENCE QUERY -- BUILDING DATABASE QUERY", body)
+        cls._box("Building your audience now. This may take a moment...", body)
 
     @classmethod
-    def results_ready(cls, final_count: int, note: Optional[str] = None) -> None:
-        note_text = note or "All filter layers passed without unusual drops."
-        note_text = note_text.removeprefix("Optimization Note: ")
-        body = [
-            *_label_rows("Final count", f"{final_count:,} qualified contacts"),
-            *_label_rows("Analysis", note_text),
+    def results_ready(
+        cls,
+        final_count: int,
+        waterfall: list,  # list[WaterfallLayer] — not imported to avoid circular dep
+        note: Optional[str] = None,
+    ) -> None:
+        """Display a warm results box with the full waterfall breakdown."""
+        body: list[str] = [
+            _row("  Here's how we filtered down your audience:"),
         ]
-        cls._box("AUDIENCE SIZING COMPLETE", body)
+
+        if waterfall:
+            name_w = min(max(len(layer.layer_name) for layer in waterfall), 30)
+            divider_row = _row("  " + _H * (name_w + 21))
+            body.append(divider_row)
+
+            for i, layer in enumerate(waterfall):
+                count_str = f"{layer.audience_count:>12,}"
+                if i == 0:
+                    pct_str = ""
+                else:
+                    prev = waterfall[i - 1].audience_count
+                    if prev > 0:
+                        pct = (layer.audience_count - prev) / prev * 100
+                        pct_str = f"   ({pct:+.0f}%)"
+                    else:
+                        pct_str = ""
+                line = f"  {layer.layer_name:<{name_w}} {count_str}{pct_str}"
+                body.append(_row(line))
+
+            body.append(divider_row)
+            final_line = f"  {'Final Audience':<{name_w}} {final_count:>12,}"
+            body.append(_row(final_line))
+        else:
+            body.append(_row(f"  Final Audience: {final_count:,} qualified contacts"))
+
+        if note and "clean" not in note.lower():
+            note_text = note.removeprefix("Optimization Note: ")
+            body.append(_blank())
+            body += _label_rows("Note", note_text)
+
+        cls._box("Your Audience is Ready!", body)
 
     @classmethod
     def brief_generating(cls, campaign_name: str, tier: str) -> None:
@@ -194,10 +249,10 @@ class ThoughtDisplay:
             *_label_rows("Using", knowledge),
             *_label_rows(
                 "Generating",
-                "Strategic recommendations, targeting logic, execution checklist...",
+                "Targeting logic, audience insights, and strategic recommendations...",
             ),
         ]
-        cls._box("BRIEF -- COMPOSING CAMPAIGN INTELLIGENCE REPORT", body)
+        cls._box("I'm putting together your campaign brief now...", body)
 
     @classmethod
     def hitl_gate(
@@ -213,10 +268,9 @@ class ThoughtDisplay:
             *_label_rows("Audience", f"{final_count:,} qualified contacts"),
             *_label_rows("Tier", tier_label),
             _blank(),
-            _row("  Approve to save this blueprint for production execution."),
-            _row("  Reject to record a correction -- the system will learn."),
+            _row("  Please take a moment to review everything before we save this."),
         ]
-        cls._box("READY FOR YOUR REVIEW", body)
+        cls._box("All done! Here's everything I prepared for you.", body)
 
     @classmethod
     def campaign_approved(cls, campaign_name: str) -> None:
@@ -224,36 +278,42 @@ class ThoughtDisplay:
             *_label_rows("Campaign", campaign_name),
             *_label_rows("Saved to", "App Registry (verified_app_registry.json)"),
             *_label_rows(
-                "Next cycle",
-                "This approval will be compiled as a permanent GOLD tier blueprint at the next scheduled refresh.",
+                "Next time",
+                "I'll use this as a reference blueprint for even better results.",
             ),
         ]
-        cls._box("APPROVED -- BLUEPRINT SAVED", body)
+        cls._box("Wonderful! I've saved this as a verified blueprint.", body)
 
     @classmethod
     def campaign_rejected(cls, campaign_name: str) -> None:
         body = [
             *_label_rows("Campaign", campaign_name),
-            *_label_rows("Logged", "Correction saved to semantic failure log"),
-            *_label_rows("Self-learning", "Targeting patterns and glossary updated"),
+            *_label_rows("Logged", "Your correction has been saved"),
             *_label_rows(
-                "Next cycle",
-                "Your correction will be applied as an absolute override on the next execution of this campaign.",
+                "Self-learning",
+                "Targeting patterns and glossary updated based on your feedback",
+            ),
+            *_label_rows(
+                "Next time",
+                "Your correction will be applied as an absolute override on the next run.",
             ),
         ]
-        cls._box("CORRECTION RECORDED -- SESSION CLOSED", body)
+        cls._box("Thank you for the feedback! I've recorded your correction.", body)
 
     # ------------------------------------------------------------------
     # Error translation
     # ------------------------------------------------------------------
 
     @classmethod
-    def error(cls, message: str) -> None:
+    def error(cls, message: str, action: Optional[str] = None) -> None:
         body = [
             *_label_rows("What happened", message),
-            *_label_rows("What to do", "Please reach out to the OCTO team for assistance."),
+            *_label_rows(
+                "What to do",
+                action or "Please reach out to the OCTO team for assistance.",
+            ),
         ]
-        cls._box("UNABLE TO COMPLETE REQUEST", body)
+        cls._box("I ran into an issue and wasn't able to complete this.", body)
 
     @classmethod
     def translate_nexus_error(cls, error_summary: str) -> None:
@@ -261,22 +321,25 @@ class ThoughtDisplay:
         if "unknown column" in lower or "unrecognized name" in lower:
             msg = (
                 "I couldn't find a data field referenced in the targeting rules. "
-                "The campaign brief may reference a column that doesn't exist in the current data environment."
+                "The campaign brief may reference a column that no longer exists."
+            )
+            action = (
+                "Check if the column name in the brief matches the current data environment, "
+                "or contact the OCTO team."
             )
         elif "validation" in lower or "field error" in lower:
-            msg = (
-                "Some targeting instructions could not be translated into a valid format. "
-                "The campaign brief may have incomplete or conflicting data."
-            )
+            msg = "Some targeting instructions couldn't be translated into a valid format."
+            action = "Check the campaign brief for incomplete or conflicting information."
         elif "timeout" in lower or "deadline" in lower:
-            msg = "The database query took too long to complete. Please try again or simplify the request."
+            msg = "The audience query took too long to complete."
+            action = "Try again in a moment, or simplify the targeting criteria."
         elif "permission" in lower or "access denied" in lower or "403" in lower:
-            msg = "I don't have permission to access the required data. Please check that your credentials are configured correctly."
+            msg = "I don't have permission to access the required data."
+            action = "Check that your credentials are configured correctly, or contact your IT administrator."
         elif "not found" in lower or "no such" in lower:
-            msg = "I could not find the campaign or data requested. The campaign code may be incorrect or the record may not exist yet."
+            msg = "I couldn't find the campaign or data requested."
+            action = "Check that the campaign code is correct, or run a full knowledge base refresh."
         else:
-            msg = (
-                "I was unable to complete the audience sizing request. "
-                "The details have been logged for the OCTO team to review."
-            )
-        cls.error(msg)
+            msg = "I was unable to complete the audience sizing request."
+            action = "Please reach out to the OCTO team for assistance."
+        cls.error(msg, action)
