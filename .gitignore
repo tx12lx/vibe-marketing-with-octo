@@ -19,6 +19,12 @@ application_default_credentials.json
 # Generated cache files
 *.cache.json
 .sdl_schema_cache.json
+*.schema_cache.json
+
+# Runtime-generated knowledge base artifacts
+knowledge_base/artifacts/
+ingestion_log.json
+ingestion_report.json
 
 # Editor / OS
 .DS_Store
