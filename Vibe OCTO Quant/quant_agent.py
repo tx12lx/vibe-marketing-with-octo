@@ -528,7 +528,7 @@ Population : {target_population}
 Filters    : {filters_json}
 BQ Project : {bq_project}
 BQ Dataset : {bq_dataset}
-{optimization_context_section}
+
 Available schema:
 {schema_context}
 
@@ -588,7 +588,7 @@ CTE structure rules — non-negotiable:
                                     WHERE control_group_flg = 'N'
 Apply filters cumulatively — each CTE adds one new predicate on top of the prior stage.
 Use ONLY the filter criteria listed above.
-
+{optimization_context_section}
 OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
 The first character must be 'W' (WITH). Any explanatory text causes a pipeline parse failure."""
 
@@ -837,7 +837,8 @@ class QuantAgent(BaseAgent):
     def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
         opt_ctx = (request.optimization_context or "").strip()
         optimization_context_section = (
-            f"\nAdditional instructions from prior user feedback (authoritative — apply these):\n{opt_ctx}\n"
+            f"\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
+            f" Apply these substitutions exactly as stated:\n{opt_ctx}\n"
             if opt_ctx else ""
         )
         prompt = _ADHOC_WATERFALL_PROMPT.format(

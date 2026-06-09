@@ -498,16 +498,19 @@ def _is_column_error(error_summary: str) -> bool:
 def _direct_count_with_recovery(
     quant: QuantAgent, request: AdHocSizingRequest
 ) -> Union[QuantAuditLog, NexusErrorPayload]:
-    """Run direct_count with one recovery attempt on column-not-found errors."""
+    """Run direct_count with up to 3 HITL recovery attempts on column-not-found errors."""
     result = quant.direct_count(request)
-    if isinstance(result, QuantAuditLog):
-        return result
-    if _is_column_error(result.error_summary):
+    for _ in range(3):
+        if isinstance(result, QuantAuditLog):
+            return result
+        if not _is_column_error(result.error_summary):
+            return result
         correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
-        if correction:
-            ctx = ((request.optimization_context or "") + "\n" + correction).strip()
-            request = request.model_copy(update={"optimization_context": ctx})
-            return quant.direct_count(request)
+        if not correction:
+            return result
+        ctx = ((request.optimization_context or "") + "\n" + correction).strip()
+        request = request.model_copy(update={"optimization_context": ctx})
+        result = quant.direct_count(request)
     return result
 
 
@@ -677,14 +680,17 @@ def route_by_intent(
                 result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
             if isinstance(result, QuantAuditLog):
                 return spec, result, None
-            if _is_column_error(getattr(result, "error_summary", "")):
+            for _ in range(3):
+                if not _is_column_error(getattr(result, "error_summary", "")):
+                    break
                 correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
-                if correction:
-                    ctx = ((spec.optimization_context or "") + "\n" + correction).strip()
-                    spec = spec.model_copy(update={"optimization_context": ctx})
-                    result = quant.audit_from_spec(spec)
-            if isinstance(result, QuantAuditLog):
-                return spec, result, None
+                if not correction:
+                    break
+                ctx = ((spec.optimization_context or "") + "\n" + correction).strip()
+                spec = spec.model_copy(update={"optimization_context": ctx})
+                result = quant.audit_from_spec(spec)
+                if isinstance(result, QuantAuditLog):
+                    return spec, result, None
             ThoughtDisplay.error(
                 "I was unable to complete the audience sizing request. "
                 "The system attempted a correction but could not reconcile the targeting rules."
