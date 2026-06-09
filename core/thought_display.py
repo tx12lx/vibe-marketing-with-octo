@@ -123,19 +123,56 @@ class ThoughtDisplay:
 
     @classmethod
     def intent_classified(
-        cls, workflow: str, query: str, campaign_hint: Optional[str] = None
+        cls,
+        workflow: str,
+        query: str,
+        campaign_hint: Optional[str] = None,
+        confidence: Optional[float] = None,
+        knowledge_sources: Optional[list] = None,
     ) -> None:
+        """Display what intent was understood, what knowledge was consulted, and confidence.
+
+        Accepts both legacy workflow names (WORKFLOW_A/B) and the unified 5-type
+        intent taxonomy (sizing_request, brief_generation, brief_qa,
+        campaign_execution, general_question).
+        """
         short_q = f'"{query[:50]}..."' if len(query) > 50 else f'"{query}"'
-        if workflow == "WORKFLOW_B":
+        conf_str = f"  {confidence:.0%}" if confidence is not None else ""
+        sources_str = ", ".join(knowledge_sources) if knowledge_sources else ""
+
+        _CAMPAIGN_INTENTS = {"WORKFLOW_B", "campaign_execution", "brief_generation", "brief_qa"}
+        _SIZING_INTENTS = {"WORKFLOW_A", "sizing_request"}
+
+        if workflow in _CAMPAIGN_INTENTS:
             body = [
                 *_label_rows("I heard", short_q),
                 *_label_rows("Campaign", campaign_hint or "Searching..."),
             ]
+            if conf_str:
+                body += _label_rows("Confidence", conf_str)
+            if sources_str:
+                body += _label_rows("Knowledge", sources_str)
             cls._box("Got it! I'm looking up the campaign for you...", body)
+
+        elif workflow == "general_question":
+            body = [
+                *_label_rows("I heard", short_q),
+                *_label_rows("Mode", "Answering from knowledge base"),
+            ]
+            if conf_str:
+                body += _label_rows("Confidence", conf_str)
+            if sources_str:
+                body += _label_rows("Knowledge", sources_str)
+            cls._box("I'll answer from our campaign knowledge base.", body)
+
         else:
             body = [
                 *_label_rows("I heard", short_q),
             ]
+            if conf_str:
+                body += _label_rows("Confidence", conf_str)
+            if sources_str:
+                body += _label_rows("Knowledge", sources_str)
             cls._box("Understood. Let me find the best audience for your request...", body)
 
     @classmethod

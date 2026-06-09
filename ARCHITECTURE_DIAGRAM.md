@@ -35,13 +35,13 @@ flowchart TD
     %% -------------------------------------------------------
     %% KNOWLEDGE LAYER (disk artifacts, shared foundation)
     %% -------------------------------------------------------
-    subgraph KB["KNOWLEDGE LAYER — Shared Disk Artifacts"]
+    subgraph KB["KNOWLEDGE LAYER — Consulted on Every Request"]
         direction TB
         SKI["semantic_knowledge_index.json\nGOLD records: targeting_summary, segment_summary, brief_text\nBRONZE records: schema-only (no summaries)\ngold_count, bronze_count, generated_at"]
         AS_ART["knowledge_base/artifacts/adobe_schema.json\nViews + columns from INFORMATION_SCHEMA\nproject, dataset, snapshot_at"]
-        CCP["knowledge_base/artifacts/cross_campaign_patterns.json\nCross-campaign targeting patterns (GOLD-derived)"]
-        BR_FILE["business_rules.json\nHuman-verified BusinessRule objects\nExtracted by FeedbackAgent after HITL NO"]
-        GL_FILE["glossary.json\nAcronyms (PFE, KI, TWA, AALBAU)\nCampaign configs, user_defined_terms\npatch_from_failure stubs"]
+        CCP["knowledge_base/artifacts/cross_campaign_patterns.json\nCross-campaign targeting patterns (GOLD-derived)\nUsed in classify_intent + answer_general_question"]
+        BR_FILE["business_rules.json\nHuman-verified BusinessRule objects\nExtracted by FeedbackAgent after HITL NO\nApplied on EVERY request with campaign context"]
+        GL_FILE["glossary.json\nAcronyms (PFE, KI, TWA, AALBAU)\nCampaign configs, user_defined_terms\nAlways loaded for intent classification"]
         VAR_FILE["verified_app_registry.json\nHITL YES: confirmed specs + targeting/segment summaries\nHITL NO: correction_text override for next Nexus run"]
         QC_FILE["query_catalog.json\nSQL structural blueprints (AALBAU target_campaign)\nInjected dynamically when AALBAU keyword detected"]
     end
@@ -50,10 +50,10 @@ flowchart TD
     %% STARTUP WIRING (vibe_orchestrator.py main())
     %% -------------------------------------------------------
     subgraph STARTUP["STARTUP — vibe_orchestrator.py"]
-        ORCH["Orchestrator\nvibe_orchestrator.py\nAgent registry + console loop\n_AGENT_REGISTRY: nexus, quant, briefing, feedback"]
+        ORCH["Orchestrator\nvibe_orchestrator.py\nAgent registry + console loop\nroute_by_intent() — unified pipeline dispatcher\n_AGENT_REGISTRY: nexus, quant, briefing, feedback"]
         GTI["GoldTierIndex\nknowledge_base/tier_index.py\nIn-memory dict {camp_id::sub_camp_id -> GoldCampaignRecord}\nloaded from semantic_knowledge_index.json"]
         SDL_RT["SchemaDiscoveryLayer\n(Pillar 2)\nLoads adobe_schema.json from disk at startup\nFalls back to live INFORMATION_SCHEMA query if absent\ncache: .sdl_schema_cache.json (1hr TTL)"]
-        BRR["BusinessRulesRegistry\ncore/business_rules_registry.py\nLoads business_rules.json\nApplied before every Quant dispatch"]
+        BRR["BusinessRulesRegistry\ncore/business_rules_registry.py\nLoads business_rules.json\nApplied before every agent dispatch with campaign context"]
         HITL_OBJ["HITLAuditLoop\nhitl/audit_loop.py\n(Pillar 5)"]
         GM["GlossaryManager\nVibe OCTO Nexus/core/glossary.py\nLoads glossary.json\npatch_from_failure on HITL NO"]
     end
@@ -62,16 +62,16 @@ flowchart TD
     %% RUNTIME AGENTS
     %% -------------------------------------------------------
     subgraph AGENTS["RUNTIME AGENTS"]
-        NEXUS["NexusAgent\nVibe OCTO Nexus/nexus_agent.py\n- classify_and_route (WORKFLOW_A vs B)\n- build_sizing_request_from_nl (WORKFLOW_A)\n- _find_brief_for_campaign (BQ on-demand)\n- _build_from_deployment_matrix (variance analysis)\n- build_universal_spec (Pillar 3)\n- _run_discrepancy_audit (4 flag types)\n- route_with_retry (1 correction pass)\nFuel iX: prompt-caching (taxonomy matrix as cached block)"]
-        QUANT["QuantAgent\nVibe OCTO Quant/quant_agent.py\nWORKER_ID: quant_v1\n- audit_from_spec (WORKFLOW_B entry point)\n- audit / direct_count (WORKFLOW_A)\n- 7-step CTE waterfall SQL generation\n- BigQuery execution via ADC\n- PII masking (bq_client.py)\n- _optimization_note (drop rate alerts)"]
-        BRIEFING["BriefingAgent\nVibe OCTO Briefing/briefing_agent.py\nWORKER_ID: briefing_v1\n- GOLD path: few-shot + prompt-caching (conf 0.90/0.70)\n- BRONZE path: zero-shot from schema (conf 0.60/0.40)\n- 6-section Markdown brief output\n- No SQL, column names, or BQ identifiers in output"]
+        NEXUS["NexusAgent\nVibe OCTO Nexus/nexus_agent.py\n- classify_intent: 5-type intent taxonomy\n  consults glossary + campaign index + GOLD patterns\n- _get_glossary_summary / _get_known_campaign_codes\n- answer_general_question (knowledge-only response)\n- build_sizing_request_from_nl (ad-hoc sizing)\n- _find_brief_for_campaign (BQ on-demand)\n- _build_from_deployment_matrix (variance analysis)\n- build_universal_spec (Pillar 3)\n- _run_discrepancy_audit (4 flag types)\n- route_with_retry (1 correction pass)\nFuel iX: prompt-caching (taxonomy matrix as cached block)"]
+        QUANT["QuantAgent\nVibe OCTO Quant/quant_agent.py\nWORKER_ID: quant_v1\n- audit_from_spec (campaign sizing entry point)\n- audit / direct_count (ad-hoc sizing)\n- 7-step CTE waterfall SQL generation\n- BigQuery execution via ADC\n- PII masking (bq_client.py)\n- _optimization_note (drop rate alerts)"]
+        BRIEFING["BriefingAgent\nVibe OCTO Briefing/briefing_agent.py\nWORKER_ID: briefing_v1\n- GOLD path: few-shot + prompt-caching (conf 0.90/0.70)\n- SILVER/BRONZE path: zero-shot from schema (conf 0.60/0.40)\n- 6-section Markdown brief output\n- No SQL, column names, or BQ identifiers in output"]
     end
 
     %% -------------------------------------------------------
     %% SUPPORT MODULES
     %% -------------------------------------------------------
     subgraph SUPPORT["SUPPORT MODULES"]
-        TD["ThoughtDisplay\ncore/thought_display.py\nUser-facing terminal output\nWarm business language — no SQL or schemas"]
+        TD["ThoughtDisplay\ncore/thought_display.py\nUser-facing terminal output\nShows: intent type, confidence, knowledge sources consulted\nWarm business language — no SQL or schemas"]
         EO["ExecutionObserver\ncore/execution_logger.py\nMilestone logging: pillar, milestone, status, duration_ms"]
         BQC["bq_client.py\nVibe OCTO Quant/bq_reporter/bq_client.py\nTwo-tier PII masking (_PII_HIDDEN / _PII_FILTER_ONLY)\nSchema fetch + 24hr cache (.schema_cache.json)"]
         GC["GlossaryCurator\ncore/glossary_curator.py\nStaged learning: add_to_staging / approve / reject"]
@@ -81,7 +81,7 @@ flowchart TD
     %% HITL + FEEDBACK LOOP
     %% -------------------------------------------------------
     subgraph HITL_FB["HITL + FEEDBACK LOOP (Pillars 5 & 6)"]
-        HITL_GATE["HITLAuditLoop.prompt()\nUser answers Y or N"]
+        HITL_GATE["HITLAuditLoop.prompt()\nAlways triggered after execution\nFull HITL (spec+log): Y or N\nSimplified HITL (ad-hoc/brief/general): Y or N"]
         FA["FeedbackAgent\nVibe OCTO Feedback/feedback_agent.py\nWORKER_ID: feedback_v1\n8-stage pipeline:\n1.Acknowledge 2.Interpret(LLM) 3.Resolve unknown terms\n4.Clarify 5.Compound 6.Scope 7.Validate 8.Save\nFuel iX: prompt-caching (knowledge base as cached block)"]
     end
 
@@ -112,115 +112,112 @@ flowchart TD
     SDL_RT -->|"schema_str injected"| BRIEFING
     SDL_RT -->|"snapshot dict injected\n(set_runtime_schema_snapshot)"| NEXUS
     HITL_OBJ -->|"shares gold_index + glossary_manager"| ORCH
-    BRR -->|"injected into route()"| ORCH
+    BRR -->|"injected into route_by_intent()"| ORCH
 
     %% -------------------------------------------------------
-    %% RUNTIME EXECUTION — WORKFLOW_B
+    %% UNIFIED RUNTIME PIPELINE — EVERY REQUEST
     %% -------------------------------------------------------
     USER(["User Input\n(console)"])
     USER -->|"query string"| ORCH
 
+    %% Step 1: Knowledge layer context injection
     ORCH -->|"_build_dynamic_context\n(PFE/KI/TWA/AALBAU keyword scan)\nInjects glossary.json + query_catalog.json\ninto session_context"| GL_FILE
     GL_FILE -.->|"glossary + SQL blueprint\ninjected into Nexus + Quant\nsession_context"| NEXUS
     QC_FILE -.->|"AALBAU SQL blueprint\n(if keyword detected)"| NEXUS
 
-    ORCH -->|"classify_and_route(query)"| NEXUS
-    NEXUS -->|"WORKFLOW_B:\ncampaign_hint"| NEXUS
-    NEXUS -->|"_find_brief_for_campaign\n(BQ query: bq_plan_camp_deploy_mdc\ncamp_id=AAL, sub_camp_id=AALBAU)"| BQ_DEPLOY
-    BQ_DEPLOY -->|"deployment rows dict\n{deployments: [...]}"| NEXUS
+    %% Step 2: Intent classification (always consults knowledge layer)
+    ORCH -->|"classify_intent(query)\nLoads: glossary summary,\ncampaign codes from index,\ncross-campaign patterns"| NEXUS
+    GL_FILE -.->|"_get_glossary_summary()\n(always loaded)"| NEXUS
+    SKI -.->|"_get_known_campaign_codes()\n(always loaded)"| NEXUS
+    CCP -.->|"_get_cross_campaign_patterns_summary()\n(always loaded)"| NEXUS
+    NEXUS -->|"Fuel iX: classify into\n5 intent types\n(sizing_request / brief_generation /\nbrief_qa / campaign_execution /\ngeneral_question)"| FUELIX
+    FUELIX -.->|"IntentClassification\n(intent_type, confidence,\ncampaign_identified,\nknowledge_sources_consulted)"| NEXUS
+    NEXUS -->|"ThoughtDisplay.intent_classified\n(intent type + confidence +\nknowledge sources shown)"| TD
 
+    %% Step 4: Knowledge context assembly (campaign path)
+    ORCH -->|"route_by_intent:\nif campaign_identified:\n_find_brief_for_campaign\n(BQ on-demand)"| BQ_DEPLOY
+    BQ_DEPLOY -->|"deployment rows dict\n{deployments: [...]}"| NEXUS
     NEXUS -->|"_load_override_from_registry\n(check verified_app_registry.json\nfor correction_text override)"| VAR_FILE
     VAR_FILE -.->|"operator override block\nprepended to session_context\n(absolute priority)"| NEXUS
-
-    NEXUS -->|"_build_from_deployment_matrix\n(LLM: deployment variance analysis\nreturns strategy_summary + compiled_instructions)\n→ AudienceSizingRequest"| FUELIX
+    NEXUS -->|"build_universal_spec:\n_build_from_deployment_matrix\n(LLM variance analysis)\n→ AudienceSizingRequest"| FUELIX
     FUELIX -.->|"AudienceSizingRequest JSON"| NEXUS
-
     NEXUS -->|"gold_index.lookup\n(camp_id::sub_camp_id)"| GTI
-    GTI -->|"GoldCampaignRecord or None\n→ tier: GOLD or BRONZE"| NEXUS
-
-    NEXUS -->|"_run_discrepancy_audit\n(4 flags: unknown_column,\nmissing_standard_exclusion,\ngch_bypass_detected, logic_drift)\nlogic_drift uses Fuel iX LLM call"| FUELIX
+    GTI -->|"GoldCampaignRecord or None\n→ tier: GOLD, SILVER, or BRONZE"| NEXUS
+    NEXUS -->|"_run_discrepancy_audit\n(4 flags: unknown_column,\nmissing_standard_exclusion,\ngch_bypass_detected, logic_drift)"| FUELIX
     FUELIX -.->|"ALIGNED or DRIFTED"| NEXUS
-
     NEXUS -->|"UniversalJSONSpec\n(Pillar 3 inter-agent contract)"| ORCH
 
-    ORCH -->|"discrepancy_flags > 0:\nThoughtDisplay.discrepancy_check\n_print_discrepancy_audit"| TD
-
-    ORCH -->|"BRR.get_rules_for_execution\n(scope: campaign/pattern/universal)\nPattern rules: LLM-matched via Fuel iX"| BRR
+    %% Step 3: BusinessRulesRegistry (always checked when campaign context exists)
+    ORCH -->|"BRR.get_rules_for_execution\n(universal + campaign + pattern)\nPattern rules: LLM-matched"| BRR
     BRR -.->|"applicable BusinessRule list"| ORCH
-    ORCH -->|"BRR.apply_rules_to_spec\n(adds filters + exclusions to spec)"| BRR
+    ORCH -->|"BRR.apply_rules_to_spec\n(adds verified filters + exclusions)"| BRR
     BRR -.->|"modified UniversalJSONSpec"| ORCH
     ORCH -->|"ThoughtDisplay.show_rules_being_applied"| TD
 
-    ORCH -->|"quant.audit_from_spec(spec)\n(downcasts to AudienceSizingRequest)"| QUANT
-
+    %% Step 5a: sizing_request with campaign context
+    ORCH -->|"sizing_request (campaign):\nquant.audit_from_spec(spec)"| QUANT
     QUANT -->|"bq_client.get_schema\n(24hr disk cache)"| BQC
     BQC -->|"VIEW DDL strings"| QUANT
-    QUANT -->|"_generate_waterfall_sql\n(7-step CTE prompt + schema context)"| FUELIX
+    QUANT -->|"_generate_waterfall_sql\n(7-step CTE prompt + schema)"| FUELIX
     FUELIX -.->|"Raw BigQuery Standard SQL"| QUANT
-
     QUANT -->|"_execute_query\n(ADC credentials)"| BQ_RUNTIME
-    BQ_RUNTIME -->|"waterfall rows\n[{layer_name, audience_count}]"| QUANT
-    QUANT -->|"_mask_pii\n(removes _PII_HIDDEN,\nmasks _PII_FILTER_ONLY as ***)"| BQC
-    QUANT -->|"QuantAuditLog\n(sql, waterfall, final_count,\noptimization_note)"| ORCH
+    BQ_RUNTIME -->|"waterfall rows"| QUANT
+    QUANT -->|"QuantAuditLog\n(sql, waterfall, final_count)"| ORCH
 
-    ORCH -->|"ThoughtDisplay.results_ready\n(waterfall + counts + pct drops)"| TD
+    %% Step 5b: sizing_request ad-hoc (no campaign)
+    ORCH -->|"sizing_request (ad-hoc):\nbuild_sizing_request_from_nl\n→ direct_count"| NEXUS
+    NEXUS -->|"AdHocSizingRequest"| QUANT
 
-    ORCH -->|"briefing.subscribe(spec)\nbriefing.execute()"| BRIEFING
-    BRIEFING -->|"GOLD path:\ngold_index.lookup → GoldCampaignRecord\n(brief_text, targeting_summary)\nFuel iX: prompt-caching"| FUELIX
-    BRIEFING -->|"BRONZE path:\nschema context\nFuel iX: standard call"| FUELIX
+    %% Step 5c: brief_generation / brief_qa
+    ORCH -->|"brief_generation / brief_qa:\nbriefing.subscribe(spec)\nbriefing.execute()"| BRIEFING
+    BRIEFING -->|"GOLD path:\ngold_index.lookup → GoldCampaignRecord\nFuel iX: prompt-caching"| FUELIX
+    BRIEFING -->|"SILVER/BRONZE path:\nschema context\nFuel iX: standard call"| FUELIX
     FUELIX -.->|"Markdown brief"| BRIEFING
     BRIEFING -->|"BriefingOutput\n(brief_markdown, confidence_score)"| ORCH
 
+    %% Step 5d: campaign_execution (sizing + brief)
+    ORCH -->|"campaign_execution:\naudit_from_spec + briefing.execute()"| QUANT
+
+    %% Step 5e: general_question (knowledge-only)
+    ORCH -->|"general_question:\nanswer_general_question(query)\n(knowledge-only, no SQL)"| NEXUS
+    NEXUS -->|"Fuel iX: answer from\nglossary + patterns + codes"| FUELIX
+    FUELIX -.->|"plain-text answer"| NEXUS
+    NEXUS -->|"answer printed\ndirectly to console"| TD
+
+    ORCH -->|"ThoughtDisplay.results_ready\n(waterfall + counts + pct drops)"| TD
     ORCH -->|"_print_brief"| TD
 
-    %% -------------------------------------------------------
-    %% WORKFLOW_A (ad-hoc NL query)
-    %% -------------------------------------------------------
-    NEXUS -->|"WORKFLOW_A:\nbuild_sizing_request_from_nl\n(NL → AdHocSizingRequest via LLM)"| FUELIX
-    FUELIX -.->|"AdHocSizingRequest JSON"| NEXUS
-    NEXUS -->|"AdHocSizingRequest"| QUANT
-    QUANT -->|"direct_count\n(7-step ad-hoc waterfall)"| BQ_RUNTIME
+    %% Step 7: HITL — always triggered
+    ORCH -->|"HITL always triggered:\nFull HITL when spec+log available\nSimplified Y/N for all other outputs"| HITL_GATE
 
-    %% -------------------------------------------------------
-    %% HITL GATE
-    %% -------------------------------------------------------
-    ORCH -->|"ThoughtDisplay.hitl_gate\n(campaign_name, final_count, tier)"| TD
-    ORCH -->|"hitl.prompt(spec, log, brief_output)"| HITL_GATE
-
-    %% -------------------------------------------------------
     %% HITL YES PATH
-    %% -------------------------------------------------------
     HITL_GATE -->|"YES:\n_handle_yes()\nbuild targeting_summary\n+ segment_summary"| HITL_OBJ
-    HITL_OBJ -->|"_upsert_registry\n(hitl_confirmed=True\nuniversal_json_spec, final_count)"| VAR_FILE
-    HITL_OBJ -->|"gold_index.promote_in_memory\n(session-only — persists next ingestion)"| GTI
+    HITL_OBJ -->|"_upsert_registry\n(hitl_confirmed=True)"| VAR_FILE
+    HITL_OBJ -->|"gold_index.promote_in_memory"| GTI
     HITL_OBJ -->|"ThoughtDisplay.campaign_approved"| TD
     ORCH -->|"returns True\n(continue console loop)"| USER
 
-    %% -------------------------------------------------------
     %% HITL NO PATH
-    %% -------------------------------------------------------
     HITL_GATE -->|"NO:\nuser types correction text"| HITL_OBJ
     HITL_OBJ -->|"_run_feedback_agent\n(FeedbackInput built from spec + correction)"| FA
     FA -->|"Stage 2: LLM interpretation\n(cached knowledge base context)\nExtracts BusinessRule objects"| FUELIX
-    FUELIX -.->|"rules JSON\n(rule_type, scope, structured_value)"| FA
+    FUELIX -.->|"rules JSON"| FA
     FA -->|"Stage 8: _registry.add_rule\n(confirmed rules)"| BRR
     BRR -->|"persist to\nbusiness_rules.json"| BR_FILE
     FA -->|"Stage 3: new user-defined terms\nwrite to glossary.json"| GL_FILE
 
-    HITL_OBJ -->|"_infer_failure_type\n_find_glossary_gaps\n→ SemanticFailureLog\n→ semantic_failure_log.json"| VAR_FILE
-    HITL_OBJ -->|"glossary_manager.patch_from_failure\n(stub terms, confidence decay)"| GM
+    HITL_OBJ -->|"SemanticFailureLog\n→ semantic_failure_log.json"| VAR_FILE
+    HITL_OBJ -->|"glossary_manager.patch_from_failure"| GM
     GM -->|"save to glossary.json"| GL_FILE
     HITL_OBJ -->|"gold_index.deprioritize\n(bias_weight -= 0.2)"| GTI
-    HITL_OBJ -->|"_upsert_registry\n(correction_text override\nhitl_confirmed=False)"| VAR_FILE
+    HITL_OBJ -->|"_upsert_registry\n(correction_text override)"| VAR_FILE
     HITL_OBJ -->|"ThoughtDisplay.campaign_rejected"| TD
     ORCH -->|"returns False\n(exit console loop)"| USER
 
-    %% -------------------------------------------------------
-    %% NEXT EXECUTION (self-improving flywheel)
-    %% -------------------------------------------------------
-    BR_FILE -->|"Next run: rules applied\nbefore Quant dispatch"| BRR
-    VAR_FILE -->|"Next run: correction_text\ninjected as operator override\nat Nexus build_universal_spec start"| NEXUS
-    GL_FILE -->|"Next run: keyword injection\nif PFE/KI/TWA/AALBAU detected"| ORCH
+    %% Step 8: Knowledge layer update (always)
+    BR_FILE -->|"Next run: rules applied\nbefore every agent dispatch"| BRR
+    VAR_FILE -->|"Next run: correction_text\ninjected as operator override"| NEXUS
+    GL_FILE -->|"Next run: keyword injection +\nglossary always loaded for classify_intent"| ORCH
 
     %% -------------------------------------------------------
     %% COLOUR STYLING
@@ -250,18 +247,18 @@ flowchart TD
 
 | Component | File | Role | Powered By |
 |-----------|------|------|-----------|
-| **vibe_orchestrator.py** | `vibe_orchestrator.py` | Entry point, agent registry, console loop, WORKFLOW_A/B dispatch, dynamic glossary injection | Python stdlib |
-| **NexusAgent** | `Vibe OCTO Nexus/nexus_agent.py` | Intent classification, deployment matrix analysis, UniversalJSONSpec build, discrepancy audit (4 flags), override registry check | Fuel iX (claude-sonnet-4), BigQuery ADC |
+| **vibe_orchestrator.py** | `vibe_orchestrator.py` | Entry point, agent registry, console loop, unified `route_by_intent()` dispatcher, dynamic glossary injection | Python stdlib |
+| **NexusAgent** | `Vibe OCTO Nexus/nexus_agent.py` | Intent classification (5 types), knowledge layer consultation, deployment matrix analysis, UniversalJSONSpec build, discrepancy audit (4 flags), override registry check, general question answering | Fuel iX (claude-sonnet-4), BigQuery ADC |
 | **QuantAgent** | `Vibe OCTO Quant/quant_agent.py` | 7-step CTE waterfall SQL generation, BigQuery execution, PII masking, optimization notes | Fuel iX (claude-sonnet-4), BigQuery ADC |
-| **BriefingAgent** | `Vibe OCTO Briefing/briefing_agent.py` | Campaign intelligence brief generation; GOLD path (few-shot, prompt-cached); BRONZE path (zero-shot, schema-grounded) | Fuel iX (claude-sonnet-4) |
+| **BriefingAgent** | `Vibe OCTO Briefing/briefing_agent.py` | Campaign intelligence brief generation; GOLD path (few-shot, prompt-cached); SILVER/BRONZE path (zero-shot, schema-grounded) | Fuel iX (claude-sonnet-4) |
 | **FeedbackAgent** | `Vibe OCTO Feedback/feedback_agent.py` | 8-stage interactive pipeline: acknowledge, LLM interpret, resolve unknown terms, clarify, compound, scope, validate, save | Fuel iX (claude-sonnet-4) |
 | **KnowledgeAgent** | `knowledge_base/vibe_octo_knowledge.py` | Offline ingestion: BQ campaign_knowledge → GOLD/BRONZE records, adobe INFORMATION_SCHEMA → adobe_schema.json, brief fetching via BriefFetcher | BigQuery ADC, Google Workspace ADC |
 | **GoldTierIndex** | `knowledge_base/tier_index.py` | In-memory dict `{camp_id::sub_camp_id -> GoldCampaignRecord}`; promote_in_memory (HITL YES); deprioritize (HITL NO) | Python stdlib |
 | **GoldCampaignRecord** | `knowledge_base/ingester.py` | Dataclass: camp_id, sub_camp_id, targeting_summary, segment_summary, brief_text, bias_weight | Python stdlib |
 | **ColumnMapper** | `knowledge_base/column_mapper.py` | Resolves logical column names to actual BQ column names via exact + fuzzy matching against config patterns | Python stdlib |
-| **HITLAuditLoop** | `hitl/audit_loop.py` | Pillar 5: HITL gate; YES path (promote + registry confirm); NO path (failure log, glossary patch, registry override, FeedbackAgent trigger) | Python stdlib |
-| **BusinessRulesRegistry** | `core/business_rules_registry.py` | Load/persist/apply human-verified business rules; LLM-based pattern rule matching | Fuel iX (claude-sonnet-4) |
-| **ThoughtDisplay** | `core/thought_display.py` | User-facing terminal output in warm business language; box-drawing UI with Unicode/ASCII fallback | Python stdlib |
+| **HITLAuditLoop** | `hitl/audit_loop.py` | Pillar 5: HITL gate; YES path (promote + registry confirm); NO path (failure log, glossary patch, registry override, FeedbackAgent trigger). Fires for every execution that produces output. | Python stdlib |
+| **BusinessRulesRegistry** | `core/business_rules_registry.py` | Load/persist/apply human-verified business rules; LLM-based pattern rule matching; consulted on every request with campaign context | Fuel iX (claude-sonnet-4) |
+| **ThoughtDisplay** | `core/thought_display.py` | User-facing terminal output in warm business language; shows intent type, confidence, knowledge sources consulted on every request; box-drawing UI with Unicode/ASCII fallback | Python stdlib |
 | **ExecutionObserver** | `core/execution_logger.py` | Milestone logging (pillar, milestone, status, duration_ms); emits JSON or Markdown reports | Python stdlib |
 | **GlossaryCurator** | `core/glossary_curator.py` | Staged learning: add_to_staging / approve / reject; persists to staging file | Python stdlib |
 | **GlossaryManager** | `Vibe OCTO Nexus/core/glossary.py` | Load/save glossary.json; merge learned terms; patch_from_failure (stubs + confidence decay) | Python stdlib |
@@ -277,10 +274,12 @@ flowchart TD
 
 | Agent | WORKER_ID | Input Schema | Output Schema | Triggered When |
 |-------|-----------|-------------|--------------|---------------|
-| NexusAgent | `nexus` | `dict` (brief) / `str` (query) | `UniversalJSONSpec` | Every request; classify_and_route → WORKFLOW_A or WORKFLOW_B |
-| QuantAgent | `quant_v1` | `UniversalJSONSpec` (via audit_from_spec) or `AdHocSizingRequest` (via direct_count) | `QuantAuditLog` or `NexusErrorPayload` | Always after Nexus (both workflows) |
-| BriefingAgent | `briefing_v1` | `UniversalJSONSpec` (via subscribe + execute) | `BriefingOutput` | WORKFLOW_B only, after successful Quant audit |
-| FeedbackAgent | `feedback_v1` | `FeedbackInput` (via subscribe + execute) | `FeedbackOutput` | HITL NO response only; invoked by HITLAuditLoop._handle_no() |
+| NexusAgent | `nexus` | `str` (query) | `IntentClassification` via `classify_intent()` | Every request — step 2 of unified pipeline |
+| NexusAgent | `nexus` | `dict` (brief) | `UniversalJSONSpec` via `build_universal_spec()` | When campaign is identified by classify_intent |
+| NexusAgent | `nexus` | `str` (query) | `str` (answer) via `answer_general_question()` | When intent_type == `general_question` |
+| QuantAgent | `quant_v1` | `UniversalJSONSpec` (via `audit_from_spec`) or `AdHocSizingRequest` (via `direct_count`) | `QuantAuditLog` or `NexusErrorPayload` | intent_type: `sizing_request` or `campaign_execution` |
+| BriefingAgent | `briefing_v1` | `UniversalJSONSpec` (via `subscribe` + `execute`) | `BriefingOutput` | intent_type: `brief_generation`, `brief_qa`, or `campaign_execution` |
+| FeedbackAgent | `feedback_v1` | `FeedbackInput` (via `subscribe` + `execute`) | `FeedbackOutput` | HITL NO response; invoked by `HITLAuditLoop._handle_no()` |
 | KnowledgeAgent | _(no WORKER_ID)_ | BigQuery rows + Google Sheets links | `semantic_knowledge_index.json`, `adobe_schema.json`, `cross_campaign_patterns.json` | Manual only: `python -m knowledge_base.vibe_octo_knowledge --full-refresh` |
 
 ---
@@ -299,36 +298,56 @@ flowchart TD
 8. Status banner printed: campaign count, GOLD tier count, verified rule count, adobe schema view count, last-refresh timestamp.
 9. Console loop enters.
 
-### What happens during a campaign request (WORKFLOW_B)
+### What happens on every request — Unified Pipeline
 
-1. User types a query (e.g., "Size the AALBAU monthly email campaign").
-2. Orchestrator scans for glossary keywords (`PFE`, `KI`, `TWA`, `AALBAU`). If found, loads `glossary.json` + `query_catalog.json` and injects an `ACTIVE SESSION GUARDRAILS` block into Nexus + Quant session context.
-3. `NexusAgent.classify_and_route(query)` calls Fuel iX (no cached taxonomy) → `{"workflow": "WORKFLOW_B", "campaign_hint": "AAL Monthly Email"}`.
-4. `_find_brief_for_campaign()` runs a targeted BQ query against `bq_plan_camp_deploy_mdc` (camp_id=AAL, sub_camp_id=AALBAU, current, non-cancelled) → returns `{"deployments": [...rows...]}`.
-5. `build_universal_spec()`:
-   a. Checks `verified_app_registry.json` for a correction_text override (HITL NO from a prior session); if found, prepends as absolute priority to session_context.
-   b. Calls `_build_from_deployment_matrix()` → Fuel iX deployment variance analysis → `AudienceSizingRequest` (targeting criteria only, segmentation discarded).
-   c. `gold_index.lookup("AAL", "AALBAU")` → `GoldCampaignRecord` or None → `campaign_tier = "GOLD"` or `"BRONZE"`.
-   d. `_run_discrepancy_audit()` checks: `unknown_column` (against live schema), `missing_standard_exclusion`, `gch_bypass_detected` (AAL only), `logic_drift` (GOLD path, LLM-evaluated).
-   e. Builds `brief_agent_inputs` dict with raw_prompt, targeting_summary, segment_summary, brief_text from gold record.
-   f. Returns validated `UniversalJSONSpec`.
-6. If `discrepancy_flags` non-empty, `ThoughtDisplay.discrepancy_check()` + `_print_discrepancy_audit()` shown.
-7. `BusinessRulesRegistry.get_rules_for_execution()` finds applicable rules (universal > campaign > pattern). Pattern rules matched via Fuel iX LLM call.
-8. `apply_rules_to_spec()` appends verified filter/exclusion SQL to the spec.
-9. `quant.audit_from_spec(spec)` → `_run_audit()`:
-   a. `bq_client.get_schema()` (24hr cache).
-   b. Fuel iX generates 7-step CTE waterfall SQL.
-   c. BigQuery executes SQL via ADC.
-   d. PII masking applied.
-   e. Waterfall parsed, optimization note computed.
-   f. Returns `QuantAuditLog`.
-10. If `NexusErrorPayload` returned, one retry via `route_with_retry()`.
-11. `BriefingAgent.subscribe(spec).execute()`:
-    - GOLD path: loads GoldCampaignRecord, sends to Fuel iX with prompt-caching (system prompt + gold context as ephemeral cached blocks).
-    - BRONZE path: uses runtime schema string, standard Fuel iX call.
-    - Returns `BriefingOutput` (Markdown brief, confidence_score, executive_summary, recommendations).
-12. Audit log and brief printed to console.
-13. HITL gate fires.
+Every request goes through this pipeline regardless of whether a named campaign is identified.
+
+**Step 1 — Glossary keyword injection:**
+- Orchestrator scans for keywords (`PFE`, `KI`, `TWA`, `AALBAU`). If found, loads `glossary.json` + `query_catalog.json` and injects an `ACTIVE SESSION GUARDRAILS` block into Nexus + Quant session context.
+
+**Step 2 — Intent classification (always consults knowledge layer):**
+- `NexusAgent.classify_intent(query)` loads:
+  - Glossary summary from `glossary.json` (acronyms + campaign codes + user-defined terms)
+  - Known campaign codes from `semantic_knowledge_index.json` gold_records + taxonomy
+  - Cross-campaign patterns from `cross_campaign_patterns.json`
+- Calls Fuel iX to classify into one of 5 intent types with confidence score.
+- `ThoughtDisplay.intent_classified()` shows intent type, confidence, and knowledge sources consulted.
+
+**Step 3 — BusinessRulesRegistry:**
+- When a campaign is identified and a `UniversalJSONSpec` is built, `BusinessRulesRegistry.get_rules_for_execution()` finds applicable rules (universal > campaign > pattern). Pattern rules matched via Fuel iX LLM call. Verified rules applied to spec before agent dispatch.
+
+**Step 4 — Knowledge context assembly:**
+- If campaign identified: `_find_brief_for_campaign()` → BQ query → `build_universal_spec()`:
+  - Checks `verified_app_registry.json` for correction_text override (absolute priority)
+  - Deployment matrix analysis → `AudienceSizingRequest`
+  - `gold_index.lookup()` → GOLD, SILVER, or BRONZE tier
+  - Discrepancy audit (4 flag types)
+  - `brief_agent_inputs` assembled for BriefingAgent
+  - Returns `UniversalJSONSpec`
+- If no campaign: schema context + universal rules available for ad-hoc execution.
+
+**Step 5 — Agent activation based on intent type:**
+
+| Intent Type | Agents Activated | Path |
+|-------------|-----------------|------|
+| `sizing_request` (with campaign) | QuantAgent | `audit_from_spec()` → waterfall SQL → BQ |
+| `sizing_request` (ad-hoc) | QuantAgent | `build_sizing_request_from_nl()` → `direct_count()` |
+| `brief_generation` / `brief_qa` | BriefingAgent | GOLD/BRONZE spec → `briefing.execute()` |
+| `campaign_execution` | QuantAgent + BriefingAgent | Full path: sizing + brief |
+| `general_question` | NexusAgent only | `answer_general_question()` → knowledge-based response |
+
+**Step 6 — ThoughtDisplay:**
+- Always shows: intent understood, knowledge consulted, rules applied, agents activated, confidence level.
+
+**Step 7 — HITL (always triggered):**
+- Full HITL (`hitl.prompt(spec, log, brief_output)`) fires when both `spec` and `log` are available (campaign sizing, campaign execution).
+- Simplified Y/N HITL fires for all other executions: ad-hoc sizing, brief-only, general questions.
+- YES continues the session. NO exits after writing correction override.
+
+**Step 8 — Knowledge layer update:**
+- HITL NO: FeedbackAgent extracts `BusinessRule` objects → `business_rules.json`. Glossary updated. Registry override written.
+- HITL YES: `gold_index.promote_in_memory()`, registry confirmed.
+- All updates feed the next request.
 
 ### What happens during HITL YES
 
@@ -336,8 +355,8 @@ flowchart TD
    - Builds `targeting_summary` (target_population + filters + exclusions joined with ` | `).
    - Builds `segment_summary` (waterfall step count + base + final counts).
    - Upserts `verified_app_registry.json` with `hitl_confirmed=True`, `universal_json_spec`, `final_count`.
-2. `gold_index.promote_in_memory(camp_id, sub_camp_id, targeting_summary, segment_summary)` — adds/updates GOLD record in the current session's in-memory index. This record is used immediately for the next request within the same session.
-3. Persistent promotion happens on the next `--full-refresh` run: the confirmed entry in `verified_app_registry.json` is re-read by KnowledgeAgent (via `hitl_confirmed=True` filter) and written into `semantic_knowledge_index.json` as a GOLD record.
+2. `gold_index.promote_in_memory(camp_id, sub_camp_id, targeting_summary, segment_summary)` — adds/updates GOLD record in the current session's in-memory index.
+3. Persistent promotion happens on the next `--full-refresh` run.
 4. `ThoughtDisplay.campaign_approved()` shown.
 5. Console loop continues.
 
@@ -346,20 +365,20 @@ flowchart TD
 1. User types correction text (e.g., "Lookback should be 90 days, not 30").
 2. `HITLAuditLoop._handle_no(spec, audit_log)`:
    a. **FeedbackAgent pipeline** (8 stages, interactive):
-      - Stage 2: Fuel iX interprets correction against cached knowledge base (glossary + GOLD insights + existing rules + adobe schema). Returns structured `rules[]` JSON.
-      - Stage 3: Resolves unknown business terms interactively; writes new terms to `glossary.json`.
+      - Stage 2: Fuel iX interprets correction against cached knowledge base. Returns structured `rules[]` JSON.
+      - Stage 3: Resolves unknown business terms; writes new terms to `glossary.json`.
       - Stage 4-6: Clarification rounds, scope classification (campaign / pattern / universal).
       - Stage 7: User validates each extracted rule (Y/N/E).
       - Stage 8: `BusinessRulesRegistry.add_rule()` persists confirmed rules to `business_rules.json`.
-   b. `_infer_failure_type()` classifies error: `wrong_column`, `wrong_filter`, `missing_exclusion`, `tier_mismatch`, `schema_gap`.
-   c. `_find_glossary_gaps()` identifies unrecognised tokens in filters/exclusions.
+   b. `_infer_failure_type()` classifies error.
+   c. `_find_glossary_gaps()` identifies unrecognised tokens.
    d. `SemanticFailureLog` appended to `semantic_failure_log.json`.
-   e. `GlossaryManager.patch_from_failure()`: adds stub entries for gaps (confidence 0.3), decays confidence on wrong-column terms, adds missing-exclusion stubs.
-   f. `gold_index.deprioritize(camp_id)` reduces `bias_weight` by 0.2 (floor 0.2) for GOLD records.
-   g. `_upsert_registry()` writes `correction_text` override + `hitl_confirmed=False` to `verified_app_registry.json`.
+   e. `GlossaryManager.patch_from_failure()`: adds stub entries, decays confidence on wrong-column terms.
+   f. `gold_index.deprioritize(camp_id)` reduces `bias_weight` by 0.2.
+   g. `_upsert_registry()` writes `correction_text` override + `hitl_confirmed=False`.
 3. `ThoughtDisplay.campaign_rejected()` shown.
-4. Console loop exits (returns False).
-5. **Next session**: NexusAgent reads `verified_app_registry.json` at the start of `build_universal_spec()` and prepends the `correction_text` as an absolute priority block, overriding any conflicting LLM reasoning.
+4. Console loop exits.
+5. **Next session**: NexusAgent reads `verified_app_registry.json` at the start of `build_universal_spec()` and prepends `correction_text` as absolute priority.
 
 ---
 
@@ -367,11 +386,11 @@ flowchart TD
 
 | File | Contents | Updated By | Read By |
 |------|----------|-----------|--------|
-| `semantic_knowledge_index.json` | GOLD records (camp_id, sub_camp_id, campaign_name, targeting_summary, segment_summary, brief_text, cadence, medium, campaign_purpose, primary_products, bias_weight), BRONZE records (schema-only), gold_count, bronze_count, generated_at, schema_version 3.0 | KnowledgeAgent (`--full-refresh`) | GoldTierIndex (startup), FeedbackAgent (stage 2 cached context), vibe_orchestrator.py (_print_kb_status) |
+| `semantic_knowledge_index.json` | GOLD records (camp_id, sub_camp_id, campaign_name, targeting_summary, segment_summary, brief_text, cadence, medium, campaign_purpose, primary_products, bias_weight), BRONZE records (schema-only), gold_count, bronze_count, generated_at, schema_version 3.0 | KnowledgeAgent (`--full-refresh`) | GoldTierIndex (startup), NexusAgent._get_known_campaign_codes() (every classify_intent), FeedbackAgent (stage 2 cached context), vibe_orchestrator.py (_print_kb_status) |
 | `knowledge_base/artifacts/adobe_schema.json` | All VIEW column metadata for `bi-srv-hsmdet-pr-7b9def.adobe` dataset (view name, column name, data type, nullable, snapshot_at) | KnowledgeAgent (`--refresh-schema-only` or `--full-refresh`), SchemaDiscoveryLayer | vibe_orchestrator.py (_load_adobe_schema_from_disk at startup), FeedbackAgent (stage 2 adobe schema views) |
-| `knowledge_base/artifacts/cross_campaign_patterns.json` | Cross-campaign targeting patterns derived from GOLD insights during ingestion | KnowledgeAgent | FeedbackAgent (indirectly via knowledge index context) |
-| `business_rules.json` | `BusinessRule` objects (rule_id, rule_type, structured_value, scope, campaign_code, medium, cadence, priority, confidence, applies_to_future) | FeedbackAgent stage 8 via BusinessRulesRegistry.add_rule() | BusinessRulesRegistry (startup + every WORKFLOW_B dispatch) |
-| `glossary.json` | Acronyms (PFE, KI, TWA, AALBAU) with database_indicators; campaign configs; user_defined_terms (stage 3 of FeedbackAgent) | KnowledgeAgent (initial build); GlossaryManager.patch_from_failure() (HITL NO); FeedbackAgent stage 3 (unknown terms) | vibe_orchestrator.py (_load_glossary at keyword injection); GlossaryManager; HITLAuditLoop (_find_glossary_gaps) |
+| `knowledge_base/artifacts/cross_campaign_patterns.json` | Cross-campaign targeting patterns derived from GOLD insights during ingestion | KnowledgeAgent | NexusAgent._get_cross_campaign_patterns_summary() (every classify_intent + answer_general_question) |
+| `business_rules.json` | `BusinessRule` objects (rule_id, rule_type, structured_value, scope, campaign_code, medium, cadence, priority, confidence, applies_to_future) | FeedbackAgent stage 8 via BusinessRulesRegistry.add_rule() | BusinessRulesRegistry (startup + every request with campaign context) |
+| `glossary.json` | Acronyms (PFE, KI, TWA, AALBAU) with database_indicators; campaign configs; user_defined_terms (stage 3 of FeedbackAgent) | KnowledgeAgent (initial build); GlossaryManager.patch_from_failure() (HITL NO); FeedbackAgent stage 3 (unknown terms) | NexusAgent._get_glossary_summary() (every classify_intent); vibe_orchestrator.py (_load_glossary at keyword injection); GlossaryManager; HITLAuditLoop (_find_glossary_gaps) |
 | `verified_app_registry.json` | Per-(camp_id, sub_camp_id) records. YES records: hitl_confirmed=True, universal_json_spec, targeting_summary, segment_summary, final_count. NO records: correction_text, hitl_confirmed=False, rejected_filters | HITLAuditLoop._handle_yes() and _handle_no() | NexusAgent._load_override_from_registry() (start of every build_universal_spec); KnowledgeAgent (hitl_confirmed filter for GOLD promotion) |
 | `query_catalog.json` | SQL structural blueprints keyed by target_campaign. AALBAU blueprint: intent, sample_brief, sql_template | Manual (human-authored) | vibe_orchestrator.py (_load_query_catalog) when AALBAU keyword detected in user query |
 
@@ -385,7 +404,7 @@ flowchart TD
 | Fuel iX model | `claude-sonnet-4` (env: `FUELIX_MODEL`) | — | — | All agents; `temperature=0` for determinism; `max_tokens` varies (2048–8192) |
 | Prompt caching | `anthropic-beta: prompt-caching-2024-07-31` header | — | Ephemeral cache (~90% token discount on cache hits) | NexusAgent (taxonomy matrix), BriefingAgent (system + gold context), FeedbackAgent (knowledge base context) |
 | BigQuery — campaign_knowledge | `wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_knowledge` | ADC (gcloud) | SELECT only | KnowledgeAgent (ingestion), NexusAgent (taxonomy briefs fallback) |
-| BigQuery — deployment table | `bi-srv-hsmdet-pr-7b9def.campaign_data.bq_plan_camp_deploy_mdc` | ADC (gcloud) | SELECT only | NexusAgent._find_brief_for_campaign() (WORKFLOW_B on-demand) |
+| BigQuery — deployment table | `bi-srv-hsmdet-pr-7b9def.campaign_data.bq_plan_camp_deploy_mdc` | ADC (gcloud) | SELECT only | NexusAgent._find_brief_for_campaign() (when campaign identified) |
 | BigQuery — adobe dataset | `bi-srv-hsmdet-pr-7b9def.adobe` (INFORMATION_SCHEMA only at ingestion) | ADC (gcloud) | SELECT INFORMATION_SCHEMA only | KnowledgeAgent (schema artifact), SchemaDiscoveryLayer (runtime fallback), bq_client.get_schema() |
 | BigQuery — mobility base | `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base` | ADC (gcloud) | SELECT, COUNT(DISTINCT ban) | QuantAgent (7-step CTE waterfall execution) |
 | BigQuery — NBA model | `bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_current_model_score_master_view` | ADC (gcloud) | SELECT (propensity score join) | QuantAgent (step 5 targeting criteria when predict_modl_id=2008 / AAL NBA path) |
@@ -410,25 +429,46 @@ flowchart TD
 │   Confidence: 0.90 (brief_text present) / 0.70 (absent)    │
 │   BriefingAgent: few-shot + prompt-cached historical context│
 │   NexusAgent: logic_drift audit enabled                     │
+│   UniversalJSONSpec: campaign_tier = "GOLD"                 │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ HITL YES promotes BRONZE→GOLD
+                           │ HITL YES promotes BRONZE->GOLD
                            │ (in-memory immediately; persistent on next --full-refresh)
+┌──────────────────────────▼──────────────────────────────────┐
+│                      SILVER TIER                            │
+│   Reserved for future use. campaign_tier = "SILVER" is now  │
+│   valid in the runtime code (UniversalJSONSpec Literal).    │
+│   Not yet assigned automatically — available for manual     │
+│   promotion or future ingestion logic.                      │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
 ┌──────────────────────────▼──────────────────────────────────┐
 │                      BRONZE TIER                            │
 │   Criteria: BQ campaign_knowledge row WITHOUT targeting_    │
-│   summary/segment_summary (schema-only metadata)            │
+│   summary/segment_summary (schema-only metadata), or any   │
+│   NL-built spec where no GOLD record exists.               │
 │                                                             │
 │   Contents: camp_id, campaign_name, cadence, medium,        │
 │   campaign_purpose, primary_products                        │
-│   Confidence: 0.60 (≥80% filter coverage) / 0.40 (lower)  │
+│   Confidence: 0.60 (>=80% filter coverage) / 0.40 (lower)  │
 │   BriefingAgent: zero-shot + live schema context            │
 │   NexusAgent: no logic_drift audit                          │
+│   UniversalJSONSpec: campaign_tier = "BRONZE"               │
 └─────────────────────────────────────────────────────────────┘
-
-Note: SILVER tier is referenced in documentation but the runtime code
-(UniversalJSONSpec) uses Literal["GOLD", "BRONZE"] only. No SILVER path
-is implemented in the current codebase.
 ```
+
+---
+
+## Intent Classification — 5 Types
+
+Every user request is classified into exactly one of these types by `NexusAgent.classify_intent()`. Classification always consults the knowledge layer (glossary, campaign index, cross-campaign patterns).
+
+| Intent Type | Description | Agents Activated | HITL Mode |
+|-------------|-------------|-----------------|-----------|
+| `sizing_request` | User wants an audience count. May or may not reference a named campaign. | QuantAgent | Full (with campaign) / Simplified (ad-hoc) |
+| `brief_generation` | User wants a new campaign brief created or drafted. | BriefingAgent | Simplified |
+| `brief_qa` | User wants an existing campaign brief reviewed or validated. | BriefingAgent | Simplified |
+| `campaign_execution` | User wants a full campaign run: sizing + brief + audit. Uses execution verbs (run, execute, size, pull). | QuantAgent + BriefingAgent | Full |
+| `general_question` | User has a question about campaigns or data; no SQL execution needed. | NexusAgent (direct knowledge response) | Simplified |
 
 ---
 
@@ -438,33 +478,48 @@ is implemented in the current codebase.
 User Request
      │
      ▼
-NexusAgent classifies + routes
+Step 1: Glossary keyword injection (PFE/KI/TWA/AALBAU detected)
      │
      ▼
-BusinessRulesRegistry applies verified rules
-     │
+Step 2: NexusAgent.classify_intent()
+     │   Always loads: glossary.json, semantic_knowledge_index.json,
+     │   cross_campaign_patterns.json, business_rules.json
+     │   Returns: IntentClassification (5 types, confidence, knowledge sources)
      ▼
-QuantAgent executes waterfall SQL
-     │
+Step 3: BusinessRulesRegistry (when campaign context exists)
+     │   Universal + campaign + pattern rules applied to spec
      ▼
-BriefingAgent generates campaign brief
-     │
+Step 4: Knowledge Context Assembly
+     │   Campaign identified: build_universal_spec() -> GOLD/SILVER/BRONZE tier
+     │   No campaign: schema + universal rules available for ad-hoc
      ▼
-HITL Gate: Y or N?
+Step 5: Agent Activation
+     │   sizing_request   -> QuantAgent
+     │   brief_generation -> BriefingAgent
+     │   brief_qa         -> BriefingAgent
+     │   campaign_exec    -> QuantAgent + BriefingAgent
+     │   general_question -> NexusAgent (knowledge-only)
+     ▼
+Step 6: ThoughtDisplay
+     │   Shows: intent type, confidence, knowledge consulted, rules applied
+     ▼
+Step 7: HITL (always)
      │
-     ├─── YES ──► GoldTierIndex.promote_in_memory()
-     │            verified_app_registry.json (confirmed)
-     │            ──► Next request: higher GOLD confidence (0.90)
-     │                Nexus checks override registry first
+     ├─── YES (full HITL) ──► GoldTierIndex.promote_in_memory()
+     │                        verified_app_registry.json (confirmed)
+     │                        Next request: GOLD confidence (0.90)
      │
-     └─── NO  ──► FeedbackAgent 8-stage pipeline
-                  BusinessRulesRegistry.add_rule() → business_rules.json
-                  GlossaryManager.patch_from_failure() → glossary.json
-                  verified_app_registry.json (correction_text override)
-                  GoldTierIndex.deprioritize() (bias_weight -0.2)
-                  ──► Next request: correction prepended as absolute override
-                      Verified rules auto-applied before Quant dispatch
-                      Glossary gaps flagged and resolved
+     ├─── YES (simplified) ── Continue session
+     │
+     └─── NO ──► FeedbackAgent 8-stage pipeline
+                 BusinessRulesRegistry.add_rule() -> business_rules.json
+                 GlossaryManager.patch_from_failure() -> glossary.json
+                 verified_app_registry.json (correction_text override)
+                 GoldTierIndex.deprioritize() (bias_weight -0.2)
+     ▼
+Step 8: Knowledge Layer Update (always)
+     │   Every execution feeds back to knowledge layer regardless of intent type
+     └── Next request: corrections, rules, and glossary updates applied
 ```
 
 ---
@@ -495,6 +550,25 @@ HITL Gate: Y or N?
 - `BusinessRulesRegistry`: load/persist/apply rules, LLM-based pattern matching
 - `pydantic_schemas.py`: `BusinessRule`, `FeedbackInput`, `FeedbackOutput`, `SemanticFailureLog`
 - `HITLAuditLoop`: integrated FeedbackAgent via `_run_feedback_agent()`
-- Orchestrator: `BusinessRulesRegistry` applied pre-Quant in every WORKFLOW_B execution
+- Orchestrator: `BusinessRulesRegistry` applied pre-agent in every WORKFLOW_B execution
 - Dynamic glossary injection: keyword scan (`PFE`, `KI`, `TWA`, `AALBAU`) + `query_catalog.json` SQL blueprints
-- Startup optimisation: KnowledgeAgent ingestion disabled by default (`ingestion_config.json`), disk-based artifact loading for instant startup
+- Startup optimisation: KnowledgeAgent ingestion disabled by default, disk-based artifact loading
+
+### Phase 4 — Unified Knowledge Pipeline & Intent Classification
+- **Removed**: WORKFLOW_A / WORKFLOW_B binary dispatch
+- **Added**: `NexusAgent.classify_intent()` — 5-type intent taxonomy replacing binary classification
+  - Always consults glossary.json, semantic_knowledge_index.json, cross_campaign_patterns.json
+  - Returns `IntentClassification` with confidence, campaign identification, and knowledge sources used
+- **Added**: `NexusAgent.answer_general_question()` — direct knowledge-base response without SQL
+- **Added**: `NexusAgent._get_glossary_summary()`, `_get_known_campaign_codes()`, `_get_cross_campaign_patterns_summary()` — knowledge layer helpers called on every request
+- **Added**: `route_by_intent()` in orchestrator — unified dispatcher replacing `if WORKFLOW_A / elif WORKFLOW_B` switch
+  - BusinessRulesRegistry always consulted when campaign context exists
+  - Knowledge context assembled for every request type
+  - 5 routing branches: sizing_request, brief_generation, brief_qa, campaign_execution, general_question
+- **Updated**: HITL now fires for every execution (not just named campaigns)
+  - Full HITL: spec + log available (campaign sizing, campaign execution)
+  - Simplified Y/N: ad-hoc sizing, brief-only, general questions
+- **Fixed**: `UniversalJSONSpec.campaign_tier` Literal now includes `"SILVER"` (was `"GOLD"`, `"BRONZE"` only)
+- **Added**: `IntentClassification` Pydantic schema to `pydantic_schemas.py`
+- **Updated**: `ThoughtDisplay.intent_classified()` handles 5 intent types and displays confidence + knowledge sources
+- **Preserved**: All existing agent logic, HITL YES/NO paths, knowledge base structure, BusinessRulesRegistry integration, GlossaryCurator, ExecutionObserver, ThoughtDisplay warm messages

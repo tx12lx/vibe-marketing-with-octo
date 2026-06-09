@@ -51,7 +51,7 @@ from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from briefing_agent import BriefingAgent  # noqa: E402
 from feedback_agent import FeedbackAgent  # noqa: E402
-from pydantic_schemas import BriefingOutput, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
+from pydantic_schemas import BriefingOutput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
@@ -520,6 +520,167 @@ def route(
 
 
 # ---------------------------------------------------------------------------
+# Unified intent-based router — replaces WORKFLOW_A / WORKFLOW_B dispatch
+# ---------------------------------------------------------------------------
+
+def route_by_intent(
+    nexus: NexusAgent,
+    quant: QuantAgent,
+    briefing: BriefingAgent,
+    intent: IntentClassification,
+    query: str,
+    gold_index: "GoldTierIndex",
+    schema_snapshot: dict,
+    rules_registry: Optional[BusinessRulesRegistry] = None,
+) -> tuple[Optional[UniversalJSONSpec], Optional[QuantAuditLog], Optional[BriefingOutput]]:
+    """Unified intent-based pipeline dispatcher.
+
+    Every request goes through this function regardless of whether a named
+    campaign is identified. Steps executed for every call:
+
+      Step 4: Knowledge context assembled from GoldTierIndex + campaign brief.
+      Step 3: BusinessRulesRegistry consulted whenever campaign context exists.
+      Step 5: Correct agents activated based on intent type.
+
+    Intent routing:
+      sizing_request    -> QuantAgent (with or without campaign context)
+      brief_generation  -> BriefingAgent (BRONZE spec built from NL if no campaign)
+      brief_qa          -> BriefingAgent (same path as brief_generation)
+      campaign_execution-> QuantAgent + BriefingAgent
+      general_question  -> NexusAgent answers directly from knowledge base
+    """
+    it = intent.intent_type
+
+    # Step 4: Assemble knowledge context when campaign is identified
+    spec: Optional[UniversalJSONSpec] = None
+    if intent.campaign_identified and intent.campaign_code:
+        ThoughtDisplay.progress("Looking up your campaign in the knowledge base...")
+        brief = nexus._find_brief_for_campaign(intent.campaign_code)
+        if brief:
+            ThoughtDisplay.progress("Found it! Preparing your targeting blueprint...")
+            spec = nexus.build_universal_spec(brief, gold_index, schema_snapshot)
+            if spec is not None and spec.discrepancy_flags:
+                ThoughtDisplay.discrepancy_check(len(spec.discrepancy_flags), spec.discrepancy_flags)
+                _print_discrepancy_audit(spec)
+        else:
+            ThoughtDisplay.progress("Couldn't locate that campaign. Switching to custom audience mode...")
+
+    # Step 3: BusinessRulesRegistry — always consulted when campaign context is available
+    if spec is not None and rules_registry is not None:
+        applicable_rules = rules_registry.get_rules_for_execution(
+            camp_id=spec.campaign_code,
+            medium=spec.medium,
+            cadence=spec.cadence,
+            campaign_purpose=(spec.brief_agent_inputs or {}).get("campaign_purpose", ""),
+            spec=spec,
+        )
+        if applicable_rules:
+            ThoughtDisplay.show_rules_being_applied(
+                rules_registry.get_display_summary(applicable_rules)
+            )
+            spec = rules_registry.apply_rules_to_spec(spec, applicable_rules)
+
+    # Step 5: Agent activation based on intent type
+    if it == "sizing_request":
+        if spec is not None:
+            result = quant.audit_from_spec(spec)
+            if isinstance(result, NexusErrorPayload):
+                result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
+            if isinstance(result, QuantAuditLog):
+                return spec, result, None
+            ThoughtDisplay.error(
+                "I was unable to complete the audience sizing request. "
+                "The system attempted a correction but could not reconcile the targeting rules."
+            )
+            return None, None, None
+        else:
+            request = nexus.build_sizing_request_from_nl(query)
+            if request is None:
+                return None, None, None
+            result = quant.direct_count(request)
+            if isinstance(result, QuantAuditLog):
+                return None, result, None
+            ThoughtDisplay.translate_nexus_error(result.error_summary)
+            return None, None, None
+
+    elif it in ("brief_generation", "brief_qa"):
+        if spec is None:
+            ThoughtDisplay.progress("No campaign context found. Building brief from your request...")
+            request = nexus.build_sizing_request_from_nl(query)
+            if request is None:
+                return None, None, None
+            try:
+                spec = UniversalJSONSpec(
+                    campaign_name=request.campaign_name,
+                    campaign_code=request.campaign_code,
+                    campaign_sub_code=request.campaign_sub_code,
+                    cadence=request.cadence,
+                    medium=request.medium,
+                    campaign_tier="BRONZE",
+                    knowledge_source="nl_only",
+                    target_population=request.target_population,
+                    filters=request.filters,
+                    exclusion_layers=request.exclusion_layers,
+                    optimization_context=request.optimization_context,
+                    bq_project=request.bq_project,
+                    bq_dataset=request.bq_dataset,
+                    brief_agent_inputs={"raw_prompt": query},
+                )
+            except Exception:
+                return None, None, None
+        briefing.subscribe(spec)
+        brief_output: BriefingOutput = briefing.execute()
+        return spec, None, brief_output
+
+    elif it == "campaign_execution":
+        if spec is None:
+            ThoughtDisplay.progress("No campaign context found. Switching to custom audience mode...")
+            request = nexus.build_sizing_request_from_nl(query)
+            if request is None:
+                return None, None, None
+            result = quant.direct_count(request)
+            if isinstance(result, QuantAuditLog):
+                return None, result, None
+            ThoughtDisplay.translate_nexus_error(result.error_summary)
+            return None, None, None
+
+        result = quant.audit_from_spec(spec)
+        if isinstance(result, NexusErrorPayload):
+            result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
+        if not isinstance(result, QuantAuditLog):
+            ThoughtDisplay.error(
+                "I was unable to complete the audience sizing request. "
+                "The system attempted a correction but could not reconcile the targeting rules."
+            )
+            return None, None, None
+
+        briefing.subscribe(spec)
+        brief_output = briefing.execute()
+        return spec, result, brief_output
+
+    elif it == "general_question":
+        answer = nexus.answer_general_question(query)
+        if answer:
+            sep = "=" * 66
+            thin = "-" * 44
+            print()
+            print(sep)
+            print("  VIBE OCTO — Knowledge Response")
+            print(sep)
+            print()
+            for line in answer.splitlines():
+                print(f"  {line}")
+            print()
+            print("  " + thin)
+            print(sep)
+        return None, None, None
+
+    else:
+        print(f"\n[ERROR]: Unrecognised intent type '{it}'")
+        return None, None, None
+
+
+# ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
 
@@ -610,18 +771,22 @@ def _run_console(
                 print("  No query available yet. Run a campaign sizing first.\n")
             continue
 
+        # Step 1: Glossary keyword injection (always runs; enriches session context)
         ctx = _build_dynamic_context(query)
         if ctx:
             nexus.set_session_context(ctx)
             quant.set_session_context(ctx)
 
-        workflow, payload = nexus.classify_and_route(query)
-        spec, log, brief_output = route(
+        # Step 2: Intent classification — always consults knowledge layer
+        intent = nexus.classify_intent(query)
+
+        # Steps 3-5: Unified knowledge-grounded pipeline
+        spec, log, brief_output = route_by_intent(
             nexus,
             quant,
             briefing,
-            workflow,
-            payload if payload is not None else {"query": query},
+            intent,
+            query,
             gold_index,
             schema_snapshot,
             rules_registry,
@@ -632,13 +797,21 @@ def _run_console(
         if brief_output:
             _print_brief(brief_output)
 
-        # Pillar 5: HITL gate — only fires on WORKFLOW_B with a successful audit result.
-        # YES continues the session; NO exits after writing the override to the registry.
+        # Step 7: HITL — always triggered for any execution that produced output.
+        # Full HITL (spec + log) fires for campaign sizing and execution.
+        # Simplified HITL fires for ad-hoc sizing, brief-only, and general questions.
         if spec is not None and log is not None:
             ThoughtDisplay.hitl_gate(spec.campaign_name, log.final_count, spec.campaign_tier)
             should_continue = hitl.prompt(spec, log, brief_output)
             if not should_continue:
                 break
+        elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
+            response = input("\n  Was everything correct? (Y/N): ").strip().upper()
+            if response != "Y":
+                print(
+                    "\n  Thank you for the feedback. For detailed correction tracking,\n"
+                    "  please run a full campaign execution.\n"
+                )
 
         print()
 

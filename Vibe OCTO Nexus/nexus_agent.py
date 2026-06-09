@@ -45,6 +45,7 @@ load_dotenv(_NEXUS_DIR / ".env")
 from pydantic_schemas import (
     AdHocSizingRequest,
     AudienceSizingRequest,
+    IntentClassification,
     NexusErrorPayload,
     QuantAuditLog,
     UniversalJSONSpec,
@@ -306,6 +307,51 @@ or:
 }}"""
 
 
+_INTENT_CLASSIFY_V2_PROMPT = """\
+A consultant submitted the following request to a Canadian telecom marketing AI:
+  "{query}"
+
+Knowledge context loaded:
+  Known glossary terms: {glossary_summary}
+  Known campaign codes: {campaign_codes}
+
+Classify this request into exactly one intent type:
+
+  "sizing_request"     -- User wants an audience count or headcount.
+                         May reference a named campaign or a generic audience.
+
+  "brief_generation"   -- User wants to create or generate a new campaign brief.
+
+  "brief_qa"           -- User wants to review, question, or validate an
+                         existing campaign brief.
+
+  "campaign_execution" -- User wants a full campaign run: audience sizing,
+                         campaign brief, and audit together. Requests that use
+                         action verbs (run, execute, size, pull the playbook)
+                         targeting a named campaign fall here.
+
+  "general_question"   -- User has a question about campaigns, data, or
+                         strategy that does not require SQL execution or
+                         brief generation.
+
+Priority rules:
+  1. Named campaign code + execution verb (run, execute, size, pull) -> "campaign_execution".
+  2. Named campaign code + count/size question -> "sizing_request".
+  3. Count or how-many question without named campaign -> "sizing_request".
+  4. Question about what campaigns exist or how something works -> "general_question".
+
+Return exactly this JSON (no markdown, no explanation):
+{{
+  "intent_type": "<one of the 5 types above>",
+  "confidence": <0.0 to 1.0>,
+  "campaign_identified": <true or false>,
+  "campaign_code": "<campaign code if identified, else null>",
+  "knowledge_sources_consulted": ["glossary", "campaign_index"],
+  "business_rules_applied": [],
+  "reasoning": "<one sentence explaining the classification>"
+}}"""
+
+
 _DEPLOYMENT_ANALYSIS_PROMPT = """You are analyzing {n} deployment record(s) retrieved from the master Data Brief registry
 (`bq_plan_camp_deploy_mdc`) for the AAL Monthly Email portfolio initiative. Each row is the
 direct functional business requirement for a distinct list pull execution of this campaign.
@@ -503,34 +549,94 @@ class NexusAgent:
             print(f"  {request.optimization_context}\n")
         return request
 
-    def classify_and_route(self, query: str) -> tuple[str, "dict | None"]:
-        """Classify user intent and return (workflow, payload).
+    def classify_intent(self, query: str) -> IntentClassification:
+        """Classify user intent by consulting the knowledge layer.
 
-        Returns ("WORKFLOW_A", None) for ad-hoc exploratory queries.
-        Returns ("WORKFLOW_B", brief_dict) for named campaign execution requests,
-        or falls back to ("WORKFLOW_A", None) if no matching campaign is located.
+        Always loads a compact glossary summary and known campaign codes before
+        calling the LLM so classification is grounded in actual knowledge assets.
+        Returns an IntentClassification with 5 possible intent types, confidence,
+        campaign identification, and which knowledge sources were consulted.
         """
+        glossary_summary = self._get_glossary_summary()
+        campaign_codes = self._get_known_campaign_codes()
+        sources_consulted = ["glossary", "campaign_index"]
+        if self._taxonomy.get("known_targeting_patterns"):
+            sources_consulted.append("gold_patterns")
+
+        prompt = _INTENT_CLASSIFY_V2_PROMPT.format(
+            query=query,
+            glossary_summary=glossary_summary,
+            campaign_codes=campaign_codes,
+        )
         try:
-            raw = self._call_simple(_INTENT_CLASSIFY_PROMPT.format(query=query))
+            raw = self._call_simple(prompt)
             data = self._extract_json(raw)
+            if not data.get("knowledge_sources_consulted"):
+                data["knowledge_sources_consulted"] = sources_consulted
+            classification = IntentClassification(**data)
         except Exception:
-            return "WORKFLOW_A", None
+            classification = IntentClassification(
+                intent_type="sizing_request",
+                confidence=0.5,
+                campaign_identified=False,
+                knowledge_sources_consulted=sources_consulted,
+                reasoning="Classification failed; defaulting to sizing_request",
+            )
 
-        workflow = data.get("workflow", "WORKFLOW_A")
+        ThoughtDisplay.intent_classified(
+            classification.intent_type,
+            query,
+            classification.campaign_code,
+            confidence=classification.confidence,
+            knowledge_sources=classification.knowledge_sources_consulted,
+        )
+        return classification
 
-        if workflow == "WORKFLOW_B":
-            campaign_hint = (data.get("campaign_hint") or "").strip()
-            ThoughtDisplay.intent_classified("WORKFLOW_B", query, campaign_hint)
-            ThoughtDisplay.progress("Looking up your campaign in the knowledge base...")
-            brief = self._find_brief_for_campaign(campaign_hint)
+    def classify_and_route(self, query: str) -> tuple[str, "dict | None"]:
+        """Backward-compatible wrapper. Routes via classify_intent() internally.
+
+        Returns ("WORKFLOW_A", None) or ("WORKFLOW_B", brief_dict).
+        New code should call classify_intent() directly.
+        """
+        intent = self.classify_intent(query)
+
+        execution_intents = {"campaign_execution", "brief_generation", "brief_qa"}
+        if intent.intent_type in execution_intents and intent.campaign_identified and intent.campaign_code:
+            brief = self._find_brief_for_campaign(intent.campaign_code)
             if brief:
                 ThoughtDisplay.progress("Found it! Preparing your targeting blueprint...")
                 return "WORKFLOW_B", brief
             ThoughtDisplay.progress("Couldn't locate that campaign. Switching to custom audience mode...")
-            return "WORKFLOW_A", None
 
-        ThoughtDisplay.intent_classified("WORKFLOW_A", query)
         return "WORKFLOW_A", None
+
+    def answer_general_question(self, query: str) -> str:
+        """Answer a knowledge-layer question without triggering SQL or brief generation.
+
+        Loads cross-campaign patterns and glossary context, then calls the LLM
+        to provide a direct, business-focused answer in 2-4 sentences.
+        """
+        glossary_summary = self._get_glossary_summary()
+        campaign_codes = self._get_known_campaign_codes()
+        patterns_summary = self._get_cross_campaign_patterns_summary()
+
+        prompt = (
+            f'A consultant asked: "{query}"\n\n'
+            "Answer this question using the knowledge context below. "
+            "Be concise and business-focused (2-4 sentences). "
+            "Do not mention SQL, database columns, or technical identifiers.\n\n"
+            "KNOWLEDGE CONTEXT:\n"
+            f"  Known glossary terms: {glossary_summary}\n"
+            f"  Known campaign codes: {campaign_codes}\n"
+            f"  Cross-campaign patterns: {patterns_summary}\n"
+        )
+        try:
+            return self._call_simple(prompt)
+        except Exception:
+            return (
+                "I don't have enough context to answer that question directly. "
+                "Please try rephrasing or contact the OCTO team."
+            )
 
     def build_universal_spec(
         self,
@@ -682,6 +788,50 @@ class NexusAgent:
 
         _print_terminal_error()
         return None
+
+    # ------------------------------------------------------------------
+    # Knowledge layer helpers — used by classify_intent
+    # ------------------------------------------------------------------
+
+    def _get_glossary_summary(self) -> str:
+        """Return a compact list of known glossary terms for classification context."""
+        try:
+            data = json.loads((_ROOT_DIR / "glossary.json").read_text(encoding="utf-8"))
+            acronyms = list(data.get("acronyms", {}).keys())
+            campaigns_in_glossary = list(data.get("campaigns", {}).keys())
+            user_terms = list(data.get("user_defined_terms", {}).keys())
+            all_terms = acronyms + campaigns_in_glossary + user_terms
+            return ", ".join(all_terms[:30]) if all_terms else "(none)"
+        except Exception:
+            return "(glossary unavailable)"
+
+    def _get_known_campaign_codes(self) -> str:
+        """Return known campaign codes from taxonomy and knowledge index."""
+        codes: list[str] = []
+        if self._taxonomy:
+            codes.extend(list(self._taxonomy.get("campaign_classifications", {}).keys())[:10])
+        try:
+            data = json.loads((_ROOT_DIR / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
+            for rec in data.get("gold_records", [])[:15]:
+                code = rec.get("camp_id", "")
+                if code and code not in codes:
+                    codes.append(code)
+        except Exception:
+            pass
+        return ", ".join(codes) if codes else "(none loaded)"
+
+    def _get_cross_campaign_patterns_summary(self) -> str:
+        """Return a compact summary of cross-campaign targeting patterns."""
+        try:
+            data = json.loads(
+                (_ROOT_DIR / "knowledge_base" / "artifacts" / "cross_campaign_patterns.json")
+                .read_text(encoding="utf-8")
+            )
+            patterns = data.get("insights", {}).get("targeting_patterns", [])
+            top = [p.get("pattern", "") for p in patterns[:8] if p.get("pattern")]
+            return ", ".join(top) if top else "(none)"
+        except Exception:
+            return "(patterns unavailable)"
 
     # ------------------------------------------------------------------
     # Deployment variance analysis — multi-deployment synthesis (Path 1)

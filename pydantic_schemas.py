@@ -103,7 +103,7 @@ class UniversalJSONSpec(BaseModel):
     medium: str
 
     # Tier and knowledge source provenance
-    campaign_tier: Literal["GOLD", "BRONZE"]
+    campaign_tier: Literal["GOLD", "SILVER", "BRONZE"]
     knowledge_source: Literal["brief_text", "bq_metadata", "nl_only"]
     gold_blueprint_id: Optional[str] = None  # "{camp_id}::{sub_camp_id}" if GOLD
 
@@ -151,6 +151,28 @@ class UniversalJSONSpec(BaseModel):
             bq_project=self.bq_project,
             bq_dataset=self.bq_dataset,
         )
+
+
+class IntentClassification(BaseModel):
+    """Intent classification emitted by NexusAgent.classify_intent().
+
+    Replaces the WORKFLOW_A / WORKFLOW_B binary with a five-type taxonomy
+    so every request can be routed through the unified knowledge pipeline.
+    """
+
+    intent_type: Literal[
+        "sizing_request",
+        "brief_generation",
+        "brief_qa",
+        "campaign_execution",
+        "general_question",
+    ]
+    confidence: float
+    campaign_identified: bool
+    campaign_code: Optional[str] = None
+    knowledge_sources_consulted: list[str] = []
+    business_rules_applied: list[str] = []
+    reasoning: str = ""
 
 
 class BriefingOutput(BaseModel):
