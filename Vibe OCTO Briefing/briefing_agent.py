@@ -24,11 +24,14 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from core.knowledge_context import KnowledgeContext
 
 _BRIEFING_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _BRIEFING_DIR.parent
@@ -159,10 +162,15 @@ class BriefingAgent(BaseAgent):
         self._spec: Optional[UniversalJSONSpec] = None
         self._runtime_schema: str = ""
         self._gold_index: Optional[GoldTierIndex] = None
+        self._knowledge_ctx: Optional["KnowledgeContext"] = None
 
     # ------------------------------------------------------------------
     # Injection points called by the orchestrator
     # ------------------------------------------------------------------
+
+    def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
+        """Bind the centralised KnowledgeContext built at startup."""
+        self._knowledge_ctx = ctx
 
     def set_gold_index(self, gold_index: GoldTierIndex) -> None:
         """Bind the in-memory GoldTierIndex for GOLD path record lookup."""
@@ -227,17 +235,39 @@ class BriefingAgent(BaseAgent):
                 "cache_control": {"type": "ephemeral"},
             }
         ]
-        user_content = [
-            {
+        # When KnowledgeContext is available, prepend all GOLD campaign briefs as
+        # context so the briefing agent can draw on similar campaigns as templates.
+        if self._knowledge_ctx is not None:
+            kb_block = {
+                "type": "text",
+                "text": (
+                    "VIBE OCTO BRIEF TEMPLATES (All GOLD campaigns for reference)\n\n"
+                    + self._knowledge_ctx.briefing_context
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }
+            campaign_block = {
                 "type": "text",
                 "text": gold_context,
                 "cache_control": {"type": "ephemeral"},
-            },
-            {
-                "type": "text",
-                "text": request_prompt,
-            },
-        ]
+            }
+            user_content = [
+                kb_block,
+                campaign_block,
+                {"type": "text", "text": request_prompt},
+            ]
+        else:
+            user_content = [
+                {
+                    "type": "text",
+                    "text": gold_context,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": request_prompt,
+                },
+            ]
 
         brief_markdown = self._call_with_caching(system_blocks, user_content)
         return self._assemble_output(spec, brief_markdown, confidence)

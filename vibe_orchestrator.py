@@ -53,6 +53,7 @@ from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
 from briefing_agent import BriefingAgent  # noqa: E402
 from feedback_agent import FeedbackAgent  # noqa: E402
+from core.knowledge_context import KnowledgeContext  # noqa: E402
 from pydantic_schemas import AdHocSizingRequest, BriefingOutput, BusinessRule, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
@@ -165,6 +166,7 @@ def _print_kb_status(
     gold_index: GoldTierIndex,
     snapshot: SchemaSnapshot,
     rule_count: int,
+    knowledge_ctx: Optional["KnowledgeContext"] = None,
 ) -> None:
     """Print the warm startup banner showing knowledge base readiness."""
     kb_meta: dict = {}
@@ -178,6 +180,7 @@ def _print_kb_status(
     generated_at = kb_meta.get("generated_at") or ""
     ts_display = generated_at[:16].replace("T", " ") + " UTC" if generated_at else "unknown"
     view_count = len({c.table_name for c in snapshot.columns})
+    ctx_campaigns = knowledge_ctx.campaign_count if knowledge_ctx is not None else gold
 
     sep = "=" * 66
     print()
@@ -190,6 +193,7 @@ def _print_kb_status(
     print(f"    [OK] {gold} GOLD tier blueprints")
     print(f"    [OK] {rule_count} verified business rules")
     print(f"    [OK] Adobe schema: {view_count} views ready")
+    print(f"    [OK] Full knowledge context: {ctx_campaigns} campaigns injected into all agents")
     print()
     print(f"  Knowledge base last refreshed: {ts_display}")
     print()
@@ -754,6 +758,25 @@ def route_by_intent(
             )
             spec = rules_registry.apply_rules_to_spec(spec, applicable_rules)
 
+    # Display which knowledge assets were consulted before any agent fires
+    _applied_rule_count = 0
+    if spec is not None and rules_registry is not None:
+        # Re-use already-computed applicable_rules count when available
+        try:
+            _applied_rule_count = len(applicable_rules)  # type: ignore[name-defined]
+        except NameError:
+            pass
+    _brief_req_count = 0
+    if spec is not None:
+        bai = spec.brief_agent_inputs or {}
+        _brief_req_count = len(bai.get("brief_requirements") or [])
+    ThoughtDisplay.show_knowledge_used(
+        gold_campaign=spec.campaign_name if spec is not None else None,
+        rules_applied=_applied_rule_count,
+        brief_requirements=_brief_req_count,
+        confidence=getattr(intent, "confidence_score", None),
+    )
+
     # Step 5: Agent activation based on intent type
     if it == "sizing_request":
         if spec is not None:
@@ -971,6 +994,7 @@ def _run_adhoc_feedback(
     log: Optional[QuantAuditLog],
     query: str,
     correction: str,
+    knowledge_ctx: Optional[KnowledgeContext] = None,
 ) -> None:
     """Invoke FeedbackAgent for ad-hoc sizing, brief-only, and general-question corrections.
 
@@ -1000,11 +1024,12 @@ def _run_adhoc_feedback(
             raw_input_prompt=query,
         )
         agent = FeedbackAgent()
+        if knowledge_ctx is not None:
+            agent.set_knowledge_context(knowledge_ctx)
         agent.subscribe(feedback_input)
         agent.execute()
     except Exception:
         # FeedbackAgent failures must never crash the console loop.
-        # Print a minimal confirmation so the user knows their feedback was captured.
         print("\n  Your feedback has been noted. I'll use it to guide future responses.\n")
 
 
@@ -1016,6 +1041,7 @@ def _collect_correction_and_feedback(
     spec: Optional[UniversalJSONSpec],
     log: Optional[QuantAuditLog],
     query: str,
+    knowledge_ctx: Optional[KnowledgeContext] = None,
 ) -> None:
     print(
         "\n  No problem! I'd love to understand what went wrong"
@@ -1026,7 +1052,7 @@ def _collect_correction_and_feedback(
     correction = input("  > ").strip()
     print("\n  Got it! Let me make sure I understand...\n")
     if correction:
-        _run_adhoc_feedback(spec, log, query, correction)
+        _run_adhoc_feedback(spec, log, query, correction, knowledge_ctx=knowledge_ctx)
 
 
 def _simplified_hitl(
@@ -1035,6 +1061,7 @@ def _simplified_hitl(
     brief_output: Optional[BriefingOutput],
     query: str,
     intent_type: str,
+    knowledge_ctx: Optional[KnowledgeContext] = None,
 ) -> None:
     """Numbered HITL menu for ad-hoc sizing, brief-only, and general questions."""
     audience_count = log.final_count if log is not None else None
@@ -1078,14 +1105,14 @@ def _simplified_hitl(
                     print("\n  Wonderful! Moving on.\n")
                     break
                 elif r2 == "3":
-                    _collect_correction_and_feedback(spec, log, query)
+                    _collect_correction_and_feedback(spec, log, query, knowledge_ctx=knowledge_ctx)
                     break
                 else:
                     print("  Please enter 1 or 3.")
             break
 
         elif response == "3":
-            _collect_correction_and_feedback(spec, log, query)
+            _collect_correction_and_feedback(spec, log, query, knowledge_ctx=knowledge_ctx)
             break
 
         else:
@@ -1107,6 +1134,7 @@ def _run_console(
     schema_snapshot: dict,
     hitl: HITLAuditLoop,
     rules_registry: Optional[BusinessRulesRegistry] = None,
+    knowledge_ctx: Optional[KnowledgeContext] = None,
 ) -> None:
     last_log: Optional[QuantAuditLog] = None
 
@@ -1163,12 +1191,16 @@ def _run_console(
                 should_continue = hitl.prompt(spec, log, brief_output, intent_type=intent.intent_type)
                 if rules_registry is not None:
                     rules_registry._load()
+                if knowledge_ctx is not None:
+                    knowledge_ctx.reload_rules()
                 if not should_continue:
                     break
             elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
-                _simplified_hitl(spec, log, brief_output, query, intent.intent_type)
+                _simplified_hitl(spec, log, brief_output, query, intent.intent_type, knowledge_ctx=knowledge_ctx)
                 if rules_registry is not None:
                     rules_registry._load()
+                if knowledge_ctx is not None:
+                    knowledge_ctx.reload_rules()
 
         except Exception as _exc:
             # Fix 4: Never exit the console loop due to an agent failure.
@@ -1213,11 +1245,24 @@ def main() -> None:
     quant: QuantAgent = _AGENT_REGISTRY["quant"]()
     briefing: BriefingAgent = _AGENT_REGISTRY["briefing"]()
 
+    # Build centralised KnowledgeContext (loads all 5 knowledge files once at startup).
+    # All agents share this single instance; large knowledge blobs are formatted once
+    # and pinned as ephemeral cached blocks on each Fuel iX / Claude API call.
+    knowledge_ctx = KnowledgeContext(
+        artifacts_dir=_ARTIFACTS_DIR,
+        root_dir=_ROOT,
+    )
+
     # Inject shared runtime context into all active agents
     quant.set_runtime_schema(schema_str)
     nexus.set_runtime_schema_snapshot(snapshot.to_dict())
     briefing.set_runtime_schema(schema_str)
     briefing.set_gold_index(gold_index)
+
+    # Inject KnowledgeContext into all four runtime agents
+    nexus.set_knowledge_context(knowledge_ctx)
+    quant.set_knowledge_context(knowledge_ctx)
+    briefing.set_knowledge_context(knowledge_ctx)
 
     # Pillar 5: HITLAuditLoop — Human-in-the-Loop gate and feedback flywheel.
     # Shares the same GoldTierIndex and GlossaryManager instances as the rest of
@@ -1228,15 +1273,16 @@ def main() -> None:
         failure_log_path=_ROOT / "semantic_failure_log.json",
         registry_path=_ROOT / "verified_app_registry.json",
     )
+    hitl.set_knowledge_context(knowledge_ctx)
 
     # Pillar 6: BusinessRulesRegistry — load verified business rules extracted by
     # FeedbackAgent after HITL NO responses. Applied automatically before Quant.
     rules_registry = BusinessRulesRegistry(_BUSINESS_RULES_PATH)
     rule_count = len(rules_registry._rules)
 
-    _print_kb_status(gold_index, snapshot, rule_count)
+    _print_kb_status(gold_index, snapshot, rule_count, knowledge_ctx)
 
-    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl, rules_registry)
+    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl, rules_registry, knowledge_ctx)
 
 
 if __name__ == "__main__":

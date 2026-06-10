@@ -26,10 +26,13 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import requests
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from core.knowledge_context import KnowledgeContext
 
 _FEEDBACK_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _FEEDBACK_DIR.parent
@@ -164,10 +167,15 @@ class FeedbackAgent(BaseAgent):
         self._model: str = os.getenv("FUELIX_MODEL", "claude-sonnet-4")
         self._input: Optional[FeedbackInput] = None
         self._registry = BusinessRulesRegistry(_RULES_PATH)
+        self._knowledge_ctx: Optional["KnowledgeContext"] = None
 
     # ------------------------------------------------------------------
     # Injection points
     # ------------------------------------------------------------------
+
+    def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
+        """Bind the centralised KnowledgeContext built at startup."""
+        self._knowledge_ctx = ctx
 
     def set_session_context(self, context: str) -> None:
         pass
@@ -301,6 +309,19 @@ class FeedbackAgent(BaseAgent):
             return None
 
     def _build_cached_context(self, inp: FeedbackInput) -> str:
+        """Build the stable knowledge context cached with each correction call.
+
+        When KnowledgeContext is available (injected at startup), uses its
+        pre-built feedback_context string directly.  Falls back to reading the
+        individual files for backward compatibility.
+        """
+        if self._knowledge_ctx is not None:
+            return (
+                "=== KNOWLEDGE BASE CONTEXT ===\n\n"
+                + self._knowledge_ctx.feedback_context
+            )
+
+        # Fallback: build from individual files (no KnowledgeContext available)
         parts: list[str] = ["=== KNOWLEDGE BASE CONTEXT ===\n\n"]
 
         # Glossary
@@ -310,7 +331,7 @@ class FeedbackAgent(BaseAgent):
             parts.append(json.dumps(glossary, indent=2, ensure_ascii=False)[:4000])
             parts.append("\n\n")
 
-        # GOLD tier insights
+        # GOLD tier insights + relevant campaign summaries
         knowledge = self._load_json_safe(_KNOWLEDGE_INDEX_PATH)
         if knowledge:
             gold_insights = knowledge.get("gold_insights", {})
@@ -319,7 +340,6 @@ class FeedbackAgent(BaseAgent):
                 parts.append(json.dumps(gold_insights, indent=2, ensure_ascii=False)[:3000])
                 parts.append("\n\n")
 
-            # ACC summaries for this campaign and same-medium campaigns
             campaigns = knowledge.get("campaigns", [])
             relevant = [
                 c for c in campaigns
@@ -332,8 +352,9 @@ class FeedbackAgent(BaseAgent):
             if relevant:
                 parts.append("--- ACC Summaries for Relevant Campaigns ---\n")
                 for camp in relevant:
-                    ts = (camp.get("targeting_summary") or "")[:400]
-                    ss = (camp.get("segment_summary") or "")[:200]
+                    acc = camp.get("acc_summaries") or {}
+                    ts = (acc.get("targeting_summary") or "")[:400]
+                    ss = (acc.get("segment_summary") or "")[:200]
                     parts.append(
                         f"Campaign: {camp.get('campaign_name')}\n"
                         f"  Targeting: {ts}\n"
@@ -352,20 +373,21 @@ class FeedbackAgent(BaseAgent):
                 )
             parts.append("\n")
 
-        # Adobe schema — views only (for SQL rule construction)
+        # Adobe schema (compact: key table names only)
         adobe = self._load_json_safe(_ADOBE_SCHEMA_PATH)
         if adobe:
-            views = adobe.get("views", [])
-            if views:
-                parts.append("--- Adobe Schema Views (for SQL reference) ---\n")
-                for view in views[:10]:
-                    view_name = view.get("view_name") or view.get("table_name", "")
-                    cols = [
-                        c.get("column_name", "")
-                        for c in view.get("columns", [])[:30]
-                        if c.get("column_name")
-                    ]
-                    parts.append(f"  {view_name}: {', '.join(cols)}\n")
+            views = adobe.get("views", {})
+            if isinstance(views, dict) and views:
+                parts.append("--- Adobe Schema Views (key tables) ---\n")
+                key_tables = [
+                    k for k in views
+                    if any(t in k for t in ("mob_mobility", "customer_profl", "model_score"))
+                ]
+                for name in key_tables[:6]:
+                    view_data = views[name]
+                    cols = [c.get("name", "") for c in (view_data.get("columns") or [])[:20]]
+                    if cols:
+                        parts.append(f"  {name}: {', '.join(cols)}\n")
                 parts.append("\n")
 
         return "".join(parts)

@@ -43,6 +43,9 @@ from pydantic_schemas import (
 )
 from core.base_agent import BaseAgent
 from core.thought_display import ThoughtDisplay  # noqa: E402
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from core.knowledge_context import KnowledgeContext
 
 _FUELIX_BASE = "https://api.fuelix.ai"
 _DEFAULT_MODEL = "claude-sonnet-4"
@@ -703,6 +706,11 @@ class QuantAgent(BaseAgent):
         self._last_sql: str = ""
         self._session_context: str = ""
         self._runtime_schema: str = ""
+        self._knowledge_ctx: Optional["KnowledgeContext"] = None
+
+    def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
+        """Bind the centralised KnowledgeContext built at startup."""
+        self._knowledge_ctx = ctx
 
     # ------------------------------------------------------------------
     # BaseAgent contract
@@ -913,11 +921,11 @@ class QuantAgent(BaseAgent):
             bq_dataset=request.bq_dataset,
             schema_context=schema[:6000] if schema else "(not available)",
         )
-        # Fix 1: Append FFH column override when the request targets the Home Solutions table.
+        # Append FFH column override when the request targets the Home Solutions table.
         if _is_ffh_request(request):
             ffh_project = request.bq_project or self._default_project
             prompt = prompt + "\n" + _FFH_WATERFALL_OVERRIDE.format(bq_project=ffh_project)
-        # Fix 2: Apply optimization_context corrections when present.
+        # Apply optimization_context corrections when present.
         opt_ctx = (request.optimization_context or "").strip()
         if opt_ctx:
             prompt = (
@@ -925,30 +933,7 @@ class QuantAgent(BaseAgent):
                 + f"\n\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
                 f" Apply these substitutions exactly as stated:\n{opt_ctx}\n"
             )
-        system = (
-            _QUANT_SYSTEM + "\n\n" + self._session_context
-            if self._session_context
-            else _QUANT_SYSTEM
-        )
-        resp = requests.post(
-            f"{_FUELIX_BASE}/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 4096,
-                "temperature": 0,
-            },
-            timeout=180,
-        )
-        resp.raise_for_status()
-        sql = _clean_sql(resp.json()["choices"][0]["message"]["content"].strip())
+        sql = self._call_sql(prompt)
         self._last_sql = sql
         if os.getenv("QUANT_DEBUG_SQL"):
             print(f"[Quant SQL — waterfall]\n{sql}\n", file=sys.stderr)
@@ -957,14 +942,13 @@ class QuantAgent(BaseAgent):
     def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
         opt_ctx = (request.optimization_context or "").strip()
 
-        # Fix 1: Inject FFH column override when the request targets the Home Solutions table.
-        # This supersedes the mobility-centric waterfall template in the prompt above.
+        # Inject FFH column override when the request targets the Home Solutions table.
         override_parts: list[str] = []
         if _is_ffh_request(request):
             ffh_project = request.bq_project or self._default_project
             override_parts.append(_FFH_WATERFALL_OVERRIDE.format(bq_project=ffh_project))
 
-        # Fix 2: Apply accumulated corrections on every retry.
+        # Apply accumulated corrections on every retry.
         if opt_ctx:
             override_parts.append(
                 f"\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
@@ -984,34 +968,75 @@ class QuantAgent(BaseAgent):
             schema_context=schema[:6000] if schema else "(not available)",
             optimization_context_section=optimization_context_section,
         )
+        sql = self._call_sql(prompt)
+        self._last_sql = sql
+        if os.getenv("QUANT_DEBUG_SQL"):
+            print(f"[Quant SQL — ad-hoc]\n{sql}\n", file=sys.stderr)
+        return sql
+
+    def _call_sql(self, prompt: str) -> str:
+        """Call Fuel iX for SQL generation.
+
+        When a KnowledgeContext is bound, pins it as an ephemeral cached block so
+        the GOLD campaign patterns and business rules are cheap to reuse across calls.
+        Falls back to a plain uncached call if no context is available.
+        """
         system = (
             _QUANT_SYSTEM + "\n\n" + self._session_context
             if self._session_context
             else _QUANT_SYSTEM
         )
-        resp = requests.post(
-            f"{_FUELIX_BASE}/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 4096,
-                "temperature": 0,
-            },
-            timeout=180,
-        )
+
+        if self._knowledge_ctx is not None:
+            cached_block = {
+                "type": "text",
+                "text": (
+                    "VIBE OCTO PROVEN SQL PATTERNS\n"
+                    "(Column patterns and business rules from all GOLD campaigns)\n\n"
+                    + self._knowledge_ctx.quant_context
+                ),
+                "cache_control": {"type": "ephemeral"},
+            }
+            query_block = {"type": "text", "text": prompt}
+            resp = requests.post(
+                f"{_FUELIX_BASE}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                    "anthropic-beta": "prompt-caching-2024-07-31",
+                },
+                json={
+                    "model": self._model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": [cached_block, query_block]},
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0,
+                },
+                timeout=180,
+            )
+        else:
+            resp = requests.post(
+                f"{_FUELIX_BASE}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self._model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0,
+                },
+                timeout=180,
+            )
+
         resp.raise_for_status()
-        sql = _clean_sql(resp.json()["choices"][0]["message"]["content"].strip())
-        self._last_sql = sql
-        if os.getenv("QUANT_DEBUG_SQL"):
-            print(f"[Quant SQL — ad-hoc]\n{sql}\n", file=sys.stderr)
-        return sql
+        return _clean_sql(resp.json()["choices"][0]["message"]["content"].strip())
 
     def _execute_query(self, sql: str, project: str) -> list[dict]:
         with warnings.catch_warnings():

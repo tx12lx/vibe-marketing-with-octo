@@ -68,6 +68,11 @@ class HITLAuditLoop:
         self._glossary_manager = glossary_manager
         self._failure_log_path = Path(failure_log_path)
         self._registry_path = Path(registry_path)
+        self._knowledge_ctx = None  # injected by orchestrator via set_knowledge_context()
+
+    def set_knowledge_context(self, ctx) -> None:
+        """Bind the centralised KnowledgeContext so FeedbackAgent gets it."""
+        self._knowledge_ctx = ctx
 
     def prompt(
         self,
@@ -315,6 +320,8 @@ class HITLAuditLoop:
             )
 
             agent = FeedbackAgent()
+            if self._knowledge_ctx is not None:
+                agent.set_knowledge_context(self._knowledge_ctx)
             agent.subscribe(feedback_input)
             agent.execute()
         except Exception:

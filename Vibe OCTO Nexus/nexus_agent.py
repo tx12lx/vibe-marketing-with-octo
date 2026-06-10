@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from knowledge_base.tier_index import GoldTierIndex
     from knowledge_base.ingester import GoldCampaignRecord
     from quant_agent import QuantAgent
+    from core.knowledge_context import KnowledgeContext
 
 _FUELIX_BASE = "https://api.fuelix.ai"
 _DEFAULT_MODEL = "claude-sonnet-4"
@@ -498,6 +499,11 @@ class NexusAgent:
         self.briefs: list[dict] = []
         self._session_context: str = ""
         self._runtime_schema_snapshot: dict = {}
+        self._knowledge_ctx: Optional["KnowledgeContext"] = None
+
+    def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
+        """Bind the centralised KnowledgeContext built at startup."""
+        self._knowledge_ctx = ctx
 
     def set_session_context(self, context: str) -> None:
         """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
@@ -806,14 +812,27 @@ class NexusAgent:
         codes: list[str] = []
         if self._taxonomy:
             codes.extend(list(self._taxonomy.get("campaign_classifications", {}).keys())[:10])
-        try:
-            data = json.loads((_ROOT_DIR / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
-            for rec in data.get("gold_records", [])[:15]:
-                code = rec.get("camp_id", "")
-                if code and code not in codes:
-                    codes.append(code)
-        except Exception:
-            pass
+        # Use KnowledgeContext if available (avoids re-reading the file)
+        if self._knowledge_ctx is not None:
+            # KnowledgeContext already has all campaigns loaded
+            try:
+                from core.knowledge_context import KnowledgeContext  # noqa: F401
+                for camp in self._knowledge_ctx._campaigns[:20]:
+                    code = camp.get("camp_id", "")
+                    if code and code not in codes:
+                        codes.append(code)
+            except Exception:
+                pass
+        else:
+            try:
+                data = json.loads((_ROOT_DIR / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
+                # Key is "campaigns" (not "gold_records")
+                for rec in data.get("campaigns", [])[:20]:
+                    code = rec.get("camp_id", "")
+                    if code and code not in codes:
+                        codes.append(code)
+            except Exception:
+                pass
         return ", ".join(codes) if codes else "(none loaded)"
 
     def _get_cross_campaign_patterns_summary(self) -> str:
@@ -1250,20 +1269,33 @@ class NexusAgent:
         return resp.json()["choices"][0]["message"]["content"].strip()
 
     def _call_with_cached_taxonomy(self, user_query: str) -> str:
-        """Call Fuel iX with the taxonomy matrix pinned as an ephemeral cached block.
+        """Call Fuel iX with the full knowledge context pinned as an ephemeral cached block.
+
+        When a KnowledgeContext is available (startup injection via set_knowledge_context),
+        uses it as the cached block -- it contains all 35 GOLD campaigns, business rules,
+        glossary, and patterns.  Falls back to the sparse taxonomy for backward compat.
 
         The first content block carries cache_control: ephemeral per the Anthropic
         prompt-caching spec (beta header activates it). On a cache hit the input
-        tokens for the taxonomy block are charged at ~10% of normal cost.
-        If the endpoint does not support caching, the call succeeds without it.
+        tokens for the knowledge block are charged at ~10% of normal cost.
         """
+        if self._knowledge_ctx is not None:
+            cached_text = (
+                "VIBE OCTO COMPLETE KNOWLEDGE BASE\n"
+                "(Authoritative reference -- all 35 GOLD campaigns, business rules, "
+                "glossary, and schema)\n\n"
+                + self._knowledge_ctx.nexus_context
+            )
+        else:
+            cached_text = (
+                "STRATEGIC TAXONOMY MATRIX\n"
+                "(Authoritative reference -- cross-check all requests against this context first)\n\n"
+                + json.dumps(self._taxonomy, indent=2, ensure_ascii=False)
+            )
+
         taxonomy_block = {
             "type": "text",
-            "text": (
-                "STRATEGIC TAXONOMY MATRIX\n"
-                "(Authoritative reference — cross-check all requests against this context first)\n\n"
-                + json.dumps(self._taxonomy, indent=2, ensure_ascii=False)
-            ),
+            "text": cached_text,
             "cache_control": {"type": "ephemeral"},
         }
         query_block = {"type": "text", "text": user_query}
