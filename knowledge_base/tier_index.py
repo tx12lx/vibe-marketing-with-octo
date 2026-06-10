@@ -12,7 +12,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .ingester import GoldCampaignRecord
+
+@dataclass
+class GoldCampaignRecord:
+    camp_id: str
+    sub_camp_id: str
+    campaign_name: str
+    targeting_summary: str
+    segment_summary: str
+    brief_text: str
+    cadence: str
+    medium: str
+    campaign_purpose: str
+    primary_products: str
+    source: str               # "bq_metadata" or "verified_registry"
+    bias_weight: float = 1.0
+    ingested_at: str = ""
 
 _log = logging.getLogger(__name__)
 

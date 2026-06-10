@@ -35,7 +35,6 @@ _CHANNEL_COLUMNS = {
     "email": "em_dnc",
     "sms":   "sms_dnc",
     "calls": "ob_dnc",
-    "call":  "ob_dnc",
 }
 
 

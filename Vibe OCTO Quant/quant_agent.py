@@ -1071,14 +1071,6 @@ def _mask_pii(rows: list[dict]) -> list[dict]:
     return out
 
 
-def _print_sql_block(sql: str) -> None:
-    sep = "-" * 40
-    print(sep)
-    print("[QUANT] -> GENERATING PRODUCTION SQL")
-    print(sep)
-    print(sql)
-    print()
-
 
 def _log_waterfall(waterfall: list[WaterfallLayer]) -> None:
     if not waterfall:

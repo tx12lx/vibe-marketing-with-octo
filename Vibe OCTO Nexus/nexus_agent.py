@@ -257,57 +257,6 @@ If no valid correction can be determined, return exactly: {{"correctable": false
 
 Return the corrected JSON only — no markdown, no explanation."""
 
-_INTENT_CLASSIFY_PROMPT = """\
-A consultant submitted the following request to a Canadian telecom marketing AI:
-  "{query}"
-
-Classify this into exactly one of two workflows using the priority rules below.
-Evaluate each priority in order and stop at the first match.
-
-PRIORITY 1 — CAMPAIGN CODE OVERRIDE (absolute priority — evaluate before all other rules):
-  If the request explicitly names a corporate campaign code or sub-campaign code
-  — including 'AAL', 'AALBAU', or any other recognized campaign identifier —
-  classify immediately as WORKFLOW_B. This overrides ALL other rules without exception,
-  including interrogative phrasing such as "What's the size of...", "How many...", or
-  "Count...". A named campaign code is always a Structured Campaign Execution Request,
-  regardless of how the question is framed.
-  Examples: "What's the size of the AALBAU campaign?",
-            "How many subscribers are in the AAL monthly email?",
-            "Show me the AAL audience count",
-            "Pull the AALBAU playbook"
-
-PRIORITY 2 — WORKFLOW_A: Ad-Hoc Exploratory Request (apply only if Priority 1 did not match):
-  If the request is phrased as a metric or probing question with NO named campaign code
-  — i.e. it opens with or is semantically equivalent to "How many...", "Count...",
-  "What is the size of...", "Give me a count of...", or any other interrogative asking
-  for a number against a generic audience description — classify as WORKFLOW_A.
-  Do NOT trigger a campaign playbook lookup for these.
-  Examples: "How many customers in AB or BC?",
-            "Count postpaid subscribers with SHS eligible",
-            "How many Koodo prepaid customers are MTM?",
-            "What is the size of the TELUS postpaid base?"
-
-WORKFLOW_B — Structured Campaign Execution Request:
-  All requests that name a specific campaign code (reached via Priority 1), or that use
-  action verbs such as "Size the...", "Run...", "Execute...", "Set up...", or
-  "Pull the playbook for..." targeting a named campaign.
-  Examples: "Size the AAL monthly email campaign",
-            "Run the Koodo winback outbound brief",
-            "Execute the AAL voice analytics weekly",
-            "Pull the playbook for the TELUS AAL internet campaign"
-
-Return exactly this JSON — no markdown, no explanation:
-{{
-  "workflow": "WORKFLOW_A",
-  "campaign_hint": null
-}}
-or:
-{{
-  "workflow": "WORKFLOW_B",
-  "campaign_hint": "<campaign name or label extracted from the request>"
-}}"""
-
-
 _INTENT_CLASSIFY_V2_PROMPT = """\
 A consultant submitted the following request to a Canadian telecom marketing AI:
   "{query}"
