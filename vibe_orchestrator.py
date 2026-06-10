@@ -45,7 +45,7 @@ load_dotenv(_NEXUS_DIR / ".env")
 load_dotenv(_QUANT_DIR / ".env", override=False)
 load_dotenv(_FEEDBACK_DIR / ".env", override=False)
 
-for _p in [str(_ROOT), str(_NEXUS_DIR), str(_QUANT_DIR), str(_BRIEFING_DIR), str(_FEEDBACK_DIR)]:
+for _p in [str(_FEEDBACK_DIR), str(_BRIEFING_DIR), str(_QUANT_DIR), str(_NEXUS_DIR), str(_ROOT)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
