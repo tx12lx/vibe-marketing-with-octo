@@ -45,9 +45,17 @@ load_dotenv(_NEXUS_DIR / ".env")
 load_dotenv(_QUANT_DIR / ".env", override=False)
 load_dotenv(_FEEDBACK_DIR / ".env", override=False)
 
-for _p in [str(_FEEDBACK_DIR), str(_BRIEFING_DIR), str(_QUANT_DIR), str(_NEXUS_DIR), str(_ROOT)]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# Remove any pre-existing entries (Python adds the script dir to sys.path[0] at
+# startup, so the old guard `if _p not in sys.path` would silently skip ROOT,
+# leaving NEXUS at position 0 and causing `core.knowledge_context` to resolve to
+# the Nexus core/ package which has no knowledge_context module).
+_SEARCH_DIRS = [str(_FEEDBACK_DIR), str(_BRIEFING_DIR), str(_QUANT_DIR), str(_NEXUS_DIR), str(_ROOT)]
+for _p in _SEARCH_DIRS:
+    while _p in sys.path:
+        sys.path.remove(_p)
+for _p in _SEARCH_DIRS:
+    sys.path.insert(0, _p)
+# Final order: ROOT NEXUS QUANT BRIEFING FEEDBACK ... (ROOT at 0)
 
 from nexus_agent import NexusAgent  # noqa: E402
 from quant_agent import QuantAgent  # noqa: E402
