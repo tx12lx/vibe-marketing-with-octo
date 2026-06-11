@@ -12,8 +12,16 @@
       "business_meaning": "Koodo Internet",
       "special_notes": "Applies strictly to Koodo broadband footprints.",
       "database_indicators": [
-        {"column": "t.koodo_int_elig", "value": "1", "meaning": "Qualified to receive Koodo Internet"},
-        {"column": "t.koodo_int_ind", "value": "1", "meaning": "Active Koodo Internet subscriber"}
+        {
+          "column": "t.koodo_int_elig",
+          "value": "1",
+          "meaning": "Qualified to receive Koodo Internet"
+        },
+        {
+          "column": "t.koodo_int_ind",
+          "value": "1",
+          "meaning": "Active Koodo Internet subscriber"
+        }
       ]
     }
   },
@@ -24,7 +32,11 @@
       "base_table": "bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base",
       "special_notes": "CRITICAL disambiguation — two opposite 'naked' populations exist: (1) 'naked mobility' = mobility customer with no FFH -> TABLE bq_fda_mob_mobility_base, filter mnh_ffh_ban = 0. (2) 'naked FFH' = FFH/Home Solutions customer with no mobility -> TABLE bq_dly_dbm_customer_profl, filter mnh_mob_ban IS NULL. When the user says 'naked FFH customers' or 'naked home solutions customers', use the naked_ffh definition below, NOT this one.",
       "database_indicators": [
-        {"column": "mnh_ffh_ban", "value": "0", "meaning": "Customer has no linked FFH household (naked mobility — mobility base only)"}
+        {
+          "column": "mnh_ffh_ban",
+          "value": "0",
+          "meaning": "Customer has no linked FFH household (naked mobility — mobility base only)"
+        }
       ]
     },
     "naked_ffh": {
@@ -33,7 +45,11 @@
       "base_table": "bi-srv-hsmdet-pr-7b9def.adobe.bq_dly_dbm_customer_profl",
       "special_notes": "CRITICAL: naked FFH customers MUST be queried from bq_dly_dbm_customer_profl — NOT bq_fda_mob_mobility_base. The filter is mnh_mob_ban IS NULL (NULL = no mobility BAN linked to this FFH account). Never apply mnh_ffh_ban to this table.",
       "database_indicators": [
-        {"column": "mnh_mob_ban", "value": "NULL", "meaning": "FFH customer has no linked mobility BAN (naked FFH)"}
+        {
+          "column": "mnh_mob_ban",
+          "value": "NULL",
+          "meaning": "FFH customer has no linked mobility BAN (naked FFH)"
+        }
       ]
     },
     "FFH": {
@@ -50,6 +66,28 @@
       "primary_brand": "TELUS POSTPAID",
       "channel": "Email (em_dnc = 0)",
       "gch_lookback_days": 30
+    }
+  },
+  "user_defined_terms": {
+    "TELUS Postpaid": {
+      "definition": "Telus Postpaid is just one line of business, so you should only filter for Telus Postpaid",
+      "source": "user_feedback",
+      "added_at": "2026-06-11T06:56:14.190500+00:00"
+    },
+    "Koodo Postpaid": {
+      "definition": "Koodo Postpaid is another line of business, so you should only filter for Koodo Postpaid",
+      "source": "user_feedback",
+      "added_at": "2026-06-11T06:56:51.853697+00:00"
+    },
+    "TELUS EPP": {
+      "definition": "I didn't use the term Telus EPP, but Telus EPP is a separate line of business than Telus Postpaid and Koodo Postpaid.",
+      "source": "user_feedback",
+      "added_at": "2026-06-11T06:57:38.181616+00:00"
+    },
+    "EPP": {
+      "definition": "EPP is Telus EPP",
+      "source": "user_feedback",
+      "added_at": "2026-06-11T06:57:47.550032+00:00"
     }
   }
 }
