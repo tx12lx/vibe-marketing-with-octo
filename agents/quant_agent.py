@@ -234,7 +234,7 @@ _QUANT_SYSTEM = (
     "NAKED DISAMBIGUATION — two structurally opposite populations, two different tables:\n"
     "  'naked mobility' = mobility customer with NO linked FFH household\n"
     "    Table  : TABLE 1 — `bq_fda_mob_mobility_base`\n"
-    "    Filter : mnh_ffh_ban = 0\n"
+    "    Filter : COALESCE(mnh_ffh_ban, 0) = 0\n"
     "  'naked FFH' = FFH/Home Solutions customer with NO linked mobility plan\n"
     "    Table  : TABLE 4 — `bq_dly_dbm_customer_profl`\n"
     "    Filter : MNH_MOB_BAN IS NULL   [NOTE: FFH table uses UPPERCASE column names]\n"
@@ -244,8 +244,11 @@ _QUANT_SYSTEM = (
     "  Choose TABLE 1 (naked mobility) when: 'mobility customers', 'wireless customers',\n"
     "  'postpaid customers', or plain 'naked customers' with no home-service context.\n\n"
     "NAKED MOBILITY — when a request targets 'naked' MOBILITY customers (mobility-only, no\n"
-    "  bundled FFH household), apply exactly one filter: mnh_ffh_ban = 0.\n"
+    "  bundled FFH household), apply exactly one filter: COALESCE(mnh_ffh_ban, 0) = 0.\n"
     "  mnh_ffh_ban is an INT64 flag: 0 = no linked FFH household, 1 = has FFH bundle.\n"
+    "  The column is nullable — rows with NULL represent customers with no FFH link and\n"
+    "  belong in the naked population. COALESCE(..., 0) is required; bare mnh_ffh_ban = 0\n"
+    "  silently drops all NULL rows and returns zero results.\n"
     "  CRITICAL: never substitute individual product indicator columns (shs_ind, optik_ind,\n"
     "  stream_ind, tos_ind, smart_energy_ind, lwc_ind, hp_ind) for this filter — they are\n"
     "  cross-sell eligibility flags and are not equivalent to the household bundle status.\n\n"
@@ -435,11 +438,13 @@ Total CTEs: 3-10 (choose based on which filters actually apply; no pass-throughs
     Label must be exactly "Final Targetable Audience"
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
-Every arm MUST carry explicit column aliases — no arm may omit AS layer_name or AS audience_count.
-Schema identical for every arm:
-  SELECT '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
+Every arm MUST carry explicit column aliases — no arm may omit step_order, AS layer_name, or AS audience_count.
+Schema identical for every arm (step_order integer keeps BigQuery from reordering rows):
+  SELECT <N> AS step_order, '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
   UNION ALL ...
-First arm is always "Base Universe"; last arm is always "Final Targetable Audience".
+  ORDER BY step_order
+N starts at 1 for "Base Universe" and increments by 1 for each subsequent arm.
+First arm is always "Base Universe" (step_order=1); last arm is always "Final Targetable Audience".
 control_group_flg = 'N' must NOT appear in any CTE above "Final Targetable Audience".
 
 CTE structure rules — non-negotiable:
@@ -519,8 +524,13 @@ WATERFALL CTE STRUCTURE FOR FFH (dynamic middle — replaces the mobility templa
   final_targetable_audience (always last CTE, label "Final Targetable Audience"):
     SELECT * FROM <prior_cte> WHERE CONTROL_GROUP_FLG = 'N'
 
-FINAL SELECT: UNION ALL of COUNT(DISTINCT BACCT_NUM) from each CTE.
-First arm label: "Base Universe". Last arm label: "Final Targetable Audience".
+FINAL SELECT: UNION ALL of COUNT(DISTINCT BACCT_NUM) from each CTE with step_order for deterministic row ordering.
+Schema identical for every arm:
+  SELECT <N> AS step_order, '<step_label>' AS layer_name, COUNT(DISTINCT BACCT_NUM) AS audience_count FROM <cte_name>
+  UNION ALL ...
+  ORDER BY step_order
+N starts at 1 for "Base Universe" and increments by 1 for each arm.
+First arm label: "Base Universe" (step_order=1). Last arm label: "Final Targetable Audience".
 """
 
 
@@ -579,11 +589,13 @@ Total CTEs: 3-10 (choose based on which filters actually apply; no pass-throughs
     Label must be exactly "Final Targetable Audience"
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
-Every arm MUST carry explicit column aliases — no arm may omit AS layer_name or AS audience_count.
-Schema identical for every arm:
-  SELECT '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
+Every arm MUST carry explicit column aliases — no arm may omit step_order, AS layer_name, or AS audience_count.
+Schema identical for every arm (step_order integer keeps BigQuery from reordering rows):
+  SELECT <N> AS step_order, '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
   UNION ALL ...
-First arm is always "Base Universe"; last arm is always "Final Targetable Audience".
+  ORDER BY step_order
+N starts at 1 for "Base Universe" and increments by 1 for each subsequent arm.
+First arm is always "Base Universe" (step_order=1); last arm is always "Final Targetable Audience".
 control_group_flg = 'N' must NOT appear in any CTE above "Final Targetable Audience".
 
 CTE structure rules — non-negotiable:

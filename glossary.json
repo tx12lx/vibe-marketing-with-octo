@@ -28,14 +28,14 @@
   "business_terms": {
     "naked": {
       "business_meaning": "MOBILITY-ONLY customer with no bundled FFH household. This definition applies ONLY to mobility/wireless queries — see 'naked_ffh' for the reverse concept (FFH customers with no mobility).",
-      "sql_filter": "mnh_ffh_ban = 0",
+      "sql_filter": "COALESCE(mnh_ffh_ban, 0) = 0",
       "base_table": "bi-srv-hsmdet-pr-7b9def.adobe.bq_fda_mob_mobility_base",
-      "special_notes": "CRITICAL disambiguation — two opposite 'naked' populations exist: (1) 'naked mobility' = mobility customer with no FFH -> TABLE bq_fda_mob_mobility_base, filter mnh_ffh_ban = 0. (2) 'naked FFH' = FFH/Home Solutions customer with no mobility -> TABLE bq_dly_dbm_customer_profl, filter mnh_mob_ban IS NULL. When the user says 'naked FFH customers' or 'naked home solutions customers', use the naked_ffh definition below, NOT this one.",
+      "special_notes": "CRITICAL disambiguation — two opposite 'naked' populations exist: (1) 'naked mobility' = mobility customer with no FFH -> TABLE bq_fda_mob_mobility_base, filter COALESCE(mnh_ffh_ban, 0) = 0 (column is nullable; bare mnh_ffh_ban = 0 silently drops NULL rows). (2) 'naked FFH' = FFH/Home Solutions customer with no mobility -> TABLE bq_dly_dbm_customer_profl, filter mnh_mob_ban IS NULL. When the user says 'naked FFH customers' or 'naked home solutions customers', use the naked_ffh definition below, NOT this one.",
       "database_indicators": [
         {
           "column": "mnh_ffh_ban",
           "value": "0",
-          "meaning": "Customer has no linked FFH household (naked mobility — mobility base only)"
+          "meaning": "Customer has no linked FFH household (naked mobility). Column is nullable — use COALESCE(mnh_ffh_ban, 0) = 0, not bare mnh_ffh_ban = 0, to include NULL rows"
         }
       ]
     },
