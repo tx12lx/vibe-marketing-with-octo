@@ -303,7 +303,7 @@ class ThoughtDisplay:
                 "Applying",
                 f"{filter_count} targeting rules and {exclusion_count} audience exclusions",
             ),
-            *_label_rows("Method", "7-step audience funnel with control group"),
+            *_label_rows("Method", "Request-aware funnel with control group"),
         ]
         cls._box("Building your audience now. This may take a moment...", body)
 

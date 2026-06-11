@@ -125,7 +125,7 @@ class UniversalJSONSpec(BaseModel):
     brief_agent_inputs: Optional[dict] = None
 
     # Execution guardrails
-    max_waterfall_steps: int = 7
+    max_waterfall_steps: int = 10
     require_gch_suppression: bool = False
     dnc_channels: list[str] = []
 

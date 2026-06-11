@@ -69,45 +69,37 @@ _QUANT_SYSTEM = (
     "  prizm_lifestage_nm, allowance_qty, unit_of_measure_cd, standard_exclusions,\n"
     "  pending_order_ind, primary_sub, commit_start_date, commit_end_date, sub_status,\n"
     "  init_activation_date\n\n"
-    "  WATERFALL FILTER SEQUENCE — apply as sequential cumulative CTE layers in this\n"
-    "  exact order. Never collapse them into a single flat WHERE clause.\n"
-    "  Step 1 — Base Universe / LOB   : UPPER(lob_desc) IN (...) AND standard_exclusions = 0\n"
-    "  Step 2 — Primary Subscriber    : adds primary_sub = 1\n"
-    "  Step 3 — Standard Exclusions   : adds standard_exclusions = 0 AND sub_status = 'A'\n"
-    "  Step 4 — Stop Sell             : adds stop_sell = 0\n"
-    "  Step 5 — Targeting Criteria    : houses the intersection of all custom parameters\n"
-    "                                   extracted from the brief or NL request — service\n"
-    "                                   exclusions (e.g., excluding EPP), multi-province\n"
-    "                                   boundaries, behavioral metrics (e.g., adding a line\n"
-    "                                   in the past 3 months), lifecycle windows, cross-sell\n"
-    "                                   pairs, model scores, AAL behavioral self-join\n"
-    "                                   exclusions / triggers, NBA model joins.\n"
-    "                                   DNC flags belong exclusively in Step 6 — never here.\n"
-    "  Step 6 — Channel Governance    : dedicated exclusively to communication preference\n"
-    "                                   and DNC flag isolation. Four team-governed outbound\n"
-    "                                   channels tracked via INT64 flags (0=Allowed,\n"
-    "                                   1=Suppressed): em_dnc (Email), sms_dnc (SMS),\n"
-    "                                   ob_dnc (Outbound Dialing), dm_dnc (Direct Mail).\n"
-    "                                   CHANNEL EXCLUSIVITY SIEVE: when a request specifies\n"
-    "                                   that an audience is 'only', 'exclusively', or 'solely'\n"
-    "                                   eligible for a particular channel or combination:\n"
-    "                                     Named channels   : set their DNC flag = 0\n"
-    "                                     Unnamed channels : force their DNC flag = 1\n"
-    "                                   Example 'only eligible to receive SMS':\n"
-    "                                     sms_dnc = 0 AND em_dnc = 1 AND ob_dnc = 1 AND dm_dnc = 1\n"
-    "                                   Example 'only eligible for email and SMS':\n"
-    "                                     em_dnc = 0 AND sms_dnc = 0 AND ob_dnc = 1 AND dm_dnc = 1\n"
-    "                                   If no channel exclusivity is specified, apply only the\n"
-    "                                   DNC constraints explicitly stated in the request.\n"
-    "                                   GCH RECENCY SUPPRESSION: when the exclusions list\n"
-    "                                   contains a 'GCH recency suppression' entry, apply\n"
-    "                                   the LEFT JOIN anti-join pattern (TABLE 3 above)\n"
-    "                                   alongside DNC constraints — see GCH SUPPRESSION\n"
-    "                                   RULE below for the required CTE 6 structure.\n"
-    "  Step 7 — Universal Control Group : adds control_group_flg = 'N' — MUST be the\n"
-    "                                    absolute last CTE layer, never moved or merged\n"
-    "                                    upward; this step yields the final targetable\n"
-    "                                    list volume\n\n"
+    "  WATERFALL FILTER SEQUENCE — two fixed anchors with request-determined middle steps.\n"
+    "  Never collapse filters into a single flat WHERE clause.\n\n"
+    "  ANCHOR 1 (always CTE 1): 'Base Universe'\n"
+    "    SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0\n\n"
+    "  ANCHOR 2 (always last CTE): 'Final Targetable Audience'\n"
+    "    Always applies control_group_flg = 'N'. Never moved, merged, or renamed.\n"
+    "    Label must be exactly: 'Final Targetable Audience'\n\n"
+    "  DYNAMIC MIDDLE STEPS (total 3-10 CTEs including both anchors):\n"
+    "  Include only steps that apply meaningful filters. Pass-through CTEs are forbidden.\n"
+    "  Name each step in plain business language (no column names, no SQL identifiers).\n\n"
+    "  Step types to include when applicable:\n"
+    "    Active Eligible Subscribers : Always for mobility.\n"
+    "      WHERE primary_sub = 1 AND sub_status = 'A' AND standard_exclusions = 0 AND stop_sell = 0\n"
+    "      Combine active/standard-exclusions/stop-sell into one step when all apply.\n"
+    "    Geographic Filter           : Include when province scope is specified.\n"
+    "    Product Eligibility         : Include when cross-sell ownership/eligibility pairs apply.\n"
+    "    Lifecycle Window            : Include when contract/tenure criteria are specified.\n"
+    "    NBA Model Filter            : Include when propensity model join is required.\n"
+    "    GCH Suppression             : Include when exclusion_layers contains a GCH entry.\n"
+    "      Apply the LEFT JOIN anti-join pattern (TABLE 3) — see GCH SUPPRESSION RULE below.\n"
+    "    Channel Governance          : Include when DNC constraints apply.\n"
+    "      Four flags: em_dnc (Email), sms_dnc (SMS), ob_dnc (Outbound), dm_dnc (Direct Mail).\n"
+    "      CHANNEL EXCLUSIVITY SIEVE: when 'only', 'exclusively', or 'solely' pairs with\n"
+    "      a channel: named channels = 0, unnamed channels = 1.\n"
+    "      Example 'only eligible to receive SMS':\n"
+    "        sms_dnc = 0 AND em_dnc = 1 AND ob_dnc = 1 AND dm_dnc = 1\n"
+    "      Example 'only eligible for email and SMS':\n"
+    "        em_dnc = 0 AND sms_dnc = 0 AND ob_dnc = 1 AND dm_dnc = 1\n"
+    "      Channel Governance and GCH Suppression always precede 'Final Targetable Audience'.\n\n"
+    "  DNC flags (em_dnc, sms_dnc, ob_dnc, dm_dnc) belong exclusively in Channel Governance.\n"
+    "  Never include DNC flags in any other step.\n\n"
     "  Strict typing rules:\n"
     "  - INT64 flags (1=True/Active, 0=False/Inactive): ALL columns matching *_ind, *_elig,\n"
     "    plus primary_sub, standard_exclusions, and stop_sell.\n"
@@ -158,9 +150,10 @@ _QUANT_SYSTEM = (
     "  A bare comparison without DATE() is a DATETIME/DATE type mismatch and must never\n"
     "  appear in generated SQL.\n\n"
     "  GCH SUPPRESSION RULE — when the exclusions list contains a 'GCH recency suppression'\n"
-    "  entry, restructure CTE 6 using the LEFT JOIN anti-join pattern below. Do NOT use a\n"
-    "  correlated NOT EXISTS subquery — it breaks when BigQuery resolves outer CTE aliases.\n\n"
-    "  Required CTE 6 structure (substitute <CAMPAIGN_CD>, <CAMPAIGN_SUB_CD>, <N>, <dnc>):\n\n"
+    "  entry, embed the LEFT JOIN anti-join pattern in the Channel Governance step (or a\n"
+    "  dedicated GCH Suppression step). Do NOT use a correlated NOT EXISTS subquery —\n"
+    "  it breaks when BigQuery resolves outer CTE aliases.\n\n"
+    "  Required Channel Governance CTE structure (substitute <CAMPAIGN_CD>, <CAMPAIGN_SUB_CD>, <N>, <dnc>):\n\n"
     "    after_channel_governance AS (\n"
     "      SELECT t.*\n"
     "      FROM after_targeting_criteria t\n"
@@ -335,72 +328,38 @@ _QUANT_SYSTEM = (
     "- Always return exactly two output columns: layer_name STRING, audience_count INT64\n"
     "- UNION ALL alias consistency — ABSOLUTE REQUIREMENT: every SELECT arm in the\n"
     "  final UNION ALL reporting block MUST carry both explicit column aliases on every\n"
-    "  row, identical in name and order to the first arm. Never rely on positional\n"
-    "  resolution — BigQuery UNION ALL requires consistent column schemas across all arms.\n"
-    "  The canonical seven-arm structure is non-negotiable:\n"
-    "    SELECT 'Base Universe' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM base_universe\n"
-    "    UNION ALL\n"
-    "    SELECT 'After: Primary Subscriber' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_primary_subscriber\n"
-    "    UNION ALL\n"
-    "    SELECT 'After: Standard Exclusions' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_standard_exclusions\n"
-    "    UNION ALL\n"
-    "    SELECT 'After: Stop Sell' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_stop_sell\n"
-    "    UNION ALL\n"
-    "    SELECT 'After: Targeting Criteria' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_targeting_criteria\n"
-    "    UNION ALL\n"
-    "    SELECT 'After: Channel Governance' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_channel_governance\n"
-    "    UNION ALL\n"
-    "    SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group\n"
+    "  row. Never rely on positional resolution — BigQuery UNION ALL requires consistent\n"
+    "  column schemas across all arms. The number of arms equals the number of CTEs (3-10).\n"
+    "  Schema identical for every arm:\n"
+    "    SELECT '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>\n"
+    "  First arm is always 'Base Universe'; last arm is always 'Final Targetable Audience'.\n"
+    "  Each layer_name string must exactly match the CTE label chosen for that step.\n"
     "  Omitting AS layer_name or AS audience_count on any arm causes a BigQuery schema\n"
     "  mismatch — treat every arm as a standalone SELECT with no inherited aliases.\n"
     "- Linear SELECT * inheritance — MANDATORY: every CTE carries ALL columns forward\n"
     "  from the immediately preceding stage so downstream WHERE clauses can reference\n"
     "  any column (control_group_flg, em_dnc, stop_sell, etc.) without ambiguity.\n"
     "  Never project only ban; never go back to the raw mobility_base table after CTE 1.\n"
-    "    base_universe                 : SELECT * FROM `<mobility_base>`\n"
-    "                                    WHERE UPPER(lob_desc) IN (...)\n"
-    "                                    AND standard_exclusions = 0\n"
-    "    after_primary_subscriber      : SELECT * FROM base_universe\n"
-    "                                    WHERE primary_sub = 1\n"
-    "    after_standard_exclusions     : SELECT * FROM after_primary_subscriber\n"
-    "                                    WHERE standard_exclusions = 0 AND sub_status = 'A'\n"
-    "    after_stop_sell               : SELECT * FROM after_standard_exclusions\n"
-    "                                    WHERE stop_sell = 0\n"
-    "    after_targeting_criteria      : SELECT * FROM after_stop_sell WHERE <targeting_criteria>\n"
-    "                                    EXCEPTION: when joining Table 2 (model scores) or\n"
-    "                                    performing a Table 1 self-join (AAL behavioral),\n"
-    "                                    alias the preceding CTE as t and use SELECT t.*\n"
-    "                                    to carry all columns while joining the extra table.\n"
-    "    after_channel_governance      : SELECT * FROM after_targeting_criteria WHERE <dnc_constraints>\n"
-    "                                    EXCEPTION: when GCH suppression is required, use\n"
-    "                                    SELECT t.* FROM after_targeting_criteria t LEFT JOIN ...\n"
-    "                                    per the GCH SUPPRESSION RULE template above.\n"
-    "    after_universal_control_group : SELECT * FROM after_channel_governance\n"
-    "                                    WHERE control_group_flg = 'N'\n"
+    "  Pattern for every middle and anchor CTE:\n"
+    "    <cte_name> : SELECT * FROM <prior_cte> WHERE <this_step_filter>\n"
+    "  EXCEPTION: when joining Table 2 (model scores) or performing a Table 1 self-join\n"
+    "  (AAL behavioral), alias the preceding CTE as t and use SELECT t.* to carry all\n"
+    "  columns while joining the extra table.\n"
+    "  EXCEPTION: when GCH suppression is required, use SELECT t.* FROM <prior> t\n"
+    "  LEFT JOIN ... per the GCH SUPPRESSION RULE template above.\n"
     "  Each CTE adds exactly one new predicate layer on top of the prior CTE output.\n"
     "  ban is always present in every CTE because it is inherited through each SELECT *;\n"
     "  COUNT(DISTINCT ban) in the final UNION ALL is therefore unambiguous.\n"
     "- Use a WITH clause CTE waterfall; each CTE builds cumulatively on the previous\n"
-    "- Seven-step waterfall sequence is mandatory and NON-NEGOTIABLE for every query:\n"
-    "    CTE 1 'Base Universe'              : UPPER(lob_desc) IN (...) AND standard_exclusions = 0\n"
-    "    CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1\n"
-    "    CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'\n"
-    "    CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0\n"
-    "    CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom\n"
-    "                                         parameters — service exclusions, province filters,\n"
-    "                                         behavioral metrics, lifecycle windows, cross-sell\n"
-    "                                         pairs, model scores; AAL behavioral self-join or\n"
-    "                                         NBA model join lives here. DNC flags must NOT\n"
-    "                                         appear here — they belong exclusively in CTE 6.\n"
-    "    CTE 6 'After: Channel Governance'  : cumulative + DNC flag logic; also embed GCH\n"
-    "                                         LEFT JOIN anti-join (TABLE 3) when exclusions\n"
-    "                                         contain a 'GCH recency suppression' entry.\n"
-    "                                         Apply channel exclusivity sieve when 'only',\n"
-    "                                         'exclusively', or 'solely' pairs with a channel:\n"
-    "                                         named channels = 0, all unnamed channels = 1.\n"
-    "                                         Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.\n"
-    "    CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — always last\n"
-    "- control_group_flg = 'N' must appear ONLY in CTE 7 and nowhere above it\n"
+    "- Waterfall CTE sequence — two fixed anchors with dynamic middle (3-10 total CTEs):\n"
+    "    CTE 1 'Base Universe'                : UPPER(lob_desc) IN (...) AND standard_exclusions = 0\n"
+    "    CTEs 2 to N-1 (dynamic middle)       : request-specific steps in business-language order\n"
+    "                                           Active subscriber, stop sell, geographic, product\n"
+    "                                           eligibility, lifecycle, NBA model, GCH suppression,\n"
+    "                                           channel governance — include only when applicable.\n"
+    "                                           Every step must filter meaningfully; no pass-throughs.\n"
+    "    Last CTE 'Final Targetable Audience' : cumulative + control_group_flg = 'N' — always last\n"
+    "- control_group_flg = 'N' must appear ONLY in 'Final Targetable Audience' and nowhere above it\n"
     "- Do not reference columns absent from the confirmed schema above\n"
     "- Use Standard SQL syntax; backtick-quote all table refs as `project.dataset.table`\n"
     "- Return ONLY the raw SQL — no markdown, no explanation, no trailing semicolon\n"
@@ -446,66 +405,48 @@ ratios, creative version rules — have been discarded upstream. Do not reintrod
 Available schema:
 {schema_context}
 
-Waterfall structure required — seven mandatory layers in this exact sequence:
-  CTE 1 'Base Universe'              : UPPER(lob_desc) IN (...) AND standard_exclusions = 0
-  CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
-  CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
-  CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
-  CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom parameters
-                                       from Filters and Exclusions above — service exclusions,
-                                       province filters, behavioral metrics, lifecycle windows,
-                                       cross-sell pairs, model scores; for AAL use cases
-                                       apply the behavioral self-join rule
-                                       (init_activation_date + lookback window) or the
-                                       predictive NBA model join (predict_modl_id = 2008,
-                                       classn_nm = 'ADD_A_LINE') per the system rules.
-                                       DNC flags must NOT appear here.
-  CTE 6 'After: Channel Governance'  : cumulative + DNC flag constraints; also embed the
-                                       GCH LEFT JOIN anti-join (TABLE 3) when Exclusions
-                                       contains a 'GCH recency suppression' entry — resolve
-                                       CAMPAIGN_CD, CAMPAIGN_SUB_CD, and interval days from
-                                       the suppression string per the active campaign config.
-                                       Apply channel exclusivity sieve when 'only',
-                                       'exclusively', or 'solely' pairs with a channel:
-                                       named channels = 0, all unnamed channels = 1.
-                                       Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.
-  CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
+Waterfall structure required — two fixed anchors with request-determined middle steps.
+Total CTEs: 3-10 (choose based on which filters actually apply; no pass-throughs allowed):
+
+  CTE 1 (always): "Base Universe"
+    SELECT * FROM `{bq_project}.{bq_dataset}.<table>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0
+
+  Dynamic middle CTEs — include only when the filter applies:
+    Active Eligible Subscribers  : WHERE primary_sub = 1 AND sub_status = 'A' AND standard_exclusions = 0 AND stop_sell = 0
+                                   Combine into one step when all apply.
+    Geographic Filter            : province scope (when specified in Filters/Exclusions)
+    Product Eligibility          : ownership/eligibility pairs (when cross-sell in Filters)
+    Lifecycle Window             : commit_end_date / T-X window (when specified in Filters)
+    NBA Model Filter             : Table 2 join (when propensity model in Filters)
+    GCH Suppression              : LEFT JOIN anti-join per system rules (when GCH in Exclusions)
+                                   Resolve CAMPAIGN_CD, CAMPAIGN_SUB_CD, interval days from
+                                   the suppression entry in Exclusions above.
+    Channel Governance           : DNC flag constraints; must precede "Final Targetable Audience"
+                                   Apply channel exclusivity sieve when 'only', 'exclusively',
+                                   or 'solely' pairs with a channel: named = 0, unnamed = 1.
+                                   Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.
+                                   When GCH in Exclusions, embed GCH LEFT JOIN anti-join here
+                                   using SELECT t.* FROM <prior> t LEFT JOIN ... pattern.
+
+  Last CTE (always): "Final Targetable Audience"
+    SELECT * FROM <prior_cte> WHERE control_group_flg = 'N'
+    Label must be exactly "Final Targetable Audience"
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
-Every arm MUST carry explicit column aliases on every row — no arm may omit AS layer_name
-or AS audience_count, even when positional resolution would be technically valid.
-Required alias schema, identical across all seven arms:
-  SELECT 'Base Universe' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM base_universe
-  UNION ALL
-  SELECT 'After: Primary Subscriber' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_primary_subscriber
-  UNION ALL
-  SELECT 'After: Standard Exclusions' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_standard_exclusions
-  UNION ALL
-  SELECT 'After: Stop Sell' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_stop_sell
-  UNION ALL
-  SELECT 'After: Targeting Criteria' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_targeting_criteria
-  UNION ALL
-  SELECT 'After: Channel Governance' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_channel_governance
-  UNION ALL
-  SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group
-control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
+Every arm MUST carry explicit column aliases — no arm may omit AS layer_name or AS audience_count.
+Schema identical for every arm:
+  SELECT '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
+  UNION ALL ...
+First arm is always "Base Universe"; last arm is always "Final Targetable Audience".
+control_group_flg = 'N' must NOT appear in any CTE above "Final Targetable Audience".
 
 CTE structure rules — non-negotiable:
 - Linear SELECT * inheritance: every CTE selects ALL columns from the immediately preceding
   CTE so that downstream WHERE clauses can reference any column without ambiguity.
-    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0
-    after_primary_subscriber      : SELECT * FROM base_universe WHERE primary_sub = 1
-    after_standard_exclusions     : SELECT * FROM after_primary_subscriber
-                                    WHERE standard_exclusions = 0 AND sub_status = 'A'
-    after_stop_sell               : SELECT * FROM after_standard_exclusions WHERE stop_sell = 0
-    after_targeting_criteria      : SELECT * FROM after_stop_sell WHERE <criteria>
-                                    EXCEPTION: when joining Table 2 or a self-join, alias the
-                                    preceding CTE as t and use SELECT t.* to carry all columns.
-    after_channel_governance      : SELECT * FROM after_targeting_criteria WHERE <dnc>
-                                    EXCEPTION: GCH suppression uses SELECT t.* FROM
-                                    after_targeting_criteria t LEFT JOIN ... per system rules.
-    after_universal_control_group : SELECT * FROM after_channel_governance
-                                    WHERE control_group_flg = 'N'
+    <any_cte>  : SELECT * FROM <prior_cte> WHERE <this_step_filter>
+    EXCEPTION: when joining Table 2 or a self-join, alias the preceding CTE as t and use
+    SELECT t.* to carry all columns while joining.
+    EXCEPTION: GCH suppression uses SELECT t.* FROM <prior> t LEFT JOIN ... per system rules.
 
 Constraints:
 - Never SELECT any customer identifier values in output — only aggregate counts
@@ -556,39 +497,28 @@ COLUMNS THAT DO NOT EXIST IN THIS TABLE — do not reference them:
   ban, standard_exclusions, primary_sub, sub_status, stop_sell, lob_desc,
   em_dnc, sms_dnc, ob_dnc, dm_dnc, province, control_group_flg (lowercase)
 
-WATERFALL CTE STRUCTURE FOR FFH (mandatory — replaces the mobility template above):
-  base_universe:
+WATERFALL CTE STRUCTURE FOR FFH (dynamic middle — replaces the mobility template above):
+  base_universe (always CTE 1, label "Base Universe"):
     SELECT * FROM `{bq_project}.adobe.bq_dly_dbm_customer_profl`
     WHERE EX_STANDARD_EX = 0
-    [NO lob_desc filter — lob_desc does not exist in this table]
+    [NO lob_desc filter; NO primary_sub filter — neither column exists in FFH table]
 
-  after_primary_subscriber:
-    SELECT * FROM base_universe
-    [NO WHERE clause — primary_sub does not exist; count equals base_universe]
+  Dynamic middle CTEs (include only steps that apply meaningful filters):
+    Stop Sell (always include for FFH):
+      SELECT * FROM <prior> WHERE FFH_STOPSELL_IND = 0
+    Geographic Filter (when province scope specified):
+      Use SERV_PROV for province filtering
+    Targeting Criteria (when request-specific targeting applies):
+      Use MNH_MOB_BAN for mobility link checks
+    Channel Governance (when DNC constraints apply, must precede final anchor):
+      Use CC_ DNC flags: CC_DNEM (email), CC_DNSM (SMS), CC_DNRS (outbound), CC_DNDM (direct mail)
+    [Skip "Primary Subscriber" and "Standard Exclusions" — these columns do not exist in FFH table]
 
-  after_standard_exclusions:
-    SELECT * FROM after_primary_subscriber
-    WHERE EX_STANDARD_EX = 0
-    [NO sub_status filter — sub_status does not exist in this table]
-
-  after_stop_sell:
-    SELECT * FROM after_standard_exclusions
-    WHERE FFH_STOPSELL_IND = 0
-
-  after_targeting_criteria:
-    SELECT * FROM after_stop_sell WHERE <targeting criteria from request>
-    [Use SERV_PROV for province, MNH_MOB_BAN for mobility link checks]
-
-  after_channel_governance:
-    SELECT * FROM after_targeting_criteria
-    WHERE CC_DNEM = 0 [and/or other CC_ DNC flags as specified]
-
-  after_universal_control_group:
-    SELECT * FROM after_channel_governance
-    WHERE CONTROL_GROUP_FLG = 'N'
+  final_targetable_audience (always last CTE, label "Final Targetable Audience"):
+    SELECT * FROM <prior_cte> WHERE CONTROL_GROUP_FLG = 'N'
 
 FINAL SELECT: UNION ALL of COUNT(DISTINCT BACCT_NUM) from each CTE.
-All seven layer_name strings remain unchanged ('Base Universe', 'After: Primary Subscriber', etc.).
+First arm label: "Base Universe". Last arm label: "Final Targetable Audience".
 """
 
 
@@ -607,17 +537,13 @@ def _is_ffh_request(
 _EXTREME_DROP = 0.60
 _HIGH_SCRUB_RATE = 0.80
 
-# Canonical seven-step display order.  _parse_waterfall sorts by position in this
-# list so the waterfall is always chronological regardless of BQ row return order.
-_WATERFALL_STEP_ORDER = [
-    "Base Universe",
-    "After: Primary Subscriber",
-    "After: Standard Exclusions",
-    "After: Stop Sell",
-    "After: Targeting Criteria",
-    "After: Channel Governance",
-    "After: Universal Control Group",
-]
+# Anchor labels for waterfall sort: "Base Universe" is always first,
+# "Final Targetable Audience" and the legacy "Universal Control Group" label are always last.
+_WATERFALL_ANCHORS_FIRST = frozenset(["Base Universe"])
+_WATERFALL_ANCHORS_LAST = frozenset([
+    "Final Targetable Audience",
+    "After: Universal Control Group",  # backwards-compat with pre-Phase-2 sessions
+])
 
 _ADHOC_WATERFALL_PROMPT = """Generate a BigQuery audience waterfall query for this ad-hoc sizing request.
 
@@ -629,60 +555,41 @@ BQ Dataset : {bq_dataset}
 Available schema:
 {schema_context}
 
-Waterfall structure required — seven mandatory layers in this exact sequence:
-  CTE 1 'Base Universe'              : UPPER(lob_desc) IN (...) AND standard_exclusions = 0
-  CTE 2 'After: Primary Subscriber'  : cumulative + primary_sub = 1
-  CTE 3 'After: Standard Exclusions' : cumulative + standard_exclusions = 0 AND sub_status = 'A'
-  CTE 4 'After: Stop Sell'           : cumulative + stop_sell = 0
-  CTE 5 'After: Targeting Criteria'  : cumulative + intersection of all custom parameters
-                                       from the Filters list — service exclusions, province
-                                       filters, behavioral metrics, lifecycle windows,
-                                       cross-sell pairs, model scores; for AAL use cases
-                                       apply the behavioral self-join rule
-                                       (init_activation_date + lookback window) or the
-                                       predictive NBA model join (predict_modl_id = 2008,
-                                       classn_nm = 'ADD_A_LINE') per the system rules.
-                                       DNC flags must NOT appear here.
-  CTE 6 'After: Channel Governance'  : cumulative + DNC flag constraints only.
-                                       Apply channel exclusivity sieve when 'only',
-                                       'exclusively', or 'solely' pairs with a channel:
-                                       named channels = 0, all unnamed channels = 1.
-                                       Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.
-  CTE 7 'After: Universal Control Group' : cumulative + control_group_flg = 'N' — absolute last
+Waterfall structure required — two fixed anchors with request-determined middle steps.
+Total CTEs: 3-10 (choose based on which filters actually apply; no pass-throughs allowed):
+
+  CTE 1 (always): "Base Universe"
+    SELECT * FROM `{bq_project}.{bq_dataset}.<table>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0
+
+  Dynamic middle CTEs — include only when the filter applies:
+    Active Eligible Subscribers  : WHERE primary_sub = 1 AND sub_status = 'A' AND standard_exclusions = 0 AND stop_sell = 0
+    Geographic Filter            : province scope (when specified in Filters)
+    Product Eligibility          : ownership/eligibility pairs (when cross-sell in Filters)
+    Lifecycle Window             : commit_end_date / T-X window (when specified)
+    NBA Model Filter             : Table 2 join (when propensity model in Filters)
+    Channel Governance           : DNC flag constraints; must precede "Final Targetable Audience"
+                                   Apply channel exclusivity sieve when 'only', 'exclusively',
+                                   or 'solely' pairs with a channel: named = 0, unnamed = 1.
+                                   Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.
+
+  Last CTE (always): "Final Targetable Audience"
+    SELECT * FROM <prior_cte> WHERE control_group_flg = 'N'
+    Label must be exactly "Final Targetable Audience"
 
 The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
-Every arm MUST carry explicit column aliases on every row — no arm may omit AS layer_name
-or AS audience_count, even when positional resolution would be technically valid.
-Required alias schema, identical across all seven arms:
-  SELECT 'Base Universe' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM base_universe
-  UNION ALL
-  SELECT 'After: Primary Subscriber' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_primary_subscriber
-  UNION ALL
-  SELECT 'After: Standard Exclusions' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_standard_exclusions
-  UNION ALL
-  SELECT 'After: Stop Sell' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_stop_sell
-  UNION ALL
-  SELECT 'After: Targeting Criteria' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_targeting_criteria
-  UNION ALL
-  SELECT 'After: Channel Governance' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_channel_governance
-  UNION ALL
-  SELECT 'After: Universal Control Group' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM after_universal_control_group
-control_group_flg = 'N' must NOT appear in any CTE above CTE 7.
+Every arm MUST carry explicit column aliases — no arm may omit AS layer_name or AS audience_count.
+Schema identical for every arm:
+  SELECT '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
+  UNION ALL ...
+First arm is always "Base Universe"; last arm is always "Final Targetable Audience".
+control_group_flg = 'N' must NOT appear in any CTE above "Final Targetable Audience".
 
 CTE structure rules — non-negotiable:
 - Linear SELECT * inheritance: every CTE selects ALL columns from the immediately preceding
   CTE so that downstream WHERE clauses can reference any column without ambiguity.
-    base_universe                 : SELECT * FROM `<mobility_base>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0
-    after_primary_subscriber      : SELECT * FROM base_universe WHERE primary_sub = 1
-    after_standard_exclusions     : SELECT * FROM after_primary_subscriber
-                                    WHERE standard_exclusions = 0 AND sub_status = 'A'
-    after_stop_sell               : SELECT * FROM after_standard_exclusions WHERE stop_sell = 0
-    after_targeting_criteria      : SELECT * FROM after_stop_sell WHERE <criteria>
-                                    EXCEPTION: when joining Table 2 or a self-join, alias the
-                                    preceding CTE as t and use SELECT t.* to carry all columns.
-    after_channel_governance      : SELECT * FROM after_targeting_criteria WHERE <dnc>
-    after_universal_control_group : SELECT * FROM after_channel_governance
-                                    WHERE control_group_flg = 'N'
+    <any_cte>  : SELECT * FROM <prior_cte> WHERE <this_step_filter>
+    EXCEPTION: when joining Table 2 or a self-join, alias the preceding CTE as t and use
+    SELECT t.* to carry all columns while joining.
 Apply filters cumulatively — each CTE adds one new predicate on top of the prior stage.
 Use ONLY the filter criteria listed above.
 {optimization_context_section}
@@ -806,7 +713,7 @@ class QuantAgent(BaseAgent):
             )
 
     def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
-        """Path 2 — execute a seven-step waterfall count query for an ad-hoc sizing request."""
+        """Path 2 — execute a request-aware waterfall count query for an ad-hoc sizing request."""
         ThoughtDisplay.progress("I'm calculating your audience now...")
         try:
             schema = self._fetch_schema(request.bq_project, request.bq_dataset)
@@ -1101,35 +1008,36 @@ def _parse_waterfall(rows: list[dict]) -> list[WaterfallLayer]:
             count = 0
         if name:
             layers.append(WaterfallLayer(layer_name=name, audience_count=count))
-    layers.sort(key=lambda l: _waterfall_step_index(l.layer_name))
-    return layers
+    # Sort: "Base Universe" first, "Final Targetable Audience" (and legacy label) last,
+    # all middle steps preserve BQ UNION ALL row order (their original index).
+    indexed = list(enumerate(layers))
+    indexed.sort(key=lambda t: _waterfall_sort_key(t[0], t[1].layer_name))
+    return [l for _, l in indexed]
 
 
-def _waterfall_step_index(name: str) -> int:
-    try:
-        return _WATERFALL_STEP_ORDER.index(name)
-    except ValueError:
-        pass
-    # Fuzzy fallback: match by containment after CTE prefix has been stripped.
-    name_lower = name.lower()
-    for i, canonical in enumerate(_WATERFALL_STEP_ORDER):
-        if canonical.lower() in name_lower:
-            return i
-    return len(_WATERFALL_STEP_ORDER)
+def _waterfall_sort_key(idx: int, name: str) -> tuple:
+    """Return a sort key that anchors "Base Universe" first and the final step last."""
+    if name in _WATERFALL_ANCHORS_FIRST:
+        return (0, idx)
+    if name in _WATERFALL_ANCHORS_LAST or "control group" in name.lower():
+        return (9999, idx)
+    return (idx + 1, idx)
 
 
 def _final_audience_count(waterfall: list[WaterfallLayer]) -> int:
-    """Return the count from the Universal Control Group step (Step 7).
+    """Return the count from the final CTE (Final Targetable Audience or equivalent).
 
-    Falls back to the last layer in the sorted waterfall if the canonical name
-    is not found, so behaviour degrades gracefully if the model emits a
-    non-standard label.
+    Matches the new 'Final Targetable Audience' label and the legacy
+    'Universal Control Group' label for backwards compatibility.
+    Falls back to the last layer in the sorted waterfall.
     """
-    ucg = next(
-        (l for l in waterfall if "Universal Control Group" in l.layer_name),
+    final = next(
+        (l for l in waterfall
+         if "Final Targetable Audience" in l.layer_name
+         or "Universal Control Group" in l.layer_name),
         waterfall[-1] if waterfall else None,
     )
-    return ucg.audience_count if ucg else 0
+    return final.audience_count if final else 0
 
 
 def _optimization_note(waterfall: list[WaterfallLayer]) -> Optional[str]:
