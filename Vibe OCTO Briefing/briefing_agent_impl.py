@@ -207,7 +207,8 @@ class BriefingAgent(BaseAgent):
             ThoughtDisplay.brief_generating(spec.campaign_name, spec.campaign_tier)
             if spec.campaign_tier == "GOLD" and self._gold_index is not None:
                 gold_record = self._gold_index.lookup(
-                    spec.campaign_code, spec.campaign_sub_code
+                    spec.campaign_code, spec.campaign_sub_code,
+                    medium=spec.medium, cadence=spec.cadence,
                 )
                 return self._execute_gold(spec, gold_record)
             return self._execute_bronze(spec)
