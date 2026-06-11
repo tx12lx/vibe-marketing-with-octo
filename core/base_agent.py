@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 
 # Guarantee the project root is importable so pydantic_schemas resolves from here.
 _ROOT = Path(__file__).resolve().parent.parent
@@ -22,9 +23,12 @@ class BaseAgent(ABC):
     """Abstract contract for all registered workers in the Agent Mesh.
 
     Every worker must declare class-level:
-      WORKER_ID:     str               — unique versioned ID, e.g. "quant_v1"
-      INPUT_SCHEMA:  type[BaseModel]   — Pydantic model accepted by subscribe()
-      OUTPUT_SCHEMA: type[BaseModel]   — Pydantic model returned by execute()
+      WORKER_ID:        str                — unique versioned ID, e.g. "quant_v1"
+      HANDLED_INTENTS:  frozenset[str]     — intent types this agent handles;
+                                             used by _discover_agents() to build
+                                             the intent routing table automatically.
+      INPUT_SCHEMA:     type[BaseModel]    — Pydantic model accepted by subscribe()
+      OUTPUT_SCHEMA:    type[BaseModel]    — Pydantic model returned by execute()
 
     Orchestrator lifecycle: subscribe() -> set_session_context() -> execute()
 
@@ -33,6 +37,7 @@ class BaseAgent(ABC):
     """
 
     WORKER_ID: str
+    HANDLED_INTENTS: frozenset[str] = frozenset()
     INPUT_SCHEMA: type[BaseModel]
     OUTPUT_SCHEMA: type[BaseModel]
 
@@ -43,6 +48,17 @@ class BaseAgent(ABC):
     @abstractmethod
     def execute(self) -> BaseModel:
         """Execute the worker pipeline and return a validated output model."""
+
+    async def execute_async(self) -> Any:
+        """Async wrapper for execute() — enables concurrent multi-agent calls.
+
+        Default implementation delegates to the synchronous execute().
+        Override in agents that have true async I/O (e.g. aiohttp BQ queries).
+        Used by the orchestrator when two independent agents run in parallel,
+        e.g. QuantAgent + BriefingAgent for campaign_execution intent.
+        """
+        import asyncio
+        return await asyncio.get_event_loop().run_in_executor(None, self.execute)
 
     def set_session_context(self, context: str) -> None:
         """Receive glossary/catalog context injected by the orchestrator."""

@@ -176,15 +176,13 @@ class IntentClassification(BaseModel):
 
     Replaces the WORKFLOW_A / WORKFLOW_B binary with a five-type taxonomy
     so every request can be routed through the unified knowledge pipeline.
+
+    intent_type is a plain str so new agents can register custom intent types
+    via HANDLED_INTENTS without changing this schema.  The orchestrator validates
+    at runtime against the discovered intent set.
     """
 
-    intent_type: Literal[
-        "sizing_request",
-        "brief_generation",
-        "brief_qa",
-        "campaign_execution",
-        "general_question",
-    ]
+    intent_type: str  # validated at runtime against _INTENT_ROUTING keys
     confidence: float
     campaign_identified: bool
     campaign_code: Optional[str] = None

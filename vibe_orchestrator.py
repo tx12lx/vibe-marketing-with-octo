@@ -45,10 +45,8 @@ load_dotenv(_NEXUS_DIR / ".env")
 load_dotenv(_QUANT_DIR / ".env", override=False)
 load_dotenv(_FEEDBACK_DIR / ".env", override=False)
 
-# Remove any pre-existing entries (Python adds the script dir to sys.path[0] at
-# startup, so the old guard `if _p not in sys.path` would silently skip ROOT,
-# leaving NEXUS at position 0 and causing `core.knowledge_context` to resolve to
-# the Nexus core/ package which has no knowledge_context module).
+# Pin ROOT at sys.path[0] so root core/ package wins over any agent-subdir core/.
+# Previous entries are cleaned out first to prevent stale ordering from a prior import.
 _SEARCH_DIRS = [str(_FEEDBACK_DIR), str(_BRIEFING_DIR), str(_QUANT_DIR), str(_NEXUS_DIR), str(_ROOT)]
 for _p in _SEARCH_DIRS:
     while _p in sys.path:
@@ -57,10 +55,10 @@ for _p in _SEARCH_DIRS:
     sys.path.insert(0, _p)
 # Final order: ROOT NEXUS QUANT BRIEFING FEEDBACK ... (ROOT at 0)
 
-from nexus_agent import NexusAgent  # noqa: E402
-from quant_agent import QuantAgent  # noqa: E402
-from briefing_agent import BriefingAgent  # noqa: E402
-from feedback_agent import FeedbackAgent  # noqa: E402
+from agents.nexus_agent import NexusAgent  # noqa: E402
+from agents.quant_agent import QuantAgent  # noqa: E402
+from agents.briefing_agent import BriefingAgent  # noqa: E402
+from agents.feedback_agent import FeedbackAgent  # noqa: E402
 from core.knowledge_context import KnowledgeContext  # noqa: E402
 from pydantic_schemas import AdHocSizingRequest, BriefingOutput, BusinessRule, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
@@ -377,15 +375,64 @@ def _build_dynamic_context(query_text: str, gold_index=None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent registry — the ONLY place agent classes are registered.
-# Adding a new worker requires only: (1) implement BaseAgent, (2) add one line here.
+# Dynamic agent registry — auto-discovered from agents/ at startup.
+# Adding a new agent requires only one new file in agents/.
 # ---------------------------------------------------------------------------
-_AGENT_REGISTRY: dict[str, type] = {
-    "nexus": NexusAgent,
-    "quant": QuantAgent,
-    "briefing": BriefingAgent,
-    "feedback": FeedbackAgent,
-}
+
+def _discover_agents(agents_dir: Path) -> tuple[dict[str, type], dict[str, type]]:
+    """Scan agents/ for BaseAgent subclasses and build registries.
+
+    Returns:
+      agent_registry   — {worker_id: AgentClass} for direct instantiation
+      intent_routing   — {intent_type: AgentClass} for intent-based dispatch
+    """
+    import importlib
+    import inspect
+    from core.base_agent import BaseAgent as _BaseAgent
+
+    agent_registry: dict[str, type] = {}
+    intent_routing: dict[str, type] = {}
+
+    if not agents_dir.exists():
+        return agent_registry, intent_routing
+
+    for fpath in sorted(agents_dir.glob("*.py")):
+        if fpath.name.startswith("_"):
+            continue
+        module_name = f"agents.{fpath.stem}"
+        try:
+            mod = importlib.import_module(module_name)
+        except Exception as exc:
+            logging.warning("_discover_agents: could not import %s: %s", module_name, exc)
+            continue
+        for _name, obj in inspect.getmembers(mod, inspect.isclass):
+            if (
+                obj is not _BaseAgent
+                and issubclass(obj, _BaseAgent)
+                and hasattr(obj, "WORKER_ID")
+                and obj.__module__ == module_name
+            ):
+                worker_id = obj.WORKER_ID
+                # Use the worker_id stem (strip version suffix) as registry key
+                key = worker_id.split("_")[0]
+                agent_registry[key] = obj
+                for intent in (obj.HANDLED_INTENTS or frozenset()):
+                    # Prefer higher-priority (longer WORKER_ID) if two agents handle the same intent
+                    if intent not in intent_routing:
+                        intent_routing[intent] = obj
+
+    return agent_registry, intent_routing
+
+
+_AGENTS_DIR = _ROOT / "agents"
+_AGENT_REGISTRY, _INTENT_ROUTING = _discover_agents(_AGENTS_DIR)
+
+# Verify all required agents were discovered; fall back to explicit import if not.
+_REQUIRED = {"nexus": NexusAgent, "quant": QuantAgent, "briefing": BriefingAgent, "feedback": FeedbackAgent}
+for _k, _cls in _REQUIRED.items():
+    if _k not in _AGENT_REGISTRY:
+        logging.warning("_discover_agents: expected agent '%s' not found — using explicit import", _k)
+        _AGENT_REGISTRY[_k] = _cls
 
 
 # ---------------------------------------------------------------------------

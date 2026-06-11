@@ -37,6 +37,8 @@ class BusinessRulesRegistry:
     def __init__(self, rules_path: Path) -> None:
         self._rules_path = Path(rules_path)
         self._rules: list[BusinessRule] = []
+        self._cache_generation: int = 0
+        self._loaded_generation: int = 0
         self._load()
 
     # ------------------------------------------------------------------
@@ -54,6 +56,7 @@ class BusinessRulesRegistry:
         if not replaced:
             self._rules.append(rule)
         self._persist()
+        self._cache_generation += 1
 
     def get_rules_for_execution(
         self,
@@ -63,7 +66,14 @@ class BusinessRulesRegistry:
         campaign_purpose: str,
         spec: UniversalJSONSpec,
     ) -> list[BusinessRule]:
-        """Return applicable rules for this execution, sorted by priority descending."""
+        """Return applicable rules for this execution, sorted by priority descending.
+
+        Automatically reloads from disk when a write has occurred since the last
+        load so corrections written by FeedbackAgent in the same session take
+        effect on the very next call without an explicit _load() from the orchestrator.
+        """
+        if self._cache_generation != self._loaded_generation:
+            self._load()
         if not self._rules:
             return []
 
@@ -154,6 +164,7 @@ class BusinessRulesRegistry:
     def _load(self) -> None:
         if not self._rules_path.exists():
             self._rules = []
+            self._loaded_generation = self._cache_generation
             return
         try:
             data = json.loads(self._rules_path.read_text(encoding="utf-8"))
@@ -164,8 +175,10 @@ class BusinessRulesRegistry:
                 except Exception:
                     pass
             self._rules = loaded
+            self._loaded_generation = self._cache_generation
         except Exception:
             self._rules = []
+            self._loaded_generation = self._cache_generation
 
     def _persist(self) -> None:
         """Atomically write current rules list to disk."""
