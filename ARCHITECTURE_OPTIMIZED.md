@@ -50,17 +50,17 @@ This system is designed for **infinite scalability** across campaigns.
 All with ZERO code changes or hardcoding.
 
 **Discovery mechanism:** At boot, the system:
-1. Queries `campaign_knowledge` table (reads ALL rows, no filters by campaign name)
-2. Fetches briefs for campaigns with accessible URLs (~20-40% typically have briefs)
-3. Extracts structured `BriefContext` from each fetched brief
-4. Extracts `CrossCampaignPatterns` from all briefs combined
+1. Queries `campaign_deployments` table (reads ALL rows, no filters by campaign name)
+2. Fetches briefs for campaigns with accessible URLs (`--refresh-briefs` mode only)
+3. Runs two-stage LLM extraction to produce structured `brief_extraction` per brief
+4. Extracts `CrossCampaignPatterns` from all ingested briefs combined
 5. Classifies campaigns into GOLD / SILVER / BRONZE tiers
-6. Stores all campaigns in `semantic_knowledge_index.json`
+6. Stores all campaigns in `semantic_knowledge_index.json` (v4.0, unified `campaigns[]` array)
 
 No campaign lists are hardcoded. No campaign patterns are assumed. No campaign names are baked into the system.
 
 **Adding a new campaign — zero code changes required:**
-1. Insert row into `campaign_knowledge` table
+1. Insert row into `campaign_deployments` table
 2. (Optional) Add `databrief_link` if a brief exists → campaign becomes SILVER on next boot
 3. (Optional) Populate `targeting_summary` + `segment_summary` → campaign becomes GOLD on next boot
 4. Boot `vibe_orchestrator.py` (next scheduled refresh)
@@ -102,7 +102,7 @@ No campaign lists are hardcoded. No campaign patterns are assumed. No campaign n
  │  [1] Campaign Metadata Source                [2] Warehouse Schema Source             │
  │      wb-tian-pr-d0dbe6                           bi-srv-hsmdet-pr-7b9def             │
  │      .wb_tian_pr_dataset                         .adobe                              │
- │      .campaign_knowledge                         .INFORMATION_SCHEMA.COLUMNS         │
+ │      .campaign_deployments                       .INFORMATION_SCHEMA.COLUMNS         │
  │                                                  .INFORMATION_SCHEMA.TABLES          │
  │      + Google Sheets / Docs / PDFs                                                   │
  │        (via databrief_link column)                                                   │
@@ -503,11 +503,13 @@ def to_flat_string(self, url: str) -> str:
 
 ### 3.5 Platform-Managed Local Files
 
-**`semantic_knowledge_index.json`** — schema v2.0, rebuilt on every ingestion run:
+**`semantic_knowledge_index.json`** — schema v4.0, rebuilt on every `--full-refresh` run.
+
+All tiers share a single unified `campaigns[]` array. Each record carries a `tier` field (`"GOLD"`, `"SILVER"`, or `"BRONZE"`). GOLD records have populated `acc_summaries`; SILVER and BRONZE records carry `brief_extraction` when a brief was fetched via `--refresh-briefs`.
 
 ```json
 {
-  "schema_version": "2.0",
+  "schema_version": "4.0",
   "generated_at": "ISO_TIMESTAMP",
   "ingestion_summary": {
     "total_campaigns": "{N}",
@@ -517,87 +519,53 @@ def to_flat_string(self, url: str) -> str:
     "briefs_fetched": "{N}",
     "briefs_failed": "{N}"
   },
-  "cross_campaign_patterns": {
-    "source_brief_count": "{N}",
-    "extracted_at": "ISO_TIMESTAMP",
-    "common_exclusions": [
-      {"pattern": "{exclusion_pattern_description}", "frequency": "{N}"},
-      {"pattern": "{exclusion_pattern_description}", "frequency": "{N}"}
-    ],
-    "common_personalization": [
-      {"field": "{personalisation_field_name}", "frequency": "{N}"},
-      {"field": "{personalisation_field_name}", "frequency": "{N}"}
-    ],
-    "lift_expectations": {
-      "min_percent": "{N}",
-      "max_percent": "{N}",
-      "median_percent": "{N}",
-      "std_dev": "{N}"
-    }
-  },
-  "gold_records": [
+  "campaigns": [
     {
       "camp_id": "{CAMP_ID}",
       "sub_camp_id": "{SUB_CAMP_ID}",
       "campaign_name": "{CAMPAIGN_NAME}",
-      "targeting_summary": "Postpaid primary subscribers meeting {CAMP_ID}-specific eligibility criteria...",
-      "segment_summary": "Base universe {AUDIENCE_COUNT_BASE}. After 7 CTE steps: {AUDIENCE_COUNT_FINAL}.",
-      "brief_text": "--- TAB: Targeting --- ...",
-      "brief_context": {
-        "exclusions": ["{exclusion_rule}", "{exclusion_rule}"],
-        "personalization": ["{field_name}", "{field_name}"],
-        "seasonality": "{seasonal_signal_or_null}",
-        "audience_size": "{expected_range_or_null}",
-        "lift_target": "{lift_percentage_or_null}"
-      },
-      "cadence": "{CADENCE}",
-      "medium": "{MEDIUM}",
-      "campaign_purpose": "Drive {CAMPAIGN_NAME} objectives on eligible accounts",
-      "primary_products": "{CAMPAIGN_NAME} primary product",
-      "source": "acc_xml_enriched_with_brief",
-      "bias_weight": 1.0,
-      "ingested_at": "ISO_TIMESTAMP"
-    }
-  ],
-  "silver_records": [
-    {
-      "camp_id": "{CAMP_ID}",
-      "sub_camp_id": "{SUB_CAMP_ID}",
-      "campaign_name": "{CAMPAIGN_NAME}",
-      "brief_text": "--- TAB: Targeting --- ...",
-      "brief_context": {
-        "exclusions": ["{exclusion_rule}"],
-        "personalization": ["{field_name}"],
-        "seasonality": null,
-        "audience_size": null,
-        "lift_target": "{lift_percentage_or_null}"
-      },
-      "cadence": "{CADENCE}",
-      "medium": "{MEDIUM}",
-      "campaign_purpose": "Upsell or retain eligible subscribers for {CAMPAIGN_NAME}",
-      "primary_products": "{CAMPAIGN_NAME} product bundle",
-      "databrief_link": "{GOOGLE_SHEET_URL}",
-      "tier": "SILVER",
-      "ingested_at": "ISO_TIMESTAMP"
-    }
-  ],
-  "bronze_records": [
-    {
-      "camp_id": "{CAMP_ID}",
-      "sub_camp_id": "{SUB_CAMP_ID}",
-      "campaign_name": "{CAMPAIGN_NAME}",
-      "brief_text": null,
-      "brief_context": null,
       "cadence": "{CADENCE}",
       "medium": "{MEDIUM}",
       "campaign_purpose": "...",
       "primary_products": "...",
-      "databrief_link": null,
-      "tier": "BRONZE"
+      "tier": "GOLD",
+      "acc_summaries": {
+        "targeting_summary": "Postpaid primary subscribers meeting {CAMP_ID}-specific eligibility criteria...",
+        "segment_summary": "Base universe {AUDIENCE_COUNT_BASE}. After 7 CTE steps: {AUDIENCE_COUNT_FINAL}."
+      },
+      "brief_extraction": {
+        "campaign_strategy_summary": "...",
+        "targeting_filters": ["{filter}"],
+        "exclusion_rules": ["{rule}"],
+        "channel_governance": {"medium": "{MEDIUM}", "dnc_note": "..."},
+        "geographic_scope": ["{PROVINCE_CODE}"],
+        "lifecycle_constraints": ["{constraint}"],
+        "product_eligibility_pairs": ["{pair}"],
+        "segmentation_only_notes": [],
+        "ambiguities_found": [],
+        "extraction_confidence": {"overall": 0.9, "targeting_filters": 0.9, "exclusion_rules": 0.85},
+        "extracted_at": "ISO_TIMESTAMP"
+      },
+      "conflict_notes": [],
+      "source": "bq_metadata",
+      "bias_weight": 1.0,
+      "last_ingested_at": "ISO_TIMESTAMP"
     }
   ]
 }
 ```
+
+**Additional artifacts produced by the ingestion pipeline (all in `knowledge_base/artifacts/`):**
+
+| Artifact | Produced by | Contents |
+|---|---|---|
+| `adobe_schema.json` | `--full-refresh` / `--refresh-schema-only` | Column schemas for the `adobe` BQ dataset |
+| `campaign_data_schema.json` | `--full-refresh` / `--refresh-schema-only` | Column schemas for the `campaign_data` BQ dataset |
+| `gch_current_schema.json` | `--full-refresh` / `--refresh-schema-only` | Column schemas for the `gch_current` BQ dataset |
+| `view_domain_catalog.json` | `--full-refresh` / `--refresh-schema-only` | Domain tags (mobility\_spine, ffh\_profile, gch\_suppression, etc.) for 200+ views |
+| `schema_annotations.json` | `--refresh-schema-only` | Heuristic plain-English notes per column, merge-safe (human notes preserved) |
+| `campaign_embeddings.db` | `--full-refresh` | SQLite: sparse TF-IDF vectors per campaign for RAG retrieval |
+| `cross_campaign_patterns.json` | `--full-refresh` | Common targeting/exclusion patterns extracted across GOLD campaigns |
 
 **`verified_app_registry.json`** — additive, append-only by HITL YES. Applies to BRONZE and SILVER campaigns equally (both become GOLD on next refresh when `hitl_confirmed=true`):
 ```json

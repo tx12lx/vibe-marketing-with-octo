@@ -324,6 +324,8 @@ class HITLAuditLoop:
                 agent.set_knowledge_context(self._knowledge_ctx)
             agent.subscribe(feedback_input)
             agent.execute()
+            if self._knowledge_ctx is not None:
+                self._knowledge_ctx.reload_rules()
         except Exception:
             pass  # FeedbackAgent failures must never break the HITL NO path
 

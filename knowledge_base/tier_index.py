@@ -213,10 +213,15 @@ class GoldTierIndex:
         q_tokens = set(_tokenize(query))
         scored: list[tuple[int, str]] = []
         for key, rec in self._index.items():
-            text = (
-                f"{rec.campaign_name} {rec.targeting_summary} "
-                f"{rec.segment_summary} {rec.campaign_purpose}"
-            )
+            be = rec.brief_extraction or {}
+            text = " ".join(filter(None, [
+                rec.campaign_name,
+                rec.targeting_summary,
+                rec.segment_summary,
+                rec.campaign_purpose,
+                be.get("campaign_strategy_summary", ""),
+                " ".join(be.get("exclusion_rules") or []),
+            ]))
             overlap = len(q_tokens & set(_tokenize(text)))
             scored.append((overlap, key))
         scored.sort(key=lambda x: (-x[0], x[1]))

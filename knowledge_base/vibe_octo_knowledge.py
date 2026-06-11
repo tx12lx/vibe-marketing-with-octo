@@ -736,6 +736,107 @@ def _build_brief_deployment(
 
 
 # ---------------------------------------------------------------------------
+# Schema annotation heuristics
+# ---------------------------------------------------------------------------
+
+# Ordered list of (pattern_fn, note) pairs applied to column names.
+# Each pattern_fn receives the UPPER-CASED column name and returns bool.
+# First match wins.
+_ANNOTATION_RULES: list[tuple] = [
+    # Exact-match well-known keys
+    (lambda n: n == "MOB_BAN",       "Mobility Billing Account Number — primary join key for wireless sizing"),
+    (lambda n: n == "BACCT_NUM",     "Business Account Number — primary join key for Home Solutions (FFH) sizing"),
+    (lambda n: n == "BAN",           "Billing Account Number — join key"),
+    # Suffix patterns
+    (lambda n: n.endswith("_BAN"),   "Billing Account Number — join key"),
+    (lambda n: n.endswith("_STATUS_CD"), "Account or service status code — ACT=active, SUS=suspended, CAN=cancelled"),
+    (lambda n: n.endswith("_STATUS"), "Status field — check reference table for valid values"),
+    (lambda n: n.endswith("_CD"),    "Code value — join to reference/lookup table before displaying"),
+    (lambda n: n.endswith("_DT"),    "Date field (YYYYMMDD or ISO format)"),
+    (lambda n: n.endswith("_FLG"),   "Boolean flag (Y/N or 1/0)"),
+    (lambda n: n.endswith("_IND"),   "Indicator field (Y/N or 1/0)"),
+    (lambda n: n.endswith("_AMT"),   "Monetary amount field"),
+    (lambda n: n.endswith("_NUM"),   "Numeric identifier or count field"),
+    (lambda n: n.endswith("_NM"),    "Name or label field"),
+    (lambda n: n.endswith("_ID"),    "Identifier — foreign key or surrogate key"),
+    (lambda n: n.endswith("_TYPE"),  "Type classification code"),
+    # Prefix patterns
+    (lambda n: n.startswith("MOB_"), "Mobility domain field"),
+    (lambda n: n.startswith("FFH_"), "Fixed/Home Solutions domain field"),
+    # Substring patterns
+    (lambda n: "SCORE" in n,         "Propensity or model score — higher value = more likely"),
+    (lambda n: "SUPPRESS" in n,      "Suppression indicator — exclude records flagged here"),
+    (lambda n: "SUPPRESSION" in n,   "Suppression flag — exclude records flagged here"),
+    (lambda n: "CAMPAIGN" in n or "CAMP_" in n, "Campaign identifier or campaign-related field"),
+    (lambda n: "EMAIL" in n,         "Email address or email-related field"),
+    (lambda n: "PHONE" in n,         "Phone number field"),
+    (lambda n: "PROV" in n,          "Province code (AB, BC, ON, QC, etc.)"),
+    (lambda n: "TENURE" in n,        "Account tenure — months or years as customer"),
+    (lambda n: "ELIG" in n,          "Eligibility indicator — Y if eligible for product or offer"),
+    (lambda n: "DNC" in n,           "Do-Not-Contact flag — exclude if set"),
+    (lambda n: "OPT" in n,           "Opt-in/opt-out consent field"),
+    (lambda n: "CONTRACT" in n,      "Contract term or contract-related field"),
+]
+
+
+def _annotate_column(col_name: str) -> str:
+    """Return a heuristic note for a column name, or '' if no pattern matches."""
+    upper = col_name.upper()
+    for pattern_fn, note in _ANNOTATION_RULES:
+        try:
+            if pattern_fn(upper):
+                return note
+        except Exception:
+            continue
+    return ""
+
+
+def _build_schema_annotations(
+    artifacts_dir: Path,
+    adobe_schema: dict,
+    camp_data_schema: dict,
+    gch_schema: dict,
+) -> dict:
+    """Merge-safe heuristic annotation builder for all schema artifacts.
+
+    Reads existing schema_annotations.json (preserves human-written notes).
+    Adds a heuristic note for every unannotated column.
+    Never overwrites an existing non-empty annotation.
+    Returns the merged dict (caller must write it atomically).
+
+    No LLM calls. No network calls. Pure Python deterministic pattern matching.
+    """
+    ann_path = artifacts_dir / "schema_annotations.json"
+    existing: dict = {}
+    if ann_path.exists():
+        try:
+            existing = json.loads(ann_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+
+    result: dict = {k: dict(v) for k, v in existing.items()}  # deep copy
+
+    for schema_data in (adobe_schema, camp_data_schema, gch_schema):
+        views = schema_data.get("views", {})
+        if not isinstance(views, dict):
+            continue
+        for view_name, view_data in views.items():
+            if view_name not in result:
+                result[view_name] = {}
+            view_annots = result[view_name]
+            for col in (view_data.get("columns") or []):
+                col_name = col.get("name", "") if isinstance(col, dict) else str(col)
+                if not col_name:
+                    continue
+                if view_annots.get(col_name):
+                    continue  # preserve existing human note
+                note = _annotate_column(col_name)
+                view_annots[col_name] = note  # "" is fine — placeholder slot
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
 
@@ -1081,6 +1182,7 @@ Note: ACC summary is authoritative where conflicts exist."""
             "campaign_data_schema.json",
             "gch_current_schema.json",
             "view_domain_catalog.json",
+            "schema_annotations.json",
             "cross_campaign_patterns.json",
             "ingestion_report.json",
             "ingestion_log.json",
@@ -1137,12 +1239,20 @@ Note: ACC summary is authoritative where conflicts exist."""
     def run_refresh_schema_only(self) -> None:
         """Re-fetch all three dataset schemas and regenerate the view domain catalog.
 
-        Skips campaign ingestion and brief fetching.
+        Also seeds schema_annotations.json with heuristic column notes for any
+        column not yet annotated (preserves existing human-written notes).
+        Skips campaign ingestion and brief fetching. BQ-only, no Workspace calls.
         """
         print("\n=== VIBE OCTO KNOWLEDGE v4 — REFRESH SCHEMA ONLY ===")
         adobe_schema = self._phase2_adobe_schema()
         camp_data_schema, gch_schema = self._phase2b_execution_schemas()
         domain_catalog = self._phase2c_domain_catalog(camp_data_schema, gch_schema)
+        annotations = _build_schema_annotations(
+            self._artifacts_dir,
+            adobe_schema,
+            camp_data_schema,
+            gch_schema,
+        )
 
         if self.dry_run:
             print("\n[DRY-RUN] Schema artifacts not written.")
@@ -1153,6 +1263,7 @@ Note: ACC summary is authoritative where conflicts exist."""
             "campaign_data_schema.json": camp_data_schema,
             "gch_current_schema.json":  gch_schema,
             "view_domain_catalog.json": domain_catalog,
+            "schema_annotations.json":  annotations,
         }
         print()
         for filename, data in to_write.items():

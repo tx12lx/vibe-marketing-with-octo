@@ -389,11 +389,14 @@ class KnowledgeContext:
         result: list[tuple[dict, dict]] = []
         for c in self._campaigns:
             acc = c.get("acc_summaries") or {}
+            be = c.get("brief_extraction") or {}
             text = " ".join(filter(None, [
                 c.get("campaign_name", ""),
                 c.get("campaign_purpose", ""),
                 acc.get("targeting_summary", ""),
                 acc.get("segment_summary", ""),
+                be.get("campaign_strategy_summary", ""),
+                " ".join(be.get("exclusion_rules") or []),
             ]))
             vec = _tf_vector(text)
             result.append((c, vec))

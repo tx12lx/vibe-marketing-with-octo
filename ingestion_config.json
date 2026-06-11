@@ -22,6 +22,8 @@
   "brief_fetch": {
     "timeout_seconds": 60,
     "skip_on_error": true,
-    "max_retries": 2
+    "max_retries": 2,
+    "inter_fetch_delay_seconds": 15,
+    "max_per_run": 10
   }
 }
