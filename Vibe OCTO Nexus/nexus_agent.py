@@ -774,8 +774,10 @@ class NexusAgent:
                 pass
         else:
             try:
-                data = json.loads((_ROOT_DIR / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
-                # Key is "campaigns" (not "gold_records")
+                data = json.loads(
+                    (_ROOT_DIR / "knowledge_base" / "artifacts" / "semantic_knowledge_index.json")
+                    .read_text(encoding="utf-8")
+                )
                 for rec in data.get("campaigns", [])[:20]:
                     code = rec.get("camp_id", "")
                     if code and code not in codes:

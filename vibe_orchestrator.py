@@ -179,12 +179,13 @@ def _print_kb_status(
     """Print the warm startup banner showing knowledge base readiness."""
     kb_meta: dict = {}
     try:
-        kb_meta = json.loads((_ROOT / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
+        kb_meta = json.loads((_ARTIFACTS_DIR / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
     except Exception:
         pass
 
-    total = (kb_meta.get("gold_count") or 0) + (kb_meta.get("bronze_count") or 0)
-    gold = kb_meta.get("gold_count") or 0
+    summary = kb_meta.get("ingestion_summary") or kb_meta
+    total = summary.get("total_campaigns") or (summary.get("gold_count") or 0) + (summary.get("bronze_count") or 0)
+    gold = summary.get("gold_count") or 0
     generated_at = kb_meta.get("generated_at") or ""
     ts_display = generated_at[:16].replace("T", " ") + " UTC" if generated_at else "unknown"
     view_count = len({c.table_name for c in snapshot.columns})
@@ -1137,7 +1138,7 @@ def main() -> None:
     # Run manually when needed:
     #   python -m knowledge_base.vibe_octo_knowledge --full-refresh
     gold_index = GoldTierIndex()
-    gold_index.load_from_file(_ROOT / "semantic_knowledge_index.json")
+    gold_index.load_from_file(_ARTIFACTS_DIR / "semantic_knowledge_index.json")
 
     # Pillar 2: Schema Discovery — load from pre-built artifact for instant startup.
     # Falls back to a live INFORMATION_SCHEMA BQ query only if the artifact is missing.

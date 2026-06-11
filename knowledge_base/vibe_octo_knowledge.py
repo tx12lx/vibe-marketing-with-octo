@@ -15,7 +15,7 @@ What changed from v2
 
 Data sources (read-only, in-memory)
 -------------------------------------
-1. wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_knowledge
+1. wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments
    Columns of interest: camp_id, sub_camp_id, campaign_name, cadence, medium,
    campaign_purpose, primary_products, targeting_summary, segment_summary,
    databrief_link.
@@ -63,7 +63,7 @@ from core.brief_fetcher import BriefFetcher, BriefFetchError  # noqa: E402
 # ---------------------------------------------------------------------------
 
 CAMPAIGN_PROJECT = "wb-tian-pr-d0dbe6"
-CAMPAIGN_TABLE = "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_knowledge"
+CAMPAIGN_TABLE = "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments"
 
 ADOBE_PROJECT = "bi-srv-hsmdet-pr-7b9def"
 ADOBE_DATASET = "adobe"
@@ -874,7 +874,7 @@ class VibeOctoKnowledge:
         query = (
             f"SELECT column_name "
             f"FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS` "
-            f"WHERE table_name = 'campaign_knowledge' "
+            f"WHERE table_name = 'campaign_deployments' "
             f"ORDER BY ordinal_position"
         )
         result = self._campaign_bq.query(query).result()

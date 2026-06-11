@@ -7,7 +7,7 @@
   },
   "source": {
     "bq_project": "wb-tian-pr-d0dbe6",
-    "bq_table": "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_knowledge",
+    "bq_table": "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments",
     "active_filter_note": "Column names resolved from INFORMATION_SCHEMA at runtime"
   },
   "gold_classification": {

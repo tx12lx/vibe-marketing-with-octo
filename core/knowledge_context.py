@@ -223,7 +223,7 @@ class KnowledgeContext:
     # ------------------------------------------------------------------
 
     def _load_campaigns(self) -> list[dict]:
-        path = self._root_dir / "semantic_knowledge_index.json"
+        path = self._artifacts_dir / "semantic_knowledge_index.json"
         data = self._load_json_safe(path) or {}
         return data.get("campaigns", [])
 

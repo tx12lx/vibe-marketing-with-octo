@@ -54,15 +54,18 @@ class GoldTierIndex:
             _log.warning("Failed to load knowledge index from %s: %s", index_path, exc)
             return
 
-        for raw in data.get("gold_records", []):
+        for raw in data.get("campaigns", []):
             try:
+                # v3+ schema nests targeting/segment under acc_summaries; fall back to
+                # flat fields for compatibility with older artifacts.
+                acc = raw.get("acc_summaries") or {}
                 rec = GoldCampaignRecord(
                     camp_id=raw.get("camp_id", ""),
                     sub_camp_id=raw.get("sub_camp_id", ""),
                     campaign_name=raw.get("campaign_name", ""),
-                    targeting_summary=raw.get("targeting_summary", ""),
-                    segment_summary=raw.get("segment_summary", ""),
-                    brief_text=raw.get("brief_text", ""),
+                    targeting_summary=acc.get("targeting_summary") or raw.get("targeting_summary", ""),
+                    segment_summary=acc.get("segment_summary") or raw.get("segment_summary", ""),
+                    brief_text="",
                     cadence=raw.get("cadence", ""),
                     medium=raw.get("medium", ""),
                     campaign_purpose=raw.get("campaign_purpose", ""),

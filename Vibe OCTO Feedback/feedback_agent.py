@@ -67,7 +67,7 @@ from core.thought_display import ThoughtDisplay  # noqa: E402
 _FUELIX_BASE = "https://api.fuelix.ai"
 _RULES_PATH = _ROOT_DIR / "business_rules.json"
 _GLOSSARY_PATH = _ROOT_DIR / "glossary.json"
-_KNOWLEDGE_INDEX_PATH = _ROOT_DIR / "semantic_knowledge_index.json"
+_KNOWLEDGE_INDEX_PATH = _ROOT_DIR / "knowledge_base" / "artifacts" / "semantic_knowledge_index.json"
 _ADOBE_SCHEMA_PATH = _ROOT_DIR / "knowledge_base" / "artifacts" / "adobe_schema.json"
 
 # ---------------------------------------------------------------------------
