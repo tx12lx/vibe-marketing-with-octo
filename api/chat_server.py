@@ -62,6 +62,7 @@ from vibe_orchestrator import (  # noqa: E402
     process_core_request,
     _ARTIFACTS_DIR,
 )
+from core.audit_logger import HITL_YES  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
 from pydantic_schemas import BriefingOutput, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from api.session_store import SessionStore  # noqa: E402
@@ -174,6 +175,9 @@ async def _handle_message(payload: dict) -> JSONResponse:
     if not message_text:
         return JSONResponse({"text": "I didn't catch that. Could you rephrase your question?"})
 
+    sender_name: str = (
+        payload.get("message", {}).get("sender", {}).get("displayName", "unknown")
+    )
     session = _session_store.get(space_name)
 
     # If the user previously clicked "Something's wrong", treat this message as
@@ -199,6 +203,7 @@ async def _handle_message(payload: dict) -> JSONResponse:
         _process_query_sync,
         message_text,
         space_name,
+        sender_name,
     )
     return JSONResponse(response_body)
 
@@ -216,7 +221,7 @@ def _handle_card_click(payload: dict) -> JSONResponse:
     session = _session_store.get(space_name)
 
     if function_name == "hitl_yes":
-        body = _handle_hitl_yes(session)
+        body = _handle_hitl_yes(session, space_name=space_name)
         session.clear_hitl()
         return JSONResponse({"actionResponse": {"type": "UPDATE_MESSAGE"}, **body})
 
@@ -243,9 +248,11 @@ def _handle_card_click(payload: dict) -> JSONResponse:
 # Sync pipeline execution (runs in thread pool)
 # ---------------------------------------------------------------------------
 
-def _process_query_sync(message_text: str, space_name: str) -> dict:
+def _process_query_sync(message_text: str, space_name: str, user: str = "unknown") -> dict:
     """Run process_core_request and format the result as a Chat card dict."""
-    result: RequestResult = process_core_request(message_text, _runtime)
+    result: RequestResult = process_core_request(
+        message_text, _runtime, session_id=space_name, user=user
+    )
     session = _session_store.get(space_name)
 
     if result.error:
@@ -309,7 +316,7 @@ def _process_correction_sync(
 # HITL action handlers
 # ---------------------------------------------------------------------------
 
-def _handle_hitl_yes(session) -> dict:
+def _handle_hitl_yes(session, space_name: str = "") -> dict:
     """Save the result via HITLAuditLoop._handle_yes() and return a confirmation card."""
     if _runtime is None:
         return format_error_card("Runtime not available.")
@@ -322,6 +329,20 @@ def _handle_hitl_yes(session) -> dict:
         try:
             _runtime.hitl._handle_yes(spec, log, brief)
             campaign = spec.campaign_name or "Result"
+
+            # Audit: log HITL resolution as a follow-up entry (pipeline entry was
+            # already written in process_core_request with hitl_outcome=None).
+            if _runtime.audit_logger is not None:
+                try:
+                    _runtime.audit_logger.log_hitl_resolution(
+                        session_id=space_name or "api",
+                        user=session.last_sender if hasattr(session, "last_sender") else "unknown",
+                        campaign_id=spec.campaign_code,
+                        hitl_outcome=HITL_YES,
+                    )
+                except Exception:
+                    pass
+
             return format_confirmation_card(
                 f"'{campaign}' has been saved as a verified blueprint.\n"
                 "I'll use it as a reference for future requests."

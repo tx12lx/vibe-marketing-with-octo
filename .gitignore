@@ -26,6 +26,9 @@ knowledge_base/artifacts/
 ingestion_log.json
 ingestion_report.json
 
+# Audit logs — contain session metadata; never committed
+logs/
+
 # Editor / OS
 .DS_Store
 Thumbs.db

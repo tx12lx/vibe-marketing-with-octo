@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 import warnings
 from datetime import datetime, timezone
@@ -69,6 +70,7 @@ from core.brief_fetcher import BriefFetcher  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 from core.business_rules_registry import BusinessRulesRegistry  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
+from core.audit_logger import AuditLogger, HITL_YES, HITL_NO, HITL_REVIEW_YES, HITL_REVIEW_NO  # noqa: E402
 
 
 _ADC_REAUTH_CMD = (
@@ -663,6 +665,22 @@ def _direct_count_with_recovery(
 
 
 # ---------------------------------------------------------------------------
+# Audit helpers
+# ---------------------------------------------------------------------------
+
+def _agent_called_for_intent(intent_type: str) -> str:
+    """Map intent type to the agent WORKER_ID(s) that handle it."""
+    _map = {
+        "sizing_request":   "quant_v1",
+        "campaign_execution": "quant_v1,briefing_v1",
+        "brief_generation": "briefing_v1",
+        "brief_qa":         "briefing_v1",
+        "general_question": "nexus_v1",
+    }
+    return _map.get(intent_type, "nexus_v1")
+
+
+# ---------------------------------------------------------------------------
 # Unified intent-based router
 # ---------------------------------------------------------------------------
 
@@ -1029,8 +1047,15 @@ def _simplified_hitl(
     query: str,
     intent_type: str,
     knowledge_ctx: Optional[KnowledgeContext] = None,
-) -> None:
-    """Numbered HITL menu for ad-hoc sizing, brief-only, and general questions."""
+) -> str:
+    """Numbered HITL menu for ad-hoc sizing, brief-only, and general questions.
+
+    Returns an outcome string for audit logging:
+      "yes"        — user confirmed result (option 1)
+      "review_yes" — user reviewed then confirmed (option 2 -> 1)
+      "review_no"  — user reviewed then reported issue (option 2 -> 3)
+      "no"         — user reported issue directly (option 3)
+    """
     audience_count = log.final_count if log is not None else None
     campaign_name = spec.campaign_name if spec is not None else None
     confidence = brief_output.confidence_score if brief_output is not None else None
@@ -1054,7 +1079,7 @@ def _simplified_hitl(
 
         if response == "1":
             print("\n  Wonderful! Moving on.\n")
-            break
+            return HITL_YES
 
         elif response == "2" and show_option2:
             if intent_type in ("brief_generation", "brief_qa") and brief_output is not None:
@@ -1070,17 +1095,16 @@ def _simplified_hitl(
                 r2 = input("  Enter 1 or 3: ").strip()
                 if r2 == "1":
                     print("\n  Wonderful! Moving on.\n")
-                    break
+                    return HITL_REVIEW_YES
                 elif r2 == "3":
                     _collect_correction_and_feedback(spec, log, query, knowledge_ctx=knowledge_ctx)
-                    break
+                    return HITL_REVIEW_NO
                 else:
                     print("  Please enter 1 or 3.")
-            break
 
         elif response == "3":
             _collect_correction_and_feedback(spec, log, query, knowledge_ctx=knowledge_ctx)
-            break
+            return HITL_NO
 
         else:
             if show_option2:
@@ -1102,8 +1126,11 @@ def _run_console(
     hitl: HITLAuditLoop,
     rules_registry: Optional[BusinessRulesRegistry] = None,
     knowledge_ctx: Optional[KnowledgeContext] = None,
+    audit_logger: Optional[AuditLogger] = None,
 ) -> None:
     last_log: Optional[QuantAuditLog] = None
+    session_id = uuid.uuid4().hex
+    audit_user = os.getenv("USERNAME") or os.getenv("USER") or "unknown"
 
     while True:
         print("  How can the OCTO team help you today?\n")
@@ -1134,6 +1161,8 @@ def _run_console(
             # Step 2: Intent classification — always consults knowledge layer
             intent = nexus.classify_intent(query)
 
+            _pipeline_start = time.perf_counter()
+
             # Steps 3-5: Unified knowledge-grounded pipeline
             spec, log, brief_output = route_by_intent(
                 nexus,
@@ -1145,6 +1174,9 @@ def _run_console(
                 schema_snapshot,
                 rules_registry,
             )
+
+            _pipeline_ms = int((time.perf_counter() - _pipeline_start) * 1000)
+
             if log:
                 last_log = log
                 print(_format_audit_log(log))
@@ -1154,20 +1186,66 @@ def _run_console(
             # Step 7: HITL — always triggered for any execution that produced output.
             # Full HITL (spec + log) fires for campaign sizing and execution.
             # Simplified HITL fires for ad-hoc sizing, brief-only, and general questions.
+            hitl_outcome: Optional[str] = None
             if spec is not None and log is not None:
                 should_continue = hitl.prompt(spec, log, brief_output, intent_type=intent.intent_type)
+                hitl_outcome = HITL_YES if should_continue else HITL_NO
                 if rules_registry is not None:
                     rules_registry._load()
                 if knowledge_ctx is not None:
                     knowledge_ctx.reload_rules()
+                if audit_logger is not None:
+                    try:
+                        audit_logger.log(
+                            session_id=session_id,
+                            user=audit_user,
+                            intent_type=intent.intent_type,
+                            campaign_id=spec.campaign_code if spec else None,
+                            sql=log.sql if log else None,
+                            agent_called=_agent_called_for_intent(intent.intent_type),
+                            hitl_outcome=hitl_outcome,
+                            duration_ms=_pipeline_ms,
+                        )
+                    except Exception:
+                        pass
                 if not should_continue:
                     break
             elif spec is not None or log is not None or brief_output is not None or intent.intent_type == "general_question":
-                _simplified_hitl(spec, log, brief_output, query, intent.intent_type, knowledge_ctx=knowledge_ctx)
+                hitl_outcome = _simplified_hitl(spec, log, brief_output, query, intent.intent_type, knowledge_ctx=knowledge_ctx)
                 if rules_registry is not None:
                     rules_registry._load()
                 if knowledge_ctx is not None:
                     knowledge_ctx.reload_rules()
+                if audit_logger is not None:
+                    try:
+                        audit_logger.log(
+                            session_id=session_id,
+                            user=audit_user,
+                            intent_type=intent.intent_type,
+                            campaign_id=spec.campaign_code if spec else None,
+                            sql=log.sql if log else None,
+                            agent_called=_agent_called_for_intent(intent.intent_type),
+                            hitl_outcome=hitl_outcome,
+                            duration_ms=_pipeline_ms,
+                        )
+                    except Exception:
+                        pass
+            else:
+                # No output produced (error path or unrecognised intent)
+                if audit_logger is not None:
+                    try:
+                        audit_logger.log(
+                            session_id=session_id,
+                            user=audit_user,
+                            intent_type=intent.intent_type,
+                            campaign_id=None,
+                            sql=None,
+                            agent_called=_agent_called_for_intent(intent.intent_type),
+                            hitl_outcome=None,
+                            duration_ms=_pipeline_ms,
+                        )
+                    except Exception:
+                        pass
 
         except Exception as _exc:
             # Fix 4: Never exit the console loop due to an agent failure.
@@ -1193,6 +1271,7 @@ class VibeRuntime:
         hitl: "HITLAuditLoop",
         rules_registry: BusinessRulesRegistry,
         knowledge_ctx: KnowledgeContext,
+        audit_logger: Optional[AuditLogger] = None,
     ) -> None:
         self.nexus = nexus
         self.quant = quant
@@ -1202,6 +1281,7 @@ class VibeRuntime:
         self.hitl = hitl
         self.rules_registry = rules_registry
         self.knowledge_ctx = knowledge_ctx
+        self.audit_logger = audit_logger
 
 
 class RequestResult:
@@ -1269,6 +1349,7 @@ def build_runtime() -> VibeRuntime:
     hitl.set_knowledge_context(knowledge_ctx)
 
     rules_registry = BusinessRulesRegistry(_BUSINESS_RULES_PATH)
+    audit_logger = AuditLogger(logs_dir=_ROOT / "logs")
 
     return VibeRuntime(
         nexus=nexus,
@@ -1279,16 +1360,25 @@ def build_runtime() -> VibeRuntime:
         hitl=hitl,
         rules_registry=rules_registry,
         knowledge_ctx=knowledge_ctx,
+        audit_logger=audit_logger,
     )
 
 
-def process_core_request(query: str, rt: VibeRuntime) -> RequestResult:
+def process_core_request(
+    query: str,
+    rt: VibeRuntime,
+    session_id: Optional[str] = None,
+    user: str = "unknown",
+) -> RequestResult:
     """Execute the full pipeline for a single query without any terminal I/O.
 
     Suitable for API mode. Column errors are returned as RequestResult.error
     rather than triggering input(). HITL decisions are left to the caller.
+    Writes an audit entry immediately after the pipeline (hitl_outcome=None
+    because HITL button clicks arrive asynchronously in API mode).
     """
     _log = logging.getLogger(__name__)
+    _start = time.perf_counter()
     try:
         ctx = _build_dynamic_context(query, rt.gold_index)
         if ctx:
@@ -1307,7 +1397,22 @@ def process_core_request(query: str, rt: VibeRuntime) -> RequestResult:
             rt.rules_registry,
             allow_interactive=False,
         )
-        return RequestResult(intent=intent, spec=spec, log=log, brief_output=brief_output)
+        result = RequestResult(intent=intent, spec=spec, log=log, brief_output=brief_output)
+        if rt.audit_logger is not None:
+            try:
+                rt.audit_logger.log(
+                    session_id=session_id or "api",
+                    user=user,
+                    intent_type=intent.intent_type,
+                    campaign_id=spec.campaign_code if spec else None,
+                    sql=log.sql if log else None,
+                    agent_called=_agent_called_for_intent(intent.intent_type),
+                    hitl_outcome=None,
+                    duration_ms=int((time.perf_counter() - _start) * 1000),
+                )
+            except Exception:
+                pass
+        return result
     except Exception as exc:
         _log.exception("process_core_request failed for query %r: %s", query[:80], exc)
         _fallback = IntentClassification(
@@ -1355,6 +1460,7 @@ def main() -> None:
         rt.hitl,
         rt.rules_registry,
         rt.knowledge_ctx,
+        rt.audit_logger,
     )
 
 
