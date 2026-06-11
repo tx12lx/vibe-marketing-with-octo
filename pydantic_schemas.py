@@ -1,8 +1,26 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+
+class BriefExtraction(BaseModel):
+    """Structured extraction from a campaign data brief — produced by two-stage LLM extraction
+    in `--refresh-briefs` mode.  All fields default to empty so records written by
+    `--full-refresh` (which does not contact Google Sheets) are schema-valid."""
+
+    campaign_strategy_summary: str = ""
+    targeting_filters: list[str] = []
+    exclusion_rules: list[str] = []
+    channel_governance: dict[str, Any] = {}
+    geographic_scope: list[str] = []
+    lifecycle_constraints: list[str] = []
+    product_eligibility_pairs: list[str] = []
+    segmentation_only_notes: list[str] = []
+    ambiguities_found: list[str] = []
+    extraction_confidence: dict[str, float] = {}
+    extracted_at: Optional[str] = None
 
 
 class CampaignCriteria(BaseModel):

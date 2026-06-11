@@ -254,7 +254,11 @@ class ThoughtDisplay:
 
     @classmethod
     def knowledge_lookup(
-        cls, campaign_name: str, tier: str, confidence: float
+        cls,
+        campaign_name: str,
+        tier: str,
+        confidence: float,
+        conflict_notes: Optional[list] = None,
     ) -> None:
         if tier == "GOLD":
             title = "Great news! I found a proven blueprint for this campaign."
@@ -263,6 +267,12 @@ class ThoughtDisplay:
                 *_label_rows("Blueprint", "Verified from past executions"),
                 *_label_rows("Confidence", f"{_bar(confidence)} {confidence:.0%}"),
             ]
+            if conflict_notes:
+                body.append(_blank())
+                body += _label_rows(
+                    "Note",
+                    f"{len(conflict_notes)} brief vs. ACC discrepancy note(s) — review before executing.",
+                )
         else:
             title = "Building your campaign from the data brief."
             body = [

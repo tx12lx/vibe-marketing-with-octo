@@ -1140,11 +1140,11 @@ def main() -> None:
     gold_index = GoldTierIndex()
     gold_index.load_from_file(_ARTIFACTS_DIR / "semantic_knowledge_index.json")
 
-    # Pillar 2: Schema Discovery — load from pre-built artifact for instant startup.
-    # Falls back to a live INFORMATION_SCHEMA BQ query only if the artifact is missing.
+    # Pillar 2: Schema Discovery — load from pre-built artifacts for instant startup.
+    # Covers all three execution datasets; falls back to live BQ only if artifacts are missing.
     schema_discovery = SchemaDiscoveryLayer(
         project="bi-srv-hsmdet-pr-7b9def",
-        datasets=["adobe"],
+        datasets=["adobe", "campaign_data", "gch_current"],
         cache_path=_ROOT / ".sdl_schema_cache.json",
     )
     snapshot = _load_adobe_schema_from_disk(_ARTIFACTS_DIR)

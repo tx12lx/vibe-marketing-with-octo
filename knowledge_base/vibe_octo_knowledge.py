@@ -1,40 +1,42 @@
-"""knowledge_base/vibe_octo_knowledge.py — Vibe OCTO Knowledge Ingestion Agent (v3).
+"""knowledge_base/vibe_octo_knowledge.py — Vibe OCTO Knowledge Ingestion Agent (v4).
 
-What changed from v2
+What changed from v3
 --------------------
-- brief_texts.json removed: raw brief content is never persisted to disk.
-- GOLD insight extraction: targeting_summary + segment_summary are parsed to derive
-  cross-campaign patterns (telecom standards, targeting criteria, exclusion rules).
-- Structured requirement extraction: brief text -> {targeting, exclusions, personalization}
-  stored per deployment; raw text discarded after extraction.
-- GOLD-guided hints: SILVER/BRONZE deployments receive GOLD-derived standard patterns
-  as guidance when their own brief is absent or incomplete.
-- Deployment-aware schema: each BQ row is one deployment under its campaign.
-- Graceful degradation: inaccessible briefs -> BRONZE + GOLD standard rules, no error raised.
-- schema_version: "3.0"
+- Three-mode ingestion: --full-refresh never touches Google Sheets (safe for daily use).
+  Brief fetching is isolated to --refresh-briefs (rate-limited, confirmation required).
+- LLM-based brief extraction via Fuel iX (two-stage: strategy interpretation + structured
+  extraction) replaces regex snippet extraction.
+- Conflict detection: GOLD campaigns get an additional LLM call comparing brief vs. ACC.
+- schema_version: "4.0"
+- New artifacts: campaign_data_schema.json, gch_current_schema.json, view_domain_catalog.json
+- Sparse TF-IDF embeddings stored in campaign_embeddings.db (SQLite) for RAG retrieval.
 
-Data sources (read-only, in-memory)
--------------------------------------
-1. wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments
-   Columns of interest: camp_id, sub_camp_id, campaign_name, cadence, medium,
-   campaign_purpose, primary_products, targeting_summary, segment_summary,
-   databrief_link.
+Three ingestion modes
+---------------------
+  --full-refresh     : Queries BQ; carries forward existing brief_extraction; no Sheets access.
+  --incremental      : Same as --full-refresh but only processes new/changed campaigns.
+  --refresh-briefs   : Fetches Google Sheets briefs (rate-limited, confirmation required),
+                       then runs two-stage LLM extraction + conflict detection.
+  --refresh-schema-only : Re-fetches all three dataset schemas and domain catalog.
+  --validate         : Verify all artifacts exist and are valid JSON.
 
-2. bi-srv-hsmdet-pr-7b9def.adobe (INFORMATION_SCHEMA.TABLES + COLUMNS)
+Data sources (read-only)
+-------------------------
+1. BQ campaign metadata: wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments
+2. BQ execution schemas: bi-srv-hsmdet-pr-7b9def.{adobe, campaign_data, gch_current}
+3. Google Sheets briefs: accessed only via --refresh-briefs
 
 Output artifacts  (knowledge_base/artifacts/)
 ----------------------------------------------
-  semantic_knowledge_index.json  (v3.0 — deployment-aware, GOLD insights embedded)
+  semantic_knowledge_index.json  (v4.0)
   adobe_schema.json
+  campaign_data_schema.json      (new)
+  gch_current_schema.json        (new)
   cross_campaign_patterns.json
+  view_domain_catalog.json       (new)
   ingestion_report.json
   ingestion_log.json
-
-Usage
------
-  python -m knowledge_base.vibe_octo_knowledge --full-refresh
-  python -m knowledge_base.vibe_octo_knowledge --refresh-schema-only
-  python -m knowledge_base.vibe_octo_knowledge --validate
+  campaign_embeddings.db         (SQLite — TF-IDF vectors for RAG)
 """
 from __future__ import annotations
 
@@ -67,6 +69,8 @@ CAMPAIGN_TABLE = "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments"
 
 ADOBE_PROJECT = "bi-srv-hsmdet-pr-7b9def"
 ADOBE_DATASET = "adobe"
+CAMPAIGN_DATA_DATASET = "campaign_data"
+GCH_DATASET = "gch_current"
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
 
@@ -76,13 +80,119 @@ DEFAULT_BRIEF_TIMEOUT = int(os.environ.get("BRIEF_FETCH_TIMEOUT", "60"))
 # Any other file found there is treated as a stale download and removed.
 _APPROVED_ARTIFACTS = frozenset({
     "semantic_knowledge_index.json",
+    "semantic_knowledge_index.backup.json",
     "adobe_schema.json",
+    "campaign_data_schema.json",
+    "gch_current_schema.json",
+    "view_domain_catalog.json",
+    "schema_annotations.json",
     "cross_campaign_patterns.json",
     "ingestion_report.json",
     "ingestion_log.json",
+    "campaign_embeddings.db",
 })
 
 _log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# View domain classification (keyword-based heuristics for initial population)
+# ---------------------------------------------------------------------------
+
+# Order matters: first match wins.
+_DOMAIN_RULES: list[tuple[str, str]] = [
+    # GCH suppression tables (dataset = gch_current)
+    ("bq_campaign_segment",           "gch_suppression"),
+    ("bq_campaign_communication",     "gch_suppression"),
+    ("bq_campaign_description",       "gch_suppression"),
+    # Mobility spine
+    ("bq_fda_mob_mobility_base",      "mobility_spine"),
+    ("mob_mobility_base",             "mobility_spine"),
+    ("bq_fda_mob",                    "mobility_spine"),
+    # FFH / Home Solutions
+    ("bq_dly_dbm_customer_profl",     "ffh_profile"),
+    ("dbm_customer_profl",            "ffh_profile"),
+    ("ffh",                           "ffh_profile"),
+    ("home_solutions",                "ffh_profile"),
+    ("internet",                      "ffh_profile"),
+    # NBA / propensity model scores
+    ("model_score_master",            "scoring"),
+    ("model_score",                   "scoring"),
+    ("propensity",                    "scoring"),
+    ("nba",                           "scoring"),
+    ("score_master",                  "scoring"),
+    # Channel governance / DNC
+    ("dnc",                           "channel_governance"),
+    ("do_not_contact",                "channel_governance"),
+    ("opt_out",                       "channel_governance"),
+    ("consent",                       "channel_governance"),
+    ("suppression",                   "channel_governance"),
+    # Product eligibility
+    ("eligib",                        "product_eligibility"),
+    ("product_elig",                  "product_eligibility"),
+    ("shs_elig",                      "product_eligibility"),
+    ("device_elig",                   "product_eligibility"),
+    # Campaign planning / deployment
+    ("plan_camp",                     "campaign_planning"),
+    ("camp_deploy",                   "campaign_planning"),
+    ("campaign_deploy",               "campaign_planning"),
+    ("campaign_plan",                 "campaign_planning"),
+]
+
+_DOMAIN_DESCRIPTIONS: dict[str, str] = {
+    "mobility_spine":      "Primary subscriber base for wireless/mobility campaign sizing",
+    "ffh_profile":         "Home Solutions customer profile for FFH/internet campaign sizing",
+    "scoring":             "NBA and propensity model scores for model-based targeting",
+    "gch_suppression":     "GCH Global Contact History — recency suppression exclusions",
+    "channel_governance":  "DNC, consent, and opt-out lists for channel-specific suppression",
+    "product_eligibility": "Product ownership and service eligibility views",
+    "campaign_planning":   "Campaign deployment metadata and targeting definitions",
+    "general":             "General-purpose view — review for applicable domain tag",
+}
+
+_VIEW_DESCRIPTIONS: dict[str, str] = {
+    "bq_fda_mob_mobility_base":              "Primary mobility subscriber base — COUNT(DISTINCT ban) for wireless sizing",
+    "bq_dly_dbm_customer_profl":             "Home Solutions customer profile — COUNT(DISTINCT BACCT_NUM) for FFH sizing",
+    "bq_fda_current_model_score_master_view": "NBA and propensity model scores — joined for model-based targeting",
+    "bq_campaign_segment":                   "GCH segment table — anti-join for recency suppression",
+    "bq_campaign_communication":             "GCH communication history — recency suppression by channel",
+    "bq_campaign_description":              "GCH campaign description — maps CAMPAIGN_CD for suppression rules",
+}
+
+
+def _classify_view_domain(view_name: str, dataset: str) -> str:
+    """Assign a domain tag to a BQ view name using keyword heuristics."""
+    # GCH dataset: all views are suppression by default
+    if dataset == GCH_DATASET:
+        lower = view_name.lower()
+        for prefix, domain in _DOMAIN_RULES:
+            if prefix in lower:
+                return domain
+        return "gch_suppression"
+
+    lower = view_name.lower()
+    for prefix, domain in _DOMAIN_RULES:
+        if prefix in lower:
+            return domain
+    return "general"
+
+
+def _describe_view(view_name: str) -> str:
+    """Return a known one-line description or generate a generic one."""
+    if view_name in _VIEW_DESCRIPTIONS:
+        return _VIEW_DESCRIPTIONS[view_name]
+    # Generic description from name structure
+    clean = view_name.replace("bq_", "").replace("_", " ").strip()
+    return f"{clean} view"
+
+
+def _infer_lob(view_name: str) -> str:
+    lower = view_name.lower()
+    if any(k in lower for k in ("mob", "mobility", "wireless")):
+        return "mobility"
+    if any(k in lower for k in ("ffh", "home", "internet", "customer_profl")):
+        return "ffh"
+    return "all"
+
 
 # ---------------------------------------------------------------------------
 # Column role discovery patterns
@@ -650,36 +760,327 @@ class VibeOctoKnowledge:
     # ------------------------------------------------------------------
 
     def run_full_refresh(self) -> None:
-        """Cleanup stale files, ingest all data, extract GOLD insights, write 5 artifacts."""
-        _config_path = Path(__file__).resolve().parent.parent / "ingestion_config.json"
-        if _config_path.exists():
-            try:
-                _cfg = json.loads(_config_path.read_text(encoding="utf-8"))
-                if _cfg.get("schedule", {}).get("mode") == "disabled":
-                    print(
-                        "\n  Auto-ingestion is currently disabled.\n"
-                        "  Running manual refresh..."
-                    )
-            except Exception:
-                pass
+        """Query BQ for campaign metadata; carry forward existing brief_extraction data.
 
-        print("\n=== VIBE OCTO KNOWLEDGE v3 — FULL REFRESH ===")
+        Does NOT access Google Sheets.  To populate brief_extraction fields,
+        run --refresh-briefs separately.  Safe for daily scheduled use.
+        """
+        print("\n=== VIBE OCTO KNOWLEDGE v4 — FULL REFRESH ===")
+        print("  (Brief fetching disabled — use --refresh-briefs to extract brief data)")
         run_at = datetime.now(tz=timezone.utc).isoformat()
 
         self._cleanup_stale_files()
 
-        campaigns, fetch_log, failures = self._phase1_campaigns_and_briefs()
+        # Load the existing index so we can carry forward brief_extraction data
+        old_index = self._load_existing_index()
+
+        # Phase 1: Query BQ for campaign metadata (no Sheets access)
+        campaigns = self._phase1_campaigns_bq_only()
+        fetch_log: list[dict] = []
+        failures: list[dict] = []
+
+        # Phase 2: Schema ingestion (all three datasets)
         adobe_schema = self._phase2_adobe_schema()
-        self._phase3_build_and_write(campaigns, fetch_log, failures, adobe_schema, run_at)
+        camp_data_schema, gch_schema = self._phase2b_execution_schemas()
+
+        # Phase 2c: View domain catalog
+        domain_catalog = self._phase2c_domain_catalog(camp_data_schema, gch_schema)
+
+        # Phase 3: Build and write all artifacts
+        self._phase3_build_and_write(
+            campaigns, fetch_log, failures, adobe_schema, run_at,
+            old_index=old_index,
+            camp_data_schema=camp_data_schema,
+            gch_schema=gch_schema,
+            domain_catalog=domain_catalog,
+        )
 
         print("\n=== FULL REFRESH COMPLETE ===\n")
 
+    def run_incremental(self) -> None:
+        """Ingest only campaigns added or modified since last refresh.
+
+        Same three-mode behavior as --full-refresh: no Sheets access, brief_extraction
+        carried forward from existing index.
+        """
+        print("\n=== VIBE OCTO KNOWLEDGE v4 — INCREMENTAL REFRESH ===")
+        run_at = datetime.now(tz=timezone.utc).isoformat()
+
+        old_index = self._load_existing_index()
+        old_timestamps: dict[str, str] = {}
+        for rec in old_index.get("campaigns", []):
+            key = f"{rec.get('camp_id', '')}::{rec.get('sub_camp_id', '')}"
+            old_timestamps[key] = rec.get("last_ingested_at", rec.get("ingested_at", ""))
+
+        all_campaigns = self._phase1_campaigns_bq_only()
+
+        # Only process campaigns whose BQ row is new or has a newer ingested_at timestamp
+        new_or_changed = [
+            c for c in all_campaigns
+            if f"{c['camp_id']}::{c['sub_camp_id']}" not in old_timestamps
+        ]
+
+        if not new_or_changed:
+            print("  No new or changed campaigns found. Index is up to date.")
+            return
+
+        print(f"  Processing {len(new_or_changed)} new/changed campaign(s).")
+
+        # Merge: update changed campaigns, keep unchanged ones from old index
+        merged = {
+            f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}": r
+            for r in old_index.get("campaigns", [])
+        }
+        for c in new_or_changed:
+            key = f"{c['camp_id']}::{c['sub_camp_id']}"
+            merged[key] = c
+
+        campaigns = list(merged.values())
+        adobe_schema = self._phase2_adobe_schema()
+        camp_data_schema, gch_schema = self._phase2b_execution_schemas()
+        domain_catalog = self._phase2c_domain_catalog(camp_data_schema, gch_schema)
+
+        self._phase3_build_and_write(
+            campaigns, [], [], adobe_schema, run_at,
+            old_index=old_index,
+            camp_data_schema=camp_data_schema,
+            gch_schema=gch_schema,
+            domain_catalog=domain_catalog,
+        )
+        print("\n=== INCREMENTAL REFRESH COMPLETE ===\n")
+
+    def run_refresh_briefs(self, campaign_id: Optional[str] = None) -> None:
+        """Fetch Google Sheets briefs (rate-limited) and run two-stage LLM extraction.
+
+        This is the only mode that accesses Google Workspace.  Requires explicit
+        Y/N confirmation before fetching begins.  Rate-limited to 1 document per
+        5 seconds (enforced in code, not configurable).
+        """
+        print("\n=== VIBE OCTO KNOWLEDGE v4 — REFRESH BRIEFS ===")
+        print("  NOTE: This mode will access Google Workspace (Google Sheets).")
+        if campaign_id:
+            print(f"  Scope: single campaign — {campaign_id}")
+        else:
+            print("  Scope: all campaigns with databrief_link URLs")
+
+        # Load existing index
+        old_index = self._load_existing_index()
+        old_campaigns = {
+            f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}": r
+            for r in old_index.get("campaigns", [])
+        }
+
+        # Build list of targets (campaigns that need brief fetch)
+        all_campaigns = self._phase1_campaigns_bq_only()
+        targets = []
+        for c in all_campaigns:
+            key = f"{c['camp_id']}::{c['sub_camp_id']}"
+            existing = old_campaigns.get(key, {})
+            existing_url = existing.get("brief_fetched_from", "")
+            current_url = c.get("databrief_link", "")
+
+            if campaign_id and c.get("camp_id", "").upper() != campaign_id.upper():
+                continue
+
+            if not current_url.strip():
+                continue  # no URL to fetch
+
+            needs_fetch = (
+                not existing.get("brief_extraction")
+                or existing_url != current_url
+            )
+
+            if needs_fetch:
+                targets.append(c)
+
+        if not targets:
+            print("\n  All campaigns have up-to-date brief extractions. Nothing to fetch.")
+            return
+
+        # Rate-limited fetch with confirmation
+        from knowledge_base.sources.sheets_enricher import SheetsEnricher
+        enricher = SheetsEnricher(self._brief_fetcher, timeout=self._brief_timeout)
+        fetch_results = enricher.confirm_and_fetch(targets, camp_id_filter=campaign_id)
+
+        if not fetch_results:
+            print("\n  No briefs fetched.")
+            return
+
+        # LLM extraction for each fetched brief
+        print(f"\n  Running LLM extraction for {len(fetch_results)} brief(s)...")
+        now_ts = datetime.now(tz=timezone.utc).isoformat()
+        updated_count = 0
+
+        for camp, brief_text, success in fetch_results:
+            if not success or not brief_text:
+                _log.info("Skipping LLM extraction for %s (no brief text)", camp.get("camp_id"))
+                continue
+
+            key = f"{camp['camp_id']}::{camp['sub_camp_id']}"
+            tier = old_campaigns.get(key, {}).get("tier", "BRONZE")
+            name = camp.get("campaign_name", camp.get("camp_id", "?"))
+
+            print(f"\n  Extracting: {name[:60]}")
+            extraction, conflict_notes = self._llm_extract_brief(
+                camp=camp,
+                brief_text=brief_text,
+                tier=tier,
+            )
+
+            # Merge into existing record
+            rec = old_campaigns.get(key) or camp
+            rec["brief_extraction"] = extraction
+            rec["conflict_notes"] = conflict_notes
+            rec["brief_fetched_from"] = camp.get("databrief_link", "")
+            rec["brief_fetched_at"] = now_ts
+            old_campaigns[key] = rec
+            updated_count += 1
+
+        if not self.dry_run and updated_count > 0:
+            # Rebuild the full index with updated brief_extraction fields
+            run_at = datetime.now(tz=timezone.utc).isoformat()
+            campaigns = list(old_campaigns.values())
+            adobe_schema = self._load_existing_artifact("adobe_schema.json") or {}
+            camp_data_schema = self._load_existing_artifact("campaign_data_schema.json") or {}
+            gch_schema = self._load_existing_artifact("gch_current_schema.json") or {}
+            domain_catalog = self._load_existing_artifact("view_domain_catalog.json") or {}
+            self._phase3_build_and_write(
+                campaigns, [], [], adobe_schema, run_at,
+                old_index=old_index,
+                camp_data_schema=camp_data_schema,
+                gch_schema=gch_schema,
+                domain_catalog=domain_catalog,
+                skip_schema_artifacts=True,
+            )
+
+        print(f"\n  Updated {updated_count} campaign brief extraction(s).")
+        print("\n=== REFRESH BRIEFS COMPLETE ===\n")
+
+    def _llm_extract_brief(
+        self,
+        camp: dict,
+        brief_text: str,
+        tier: str,
+    ) -> tuple[dict, list[str]]:
+        """Two-stage LLM extraction + optional conflict detection for GOLD campaigns.
+
+        Returns (brief_extraction_dict, conflict_notes_list).
+        Falls back gracefully if Fuel iX is unreachable.
+        """
+        try:
+            from core.claude_client import ClaudeClient  # type: ignore[import]
+            client = ClaudeClient()
+        except Exception as exc:
+            _log.warning("ClaudeClient unavailable: %s — skipping LLM extraction", exc)
+            return {}, []
+
+        # Stage 1: Campaign strategy interpretation
+        strategy_prompt = f"""You are a telecom campaign analyst.  Read the campaign data brief below
+and produce a strategic understanding before any extraction.
+
+Campaign: {camp.get('campaign_name', '')}
+Medium: {camp.get('medium', '')}  |  Cadence: {camp.get('cadence', '')}
+
+=== BRIEF TEXT ===
+{brief_text[:6000]}
+=== END BRIEF ===
+
+Respond with JSON:
+{{
+  "campaign_strategy_summary": "2-3 sentence plain-English campaign strategy",
+  "intended_audience": "plain-English audience description",
+  "customer_action": "what we want customers to do (upgrade/cross-sell/reactivate etc.)",
+  "geographic_scope": ["province codes"],
+  "ambiguities": ["any unclear or contradictory statements in the brief"]
+}}"""
+
+        try:
+            stage1 = client._call(
+                "You are a telecom campaign brief analyst. Return only valid JSON.",
+                strategy_prompt,
+            )
+            stage1_data = client._extract_json(stage1)
+        except Exception as exc:
+            _log.warning("Stage 1 extraction failed for %s: %s", camp.get("camp_id"), exc)
+            return {}, []
+
+        # Stage 2: Structured extraction using Stage 1 as context
+        extraction_prompt = f"""Using your understanding of the campaign strategy below,
+extract precise structured criteria from the brief.
+
+Campaign strategy summary: {stage1_data.get('campaign_strategy_summary', '')}
+
+=== BRIEF TEXT ===
+{brief_text[:6000]}
+=== END BRIEF ===
+
+Respond with JSON matching this exact schema:
+{{
+  "campaign_strategy_summary": "string",
+  "targeting_filters": ["list of targeting criteria — SQL-translatable"],
+  "exclusion_rules": ["list of exclusion rules (GCH, DNC, etc.)"],
+  "channel_governance": {{"medium": "EM/SMS/PUSH", "dnc_note": "string"}},
+  "geographic_scope": ["province codes"],
+  "lifecycle_constraints": ["contract/tenure criteria"],
+  "product_eligibility_pairs": ["shs_ind=0 AND shs_elig=1 style pairs"],
+  "segmentation_only_notes": ["language splits, A/B allocs — NOT SQL filters"],
+  "ambiguities_found": ["unclear statements with how they were resolved"],
+  "extraction_confidence": {{"overall": 0.85, "targeting_filters": 0.90, "exclusion_rules": 0.80}}
+}}"""
+
+        try:
+            stage2 = client._call(
+                "You are a telecom campaign brief analyst. Return only valid JSON.",
+                extraction_prompt,
+            )
+            extraction = client._extract_json(stage2)
+            extraction["extracted_at"] = datetime.now(tz=timezone.utc).isoformat()
+        except Exception as exc:
+            _log.warning("Stage 2 extraction failed for %s: %s", camp.get("camp_id"), exc)
+            return {}, []
+
+        # Conflict detection for GOLD campaigns only
+        conflict_notes: list[str] = []
+        if tier == "GOLD":
+            acc = camp.get("acc_summaries") or {}
+            ts = acc.get("targeting_summary", "")
+            if ts:
+                try:
+                    conflict_prompt = f"""Compare the brief extraction against the ACC-verified targeting summary.
+Identify any material differences (not cosmetic phrasing differences).
+
+Brief extraction targeting filters: {extraction.get('targeting_filters', [])}
+Brief exclusion rules: {extraction.get('exclusion_rules', [])}
+Brief lifecycle constraints: {extraction.get('lifecycle_constraints', [])}
+
+ACC-verified targeting summary: {ts[:2000]}
+
+List each material discrepancy as a plain-English statement.
+If fully aligned, return an empty list.
+
+Respond with JSON: {{"conflict_notes": ["...", "..."]}}
+Note: ACC summary is authoritative where conflicts exist."""
+
+                    conflict_resp = client._call(
+                        "You are a telecom campaign analyst checking for data brief vs. ACC conflicts. Return only valid JSON.",
+                        conflict_prompt,
+                    )
+                    conflict_data = client._extract_json(conflict_resp)
+                    conflict_notes = conflict_data.get("conflict_notes", [])
+                except Exception as exc:
+                    _log.warning("Conflict detection failed for %s: %s", camp.get("camp_id"), exc)
+
+        return extraction, conflict_notes
+
     def run_validate(self) -> None:
-        """Verify the 5 v3 artifacts exist and contain valid JSON."""
-        print("\n=== VIBE OCTO KNOWLEDGE v3 — VALIDATE ===\n")
+        """Verify all v4 artifacts exist and contain valid JSON."""
+        print("\n=== VIBE OCTO KNOWLEDGE v4 — VALIDATE ===\n")
         expected = [
             "semantic_knowledge_index.json",
             "adobe_schema.json",
+            "campaign_data_schema.json",
+            "gch_current_schema.json",
+            "view_domain_catalog.json",
             "cross_campaign_patterns.json",
             "ingestion_report.json",
             "ingestion_log.json",
@@ -718,7 +1119,7 @@ class VibeOctoKnowledge:
 
         print()
         if all_ok:
-            print("All 5 artifacts are valid. No downloaded brief files on disk.")
+            print("All v4 artifacts are valid. No downloaded brief files on disk.")
         else:
             print("One or more artifacts are missing or invalid. Run --full-refresh.")
 
@@ -734,27 +1135,31 @@ class VibeOctoKnowledge:
         print("\n=== VALIDATE COMPLETE ===\n")
 
     def run_refresh_schema_only(self) -> None:
-        """Re-fetch the Adobe schema (views only) and overwrite adobe_schema.json.
+        """Re-fetch all three dataset schemas and regenerate the view domain catalog.
 
-        Skips campaign ingestion and brief fetching. Useful when the warehouse
-        schema changes and you want to update the artifact without a full refresh.
+        Skips campaign ingestion and brief fetching.
         """
-        print("\n=== VIBE OCTO KNOWLEDGE v3 — REFRESH SCHEMA ONLY ===")
+        print("\n=== VIBE OCTO KNOWLEDGE v4 — REFRESH SCHEMA ONLY ===")
         adobe_schema = self._phase2_adobe_schema()
+        camp_data_schema, gch_schema = self._phase2b_execution_schemas()
+        domain_catalog = self._phase2c_domain_catalog(camp_data_schema, gch_schema)
 
         if self.dry_run:
-            print("\n[DRY-RUN] adobe_schema.json not written.")
-            print(f"  Would write: {adobe_schema['view_count']} views, "
-                  f"{adobe_schema['column_count']} columns")
-            print("\n=== REFRESH SCHEMA ONLY COMPLETE ===\n")
+            print("\n[DRY-RUN] Schema artifacts not written.")
             return
 
-        path = self._artifacts_dir / "adobe_schema.json"
-        _write_atomic(path, adobe_schema)
-        size_kb = path.stat().st_size / 1024
-        print(f"\n  [WRITTEN] adobe_schema.json  ({size_kb:.1f} KB)")
-        print(f"  Views:   {adobe_schema['view_count']}")
-        print(f"  Columns: {adobe_schema['column_count']}")
+        to_write = {
+            "adobe_schema.json":        adobe_schema,
+            "campaign_data_schema.json": camp_data_schema,
+            "gch_current_schema.json":  gch_schema,
+            "view_domain_catalog.json": domain_catalog,
+        }
+        print()
+        for filename, data in to_write.items():
+            path = self._artifacts_dir / filename
+            _write_atomic(path, data)
+            size_kb = path.stat().st_size / 1024
+            print(f"  [WRITTEN] {filename}  ({size_kb:.1f} KB)")
         print("\n=== REFRESH SCHEMA ONLY COMPLETE ===\n")
 
     # ------------------------------------------------------------------
@@ -789,7 +1194,238 @@ class VibeOctoKnowledge:
         print("[CLEANUP] Done.")
 
     # ------------------------------------------------------------------
-    # Phase 1: Campaign & Brief Ingestion
+    # Helpers: load existing artifacts
+    # ------------------------------------------------------------------
+
+    def _load_existing_index(self) -> dict:
+        """Load semantic_knowledge_index.json from disk; return {} if missing."""
+        path = self._artifacts_dir / "semantic_knowledge_index.json"
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _log.warning("Could not load existing index: %s", exc)
+            return {}
+
+    def _load_existing_artifact(self, filename: str) -> Optional[dict]:
+        path = self._artifacts_dir / filename
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Phase 1b: BQ-only campaign ingestion (no Sheets access)
+    # ------------------------------------------------------------------
+
+    def _phase1_campaigns_bq_only(self) -> list[dict]:
+        """Query BQ for campaign metadata rows.  Returns raw dicts (no brief fetching)."""
+        print("\n[PHASE 1] Campaign Metadata Ingestion (BQ only)")
+        if self._col_map is None:
+            self._col_map = self._resolve_columns()
+        cmap = self._col_map
+
+        print(f"  Querying: {CAMPAIGN_TABLE}")
+        raw_rows = self._fetch_campaign_rows()
+        total = len(raw_rows)
+        print(f"  Rows fetched: {total}")
+
+        def _g(row: dict, role: str) -> str:
+            col = cmap.get(role)
+            if col is None:
+                return ""
+            v = row.get(col)
+            return str(v).strip() if v is not None else ""
+
+        campaigns: list[dict] = []
+        for row in raw_rows:
+            campaigns.append({
+                "camp_id":           _g(row, "camp_id"),
+                "sub_camp_id":       _g(row, "sub_camp_id"),
+                "campaign_name":     _g(row, "campaign_name"),
+                "targeting_summary": _g(row, "targeting_summary"),
+                "segment_summary":   _g(row, "segment_summary"),
+                "cadence":           _g(row, "cadence"),
+                "medium":            _g(row, "medium"),
+                "campaign_purpose":  _g(row, "campaign_purpose"),
+                "primary_products":  _g(row, "primary_products"),
+                "databrief_link":    _g(row, "databrief_link"),
+            })
+        print(f"[PHASE 1 COMPLETE]  ({total} campaigns)")
+        return campaigns
+
+    # ------------------------------------------------------------------
+    # Phase 2b: Execution schema ingestion (campaign_data + gch_current)
+    # ------------------------------------------------------------------
+
+    def _phase2b_execution_schemas(self) -> tuple[dict, dict]:
+        """Ingest INFORMATION_SCHEMA metadata for campaign_data and gch_current datasets."""
+        print("\n[PHASE 2b] Execution Schema Ingestion")
+        camp_data = self._fetch_dataset_schema(CAMPAIGN_DATA_DATASET)
+        gch = self._fetch_dataset_schema(GCH_DATASET)
+        print(
+            f"  campaign_data: {camp_data.get('view_count', 0)} views, "
+            f"{camp_data.get('column_count', 0)} columns"
+        )
+        print(
+            f"  gch_current:   {gch.get('view_count', 0)} views, "
+            f"{gch.get('column_count', 0)} columns"
+        )
+        print("[PHASE 2b COMPLETE]")
+        return camp_data, gch
+
+    def _fetch_dataset_schema(self, dataset: str) -> dict:
+        """Fetch views + columns from INFORMATION_SCHEMA for a single dataset."""
+        client = self._adobe_bq  # reuse same project client
+
+        try:
+            tables_rows = list(
+                client.query(
+                    f"SELECT table_name, table_type "
+                    f"FROM `{ADOBE_PROJECT}.{dataset}.INFORMATION_SCHEMA.TABLES` "
+                    f"ORDER BY table_name"
+                ).result()
+            )
+        except Exception as exc:
+            _log.warning("%s TABLES query failed: %s", dataset, exc)
+            print(f"  WARNING: Could not fetch {dataset} views — {exc}")
+            tables_rows = []
+
+        try:
+            columns_rows = list(
+                client.query(
+                    f"SELECT c.table_name, c.column_name, c.data_type, "
+                    f"c.is_nullable, c.ordinal_position "
+                    f"FROM `{ADOBE_PROJECT}.{dataset}.INFORMATION_SCHEMA.COLUMNS` c "
+                    f"JOIN `{ADOBE_PROJECT}.{dataset}.INFORMATION_SCHEMA.TABLES` t "
+                    f"  ON c.table_name = t.table_name "
+                    f"ORDER BY c.table_name, c.ordinal_position"
+                ).result()
+            )
+        except Exception as exc:
+            _log.warning("%s COLUMNS query failed: %s", dataset, exc)
+            print(f"  WARNING: Could not fetch {dataset} columns — {exc}")
+            columns_rows = []
+
+        schema: dict[str, dict] = {}
+        for row in tables_rows:
+            schema[row.table_name] = {"type": row.table_type, "columns": []}
+
+        for row in columns_rows:
+            tbl = row.table_name
+            if tbl not in schema:
+                schema[tbl] = {"type": "TABLE", "columns": []}
+            schema[tbl]["columns"].append({
+                "name":     row.column_name,
+                "type":     row.data_type,
+                "nullable": row.is_nullable == "YES",
+            })
+
+        total_cols = sum(len(v["columns"]) for v in schema.values())
+        return {
+            "schema_version": "4.0",
+            "snapshot_at":    datetime.now(tz=timezone.utc).isoformat(),
+            "project":        ADOBE_PROJECT,
+            "dataset":        dataset,
+            "scope":          "all_objects",
+            "view_count":     len(schema),
+            "column_count":   total_cols,
+            "views":          schema,
+        }
+
+    # ------------------------------------------------------------------
+    # Phase 2c: View domain catalog
+    # ------------------------------------------------------------------
+
+    def _phase2c_domain_catalog(self, camp_data_schema: dict, gch_schema: dict) -> dict:
+        """Build view_domain_catalog.json from all three dataset schemas."""
+        print("\n[PHASE 2c] View Domain Catalog")
+
+        views: dict[str, dict] = {}
+
+        # Process each dataset
+        for schema_data, dataset in [
+            (self._load_existing_artifact("adobe_schema.json"), ADOBE_DATASET),
+            (camp_data_schema, CAMPAIGN_DATA_DATASET),
+            (gch_schema, GCH_DATASET),
+        ]:
+            if not schema_data:
+                continue
+            for view_name in (schema_data.get("views") or {}).keys():
+                domain = _classify_view_domain(view_name, dataset)
+                views[view_name] = {
+                    "dataset":     dataset,
+                    "domain":      domain,
+                    "description": _describe_view(view_name),
+                    "lob":         _infer_lob(view_name),
+                    "is_primary":  view_name in (
+                        "bq_fda_mob_mobility_base",
+                        "bq_dly_dbm_customer_profl",
+                    ),
+                }
+
+        print(f"  Classified {len(views)} views across 3 datasets")
+        print("[PHASE 2c COMPLETE]")
+
+        return {
+            "catalog_version": "1.0",
+            "generated_at":    datetime.now(tz=timezone.utc).isoformat(),
+            "views":           views,
+            "domains":         _DOMAIN_DESCRIPTIONS,
+        }
+
+    # ------------------------------------------------------------------
+    # Embeddings
+    # ------------------------------------------------------------------
+
+    def _generate_embeddings(self, campaign_records: list[dict]) -> None:
+        """Build sparse TF-IDF vectors for each campaign and store in SQLite."""
+        import sqlite3
+        from knowledge_base.tier_index import _tfidf_vector, _cosine_sim  # noqa: F401
+
+        db_path = self._artifacts_dir / "campaign_embeddings.db"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_embeddings (
+                    campaign_key TEXT PRIMARY KEY,
+                    embedding_json TEXT NOT NULL,
+                    summary_text TEXT,
+                    tier TEXT
+                )
+            """)
+            conn.execute("DELETE FROM campaign_embeddings")
+
+            for rec in campaign_records:
+                key = f"{rec.get('camp_id', '')}::{rec.get('sub_camp_id', '')}"
+                acc = rec.get("acc_summaries") or {}
+                summary = " ".join(filter(None, [
+                    rec.get("campaign_name", ""),
+                    rec.get("campaign_purpose", ""),
+                    acc.get("targeting_summary", ""),
+                    acc.get("segment_summary", ""),
+                ]))
+                # Enrich with targeting_filters from brief_extraction if available
+                be = rec.get("brief_extraction") or {}
+                for f in be.get("targeting_filters", []):
+                    summary += f" {f}"
+
+                vec = _tfidf_vector(summary)
+                conn.execute(
+                    "INSERT INTO campaign_embeddings VALUES (?, ?, ?, ?)",
+                    (key, json.dumps(vec, ensure_ascii=False), summary[:500], rec.get("tier", "GOLD")),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        print(f"  [EMBEDDINGS] {len(campaign_records)} vectors written to campaign_embeddings.db")
+
+    # ------------------------------------------------------------------
+    # Phase 1: Campaign & Brief Ingestion (legacy — preserved for --refresh-briefs)
     # ------------------------------------------------------------------
 
     def _phase1_campaigns_and_briefs(
@@ -1054,10 +1690,23 @@ class VibeOctoKnowledge:
         failures: list[dict],
         adobe_schema: dict,
         run_at: str,
+        old_index: Optional[dict] = None,
+        camp_data_schema: Optional[dict] = None,
+        gch_schema: Optional[dict] = None,
+        domain_catalog: Optional[dict] = None,
+        skip_schema_artifacts: bool = False,
     ) -> None:
         print("\n[PHASE 3] GOLD Insight Extraction & Artifact Generation")
 
-        # Separate GOLD campaigns for insight extraction
+        # Build lookup of old index records for carrying forward Phase 1 fields
+        old_records: dict[str, dict] = {}
+        if old_index:
+            for r in old_index.get("campaigns", []):
+                key = f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}"
+                old_records[key] = r
+
+        # Separate GOLD campaigns for insight extraction.
+        # GOLD = has ACC-verified targeting_summary AND segment_summary.
         gold_camps_raw = [
             c for c in campaigns
             if bool(c.get("targeting_summary", "").strip())
@@ -1073,12 +1722,15 @@ class VibeOctoKnowledge:
 
         # Classify tiers and build per-campaign deployment records
         gold_count = silver_count = bronze_count = 0
+        needs_brief_refresh: list[str] = []
         campaign_records: list[dict] = []
 
         for camp in campaigns:
+            # Pop internal-only fields that may be set by legacy brief-fetching path
             brief_text: str = camp.pop("_brief_text", "") or ""
             brief_accessible: bool = camp.pop("_brief_accessible", False)
 
+            # In new three-mode design, tier is determined solely by BQ metadata presence
             tier = _classify_tier(
                 camp.get("targeting_summary", ""),
                 camp.get("segment_summary", ""),
@@ -1092,47 +1744,75 @@ class VibeOctoKnowledge:
             else:
                 bronze_count += 1
 
-            # Build deployment block — brief_text is consumed here and not persisted
+            # Carry forward brief_extraction and conflict_notes from old index
+            key = f"{camp['camp_id']}::{camp['sub_camp_id']}"
+            old_rec = old_records.get(key, {})
+            current_url = camp.get("databrief_link", "").strip()
+            stored_url = old_rec.get("brief_fetched_from", "")
+
+            brief_extraction = old_rec.get("brief_extraction")
+            conflict_notes = old_rec.get("conflict_notes") or []
+            brief_fetched_from = old_rec.get("brief_fetched_from", "")
+            brief_fetched_at = old_rec.get("brief_fetched_at", "")
+
+            # Flag campaigns where brief URL changed or extraction is missing
+            if current_url and (not brief_extraction or current_url != stored_url):
+                needs_brief_refresh.append(camp["camp_id"])
+
+            # Build deployment block
             deployment = _build_brief_deployment(
                 brief_text=brief_text,
-                brief_accessible=brief_accessible,
+                brief_accessible=brief_accessible or bool(brief_extraction),
                 camp=camp,
                 gold_insights=gold_insights,
                 tier=tier,
             )
 
-            brief_reason = (
-                "brief_extracted" if brief_accessible
-                else ("link_missing" if not camp.get("databrief_link") else "fetch_failed")
+            brief_reason = "brief_extracted" if brief_extraction else (
+                "link_missing" if not current_url else "needs_refresh"
             )
 
             campaign_records.append({
-                "camp_id":       camp["camp_id"],
-                "sub_camp_id":   camp["sub_camp_id"],
-                "campaign_name": camp["campaign_name"],
-                "cadence":       camp["cadence"],
-                "medium":        camp["medium"],
+                "camp_id":          camp["camp_id"],
+                "sub_camp_id":      camp["sub_camp_id"],
+                "campaign_name":    camp["campaign_name"],
+                "cadence":          camp["cadence"],
+                "medium":           camp["medium"],
                 "campaign_purpose": camp["campaign_purpose"],
                 "primary_products": camp["primary_products"],
-                "tier":          tier,
+                "tier":             tier,
                 "acc_summaries": {
                     "targeting_summary": camp.get("targeting_summary") or None,
                     "segment_summary":   camp.get("segment_summary") or None,
                     "source":            "acc_workflow_xml" if tier == "GOLD" else None,
                 },
+                "brief_extraction":   brief_extraction,
+                "conflict_notes":     conflict_notes,
+                "brief_fetched_from": brief_fetched_from,
+                "brief_fetched_at":   brief_fetched_at,
                 "deployments": [deployment],
                 "brief_status": {
-                    "accessible": brief_accessible,
+                    "accessible": bool(brief_extraction) or brief_accessible,
                     "reason":     brief_reason,
-                    "note":       "Read in-memory only — no raw content persisted",
+                    "note":       "Raw content not persisted; extracted fields stored.",
                 },
-                "ingested_at": run_at,
+                "last_ingested_at": run_at,
+                "ingested_at":      old_rec.get("ingested_at", run_at),
             })
 
         print(f"\n  Tier summary:")
         print(f"    GOLD:   {gold_count}  (proven — ACC summaries present)")
         print(f"    SILVER: {silver_count}  (brief extracted, no ACC summaries)")
         print(f"    BRONZE: {bronze_count}  (no ACC summaries + no/inaccessible brief)")
+
+        if needs_brief_refresh:
+            unique_needing = sorted(set(needs_brief_refresh))
+            print(f"\n  {len(unique_needing)} campaign(s) need brief refresh "
+                  f"(run --refresh-briefs):")
+            for cid in unique_needing[:10]:
+                print(f"    - {cid}")
+            if len(unique_needing) > 10:
+                print(f"    ... and {len(unique_needing) - 10} more")
 
         # Build cross-campaign patterns from GOLD
         cross_patterns = _build_cross_campaign_patterns(gold_camps_raw, gold_insights)
@@ -1146,13 +1826,26 @@ class VibeOctoKnowledge:
             self._print_summary(report)
             return
 
+        # Backup existing index before overwriting
+        existing_index = self._artifacts_dir / "semantic_knowledge_index.json"
+        if existing_index.exists():
+            backup = self._artifacts_dir / "semantic_knowledge_index.backup.json"
+            try:
+                import shutil
+                shutil.copy2(str(existing_index), str(backup))
+            except Exception as exc:
+                _log.warning("Could not write index backup: %s", exc)
+
         # Attach verified business rules to campaign records before writing.
         _attach_business_rules(campaign_records)
 
-        # Write 5 artifacts atomically (no brief_texts.json)
+        # Validate before write: must have > 0 campaigns
+        assert len(campaign_records) > 0, "Ingestion produced zero campaigns — aborting write"
+
+        # Core knowledge artifacts
         artifacts = {
             "semantic_knowledge_index.json": {
-                "schema_version":  "3.0",
+                "schema_version":  "4.0",
                 "generated_at":    run_at,
                 "gold_insights":   gold_insights,
                 "ingestion_summary": {
@@ -1169,12 +1862,28 @@ class VibeOctoKnowledge:
             "ingestion_log.json":          fetch_log,
         }
 
+        # New v4 schema artifacts (skip when called from --refresh-briefs)
+        if not skip_schema_artifacts:
+            if camp_data_schema:
+                artifacts["campaign_data_schema.json"] = camp_data_schema
+            if gch_schema:
+                artifacts["gch_current_schema.json"] = gch_schema
+            if domain_catalog:
+                artifacts["view_domain_catalog.json"] = domain_catalog
+
         print()
         for filename, data in artifacts.items():
             path = self._artifacts_dir / filename
             _write_atomic(path, data)
             size_kb = path.stat().st_size / 1024
             print(f"  [WRITTEN] {filename}  ({size_kb:.1f} KB)")
+
+        # Generate embeddings (TF-IDF sparse vectors stored in SQLite)
+        try:
+            self._generate_embeddings(campaign_records)
+        except Exception as exc:
+            _log.warning("Embedding generation failed (non-fatal): %s", exc)
+            print(f"  WARNING: Embedding generation failed — RAG retrieval will use keyword fallback")
 
         print(f"\n[PHASE 3 COMPLETE]")
         self._print_summary(report)
@@ -1293,34 +2002,53 @@ class VibeOctoKnowledge:
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m knowledge_base.vibe_octo_knowledge",
-        description="Vibe OCTO Knowledge v3 — GOLD-guided Ingestion Agent",
+        description="Vibe OCTO Knowledge v4 — Knowledge Ingestion Agent",
     )
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--full-refresh",
         action="store_true",
         help=(
-            "Cleanup stale files, ingest all campaigns, fetch briefs in-memory, "
-            "extract GOLD insights, write 5 artifacts."
+            "Query BQ for campaign metadata; carry forward existing brief_extraction. "
+            "Does NOT access Google Sheets. Safe for daily scheduled use."
+        ),
+    )
+    group.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Process only campaigns added since last refresh. No Sheets access.",
+    )
+    group.add_argument(
+        "--refresh-briefs",
+        action="store_true",
+        help=(
+            "Fetch Google Sheets briefs (rate-limited, confirmation required), "
+            "run two-stage LLM extraction, and update stored brief_extraction fields."
         ),
     )
     group.add_argument(
         "--validate",
         action="store_true",
-        help="Verify all 5 artifacts exist and contain valid JSON.",
+        help="Verify all v4 artifacts exist and contain valid JSON.",
     )
     group.add_argument(
         "--refresh-schema-only",
         action="store_true",
         help=(
-            "Re-fetch the Adobe schema (views only) and overwrite adobe_schema.json. "
-            "Skips campaign ingestion and brief fetching."
+            "Re-fetch all three dataset schemas and regenerate view domain catalog. "
+            "Skips campaign ingestion."
         ),
     )
     group.add_argument(
         "--dry-run",
         action="store_true",
         help="Run all phases without writing any files.",
+    )
+    p.add_argument(
+        "--campaign",
+        metavar="CAMP_ID",
+        default=None,
+        help="Limit --refresh-briefs to a single campaign ID.",
     )
     p.add_argument(
         "--timeout",
@@ -1368,14 +2096,16 @@ def main() -> None:
         brief_timeout=args.timeout,
     )
 
-    if args.full_refresh:
+    if args.full_refresh or args.dry_run:
         agent.run_full_refresh()
+    elif args.incremental:
+        agent.run_incremental()
+    elif args.refresh_briefs:
+        agent.run_refresh_briefs(campaign_id=args.campaign)
     elif args.validate:
         agent.run_validate()
     elif args.refresh_schema_only:
         agent.run_refresh_schema_only()
-    elif args.dry_run:
-        agent.run_full_refresh()
 
 
 if __name__ == "__main__":
