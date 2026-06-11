@@ -1040,16 +1040,38 @@ class VibeOctoKnowledge:
             updated_count += 1
 
         if not self.dry_run and updated_count > 0:
-            # Rebuild the full index with updated brief_extraction fields
+            # Rebuild the full index with updated brief_extraction fields.
+            # Use all_campaigns (17 flat BQ rows) as the campaigns source — NOT
+            # old_campaigns.values(), which is deduplicated to 8 unique keys and
+            # would cause _phase3_build_and_write() to drop 9 deployment records.
+            # Propagate this run's new brief extractions into the old_index so
+            # _phase3_build_and_write() carries them forward via old_records lookup.
             run_at = datetime.now(tz=timezone.utc).isoformat()
-            campaigns = list(old_campaigns.values())
+            updated_old_campaigns_list = []
+            for r in old_index.get("campaigns", []):
+                key = f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}"
+                upd = old_campaigns.get(key, {})
+                if upd.get("brief_extraction") or upd.get("brief_fetched_from"):
+                    r = dict(r)
+                    if upd.get("brief_extraction"):
+                        r["brief_extraction"] = upd["brief_extraction"]
+                    if upd.get("conflict_notes"):
+                        r["conflict_notes"] = upd["conflict_notes"]
+                    if upd.get("brief_fetched_from"):
+                        r["brief_fetched_from"] = upd["brief_fetched_from"]
+                    if upd.get("brief_fetched_at"):
+                        r["brief_fetched_at"] = upd["brief_fetched_at"]
+                updated_old_campaigns_list.append(r)
+            updated_old_index = dict(old_index)
+            updated_old_index["campaigns"] = updated_old_campaigns_list
+            campaigns = all_campaigns
             adobe_schema = self._load_existing_artifact("adobe_schema.json") or {}
             camp_data_schema = self._load_existing_artifact("campaign_data_schema.json") or {}
             gch_schema = self._load_existing_artifact("gch_current_schema.json") or {}
             domain_catalog = self._load_existing_artifact("view_domain_catalog.json") or {}
             self._phase3_build_and_write(
                 campaigns, [], [], adobe_schema, run_at,
-                old_index=old_index,
+                old_index=updated_old_index,
                 camp_data_schema=camp_data_schema,
                 gch_schema=gch_schema,
                 domain_catalog=domain_catalog,
