@@ -616,13 +616,18 @@ def _direct_count_with_recovery(
     quant: QuantAgent,
     request: AdHocSizingRequest,
     rules_registry: Optional["BusinessRulesRegistry"] = None,
+    allow_interactive: bool = True,
 ) -> Union[QuantAuditLog, NexusErrorPayload]:
     """Run direct_count with up to 3 HITL recovery attempts on column-not-found errors.
 
     Fix 2: Corrections are applied immediately to each retry (accumulated in optimization_context).
     Fix 3: After successful recovery, corrections are saved to business_rules.json.
+    When allow_interactive=False (API mode) a single attempt is made with no input() calls.
     """
     result = quant.direct_count(request)
+    if not allow_interactive:
+        return result
+
     corrections_made: list[str] = []
 
     for _ in range(3):
@@ -670,6 +675,7 @@ def route_by_intent(
     gold_index: "GoldTierIndex",
     schema_snapshot: dict,
     rules_registry: Optional[BusinessRulesRegistry] = None,
+    allow_interactive: bool = True,
 ) -> tuple[Optional[UniversalJSONSpec], Optional[QuantAuditLog], Optional[BriefingOutput]]:
     """Unified intent-based pipeline dispatcher.
 
@@ -745,21 +751,22 @@ def route_by_intent(
                 result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
             if isinstance(result, QuantAuditLog):
                 return spec, result, None
-            for _ in range(3):
-                if not _is_column_error(getattr(result, "error_summary", "")):
-                    break
-                correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
-                if not correction:
-                    break
-                ctx = ((spec.optimization_context or "") + "\n" + correction).strip()
-                spec = spec.model_copy(update={"optimization_context": ctx})
-                result = quant.audit_from_spec(spec)
-                if isinstance(result, QuantAuditLog):
-                    return spec, result, None
-            ThoughtDisplay.error(
-                "I was unable to complete the audience sizing request. "
-                "The system attempted a correction but could not reconcile the targeting rules."
-            )
+            if allow_interactive:
+                for _ in range(3):
+                    if not _is_column_error(getattr(result, "error_summary", "")):
+                        break
+                    correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
+                    if not correction:
+                        break
+                    ctx = ((spec.optimization_context or "") + "\n" + correction).strip()
+                    spec = spec.model_copy(update={"optimization_context": ctx})
+                    result = quant.audit_from_spec(spec)
+                    if isinstance(result, QuantAuditLog):
+                        return spec, result, None
+                ThoughtDisplay.error(
+                    "I was unable to complete the audience sizing request. "
+                    "The system attempted a correction but could not reconcile the targeting rules."
+                )
             return None, None, None
         else:
             request = nexus.build_sizing_request_from_nl(query)
@@ -798,7 +805,7 @@ def route_by_intent(
                         )
                     if updates:
                         request = request.model_copy(update=updates)
-            result = _direct_count_with_recovery(quant, request, rules_registry)
+            result = _direct_count_with_recovery(quant, request, rules_registry, allow_interactive=allow_interactive)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
             ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -839,7 +846,7 @@ def route_by_intent(
             request = nexus.build_sizing_request_from_nl(query)
             if request is None:
                 return None, None, None
-            result = _direct_count_with_recovery(quant, request, rules_registry)
+            result = _direct_count_with_recovery(quant, request, rules_registry, allow_interactive=allow_interactive)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
             ThoughtDisplay.translate_nexus_error(result.error_summary)
@@ -849,7 +856,7 @@ def route_by_intent(
         if isinstance(result, NexusErrorPayload):
             result = nexus.route_with_retry(spec.to_audience_sizing_request(), quant)
         if not isinstance(result, QuantAuditLog):
-            if _is_column_error(getattr(result, "error_summary", "")):
+            if allow_interactive and _is_column_error(getattr(result, "error_summary", "")):
                 correction = ThoughtDisplay.column_not_found_ask(result.error_summary)
                 if correction:
                     ctx = ((spec.optimization_context or "") + "\n" + correction).strip()
@@ -1170,26 +1177,61 @@ def _run_console(
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Shared runtime container — used by terminal mode and the API server
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    _silence_google_noise()
-    os.system("cls" if os.name == "nt" else "clear")
+class VibeRuntime:
+    """All shared objects initialized once at startup, shared across all requests."""
 
+    def __init__(
+        self,
+        nexus: NexusAgent,
+        quant: QuantAgent,
+        briefing: BriefingAgent,
+        gold_index: "GoldTierIndex",
+        schema_snapshot: "SchemaSnapshot",
+        hitl: "HITLAuditLoop",
+        rules_registry: BusinessRulesRegistry,
+        knowledge_ctx: KnowledgeContext,
+    ) -> None:
+        self.nexus = nexus
+        self.quant = quant
+        self.briefing = briefing
+        self.gold_index = gold_index
+        self.schema_snapshot = schema_snapshot  # SchemaSnapshot object; call .to_dict() as needed
+        self.hitl = hitl
+        self.rules_registry = rules_registry
+        self.knowledge_ctx = knowledge_ctx
+
+
+class RequestResult:
+    """Pipeline result returned by process_core_request(). No terminal I/O side effects."""
+
+    def __init__(
+        self,
+        intent: IntentClassification,
+        spec: Optional[UniversalJSONSpec],
+        log: Optional[QuantAuditLog],
+        brief_output: Optional[BriefingOutput],
+        error: Optional[str] = None,
+    ) -> None:
+        self.intent = intent
+        self.spec = spec
+        self.log = log
+        self.brief_output = brief_output
+        self.error = error  # set when pipeline failed without producing output
+
+
+def build_runtime() -> VibeRuntime:
+    """Initialize all shared runtime objects. Called by both main() and the API server."""
     load_dotenv(_NEXUS_DIR / ".env")
     load_dotenv(_QUANT_DIR / ".env", override=False)
     load_dotenv(_BRIEFING_DIR / ".env", override=False)
     load_dotenv(_FEEDBACK_DIR / ".env", override=False)
 
-    # Knowledge ingestion is disabled until service account is configured.
-    # Run manually when needed:
-    #   python -m knowledge_base.vibe_octo_knowledge --full-refresh
     gold_index = GoldTierIndex()
     gold_index.load_from_file(_ARTIFACTS_DIR / "semantic_knowledge_index.json")
 
-    # Pillar 2: Schema Discovery — load from pre-built artifacts for instant startup.
-    # Covers all three execution datasets; falls back to live BQ only if artifacts are missing.
     schema_discovery = SchemaDiscoveryLayer(
         project="bi-srv-hsmdet-pr-7b9def",
         datasets=["adobe", "campaign_data", "gch_current"],
@@ -1200,33 +1242,24 @@ def main() -> None:
         snapshot = schema_discovery.get_snapshot()
     schema_str = schema_discovery.to_prompt_string(snapshot)
 
-    # Instantiate agents from registry
     nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
     quant: QuantAgent = _AGENT_REGISTRY["quant"]()
     briefing: BriefingAgent = _AGENT_REGISTRY["briefing"]()
 
-    # Build centralised KnowledgeContext (loads all 5 knowledge files once at startup).
-    # All agents share this single instance; large knowledge blobs are formatted once
-    # and pinned as ephemeral cached blocks on each Fuel iX / Claude API call.
     knowledge_ctx = KnowledgeContext(
         artifacts_dir=_ARTIFACTS_DIR,
         root_dir=_ROOT,
     )
 
-    # Inject shared runtime context into all active agents
     quant.set_runtime_schema(schema_str)
     nexus.set_runtime_schema_snapshot(snapshot.to_dict())
     briefing.set_runtime_schema(schema_str)
     briefing.set_gold_index(gold_index)
 
-    # Inject KnowledgeContext into all four runtime agents
     nexus.set_knowledge_context(knowledge_ctx)
     quant.set_knowledge_context(knowledge_ctx)
     briefing.set_knowledge_context(knowledge_ctx)
 
-    # Pillar 5: HITLAuditLoop — Human-in-the-Loop gate and feedback flywheel.
-    # Shares the same GoldTierIndex and GlossaryManager instances as the rest of
-    # the session so in-memory promotions and glossary patches take effect immediately.
     hitl = HITLAuditLoop(
         gold_index=gold_index,
         glossary_manager=GlossaryManager(str(_GLOSSARY_PATH)),
@@ -1235,12 +1268,73 @@ def main() -> None:
     )
     hitl.set_knowledge_context(knowledge_ctx)
 
-    # Pillar 6: BusinessRulesRegistry — load verified business rules extracted by
-    # FeedbackAgent after HITL NO responses. Applied automatically before Quant.
     rules_registry = BusinessRulesRegistry(_BUSINESS_RULES_PATH)
-    rule_count = len(rules_registry._rules)
 
-    _print_kb_status(gold_index, snapshot, rule_count, knowledge_ctx)
+    return VibeRuntime(
+        nexus=nexus,
+        quant=quant,
+        briefing=briefing,
+        gold_index=gold_index,
+        schema_snapshot=snapshot,
+        hitl=hitl,
+        rules_registry=rules_registry,
+        knowledge_ctx=knowledge_ctx,
+    )
+
+
+def process_core_request(query: str, rt: VibeRuntime) -> RequestResult:
+    """Execute the full pipeline for a single query without any terminal I/O.
+
+    Suitable for API mode. Column errors are returned as RequestResult.error
+    rather than triggering input(). HITL decisions are left to the caller.
+    """
+    _log = logging.getLogger(__name__)
+    try:
+        ctx = _build_dynamic_context(query, rt.gold_index)
+        if ctx:
+            rt.nexus.set_session_context(ctx)
+            rt.quant.set_session_context(ctx)
+
+        intent = rt.nexus.classify_intent(query)
+        spec, log, brief_output = route_by_intent(
+            rt.nexus,
+            rt.quant,
+            rt.briefing,
+            intent,
+            query,
+            rt.gold_index,
+            rt.schema_snapshot.to_dict(),
+            rt.rules_registry,
+            allow_interactive=False,
+        )
+        return RequestResult(intent=intent, spec=spec, log=log, brief_output=brief_output)
+    except Exception as exc:
+        _log.exception("process_core_request failed for query %r: %s", query[:80], exc)
+        _fallback = IntentClassification(
+            intent_type="general_question",
+            confidence=0.0,
+            campaign_identified=False,
+        )
+        return RequestResult(
+            intent=_fallback,
+            spec=None,
+            log=None,
+            brief_output=None,
+            error=str(exc),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    _silence_google_noise()
+    os.system("cls" if os.name == "nt" else "clear")
+
+    rt = build_runtime()
+
+    _print_kb_status(rt.gold_index, rt.schema_snapshot, len(rt.rules_registry._rules), rt.knowledge_ctx)
 
     # Phase 5B: startup health gate — checks Fuel iX, BigQuery ADC, and knowledge index.
     # Session proceeds on OK/WARN; blocked only on FAIL.
@@ -1252,7 +1346,16 @@ def main() -> None:
         artifacts_dir=_ARTIFACTS_DIR,
     )
 
-    _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl, rules_registry, knowledge_ctx)
+    _run_console(
+        rt.nexus,
+        rt.quant,
+        rt.briefing,
+        rt.gold_index,
+        rt.schema_snapshot.to_dict(),
+        rt.hitl,
+        rt.rules_registry,
+        rt.knowledge_ctx,
+    )
 
 
 if __name__ == "__main__":
