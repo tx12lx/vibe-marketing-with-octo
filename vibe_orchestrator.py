@@ -831,6 +831,38 @@ def route_by_intent(
 
     elif it in ("brief_generation", "brief_qa"):
         if spec is None:
+            # Before falling back to NL parsing, check the local knowledge index.
+            # This covers campaigns that exist in the gold_index but have no BQ
+            # deployment records (e.g. MNP, any campaign not yet in bq_plan_camp_deploy_mdc).
+            if intent.campaign_code:
+                gold_record = gold_index.search(intent.campaign_code)
+                if gold_record is not None:
+                    ThoughtDisplay.progress(
+                        f"Found '{gold_record.campaign_name}' in the knowledge library. "
+                        "Building brief from stored campaign intelligence..."
+                    )
+                    try:
+                        spec = UniversalJSONSpec(
+                            campaign_name=gold_record.campaign_name or intent.campaign_code,
+                            campaign_code=gold_record.camp_id,
+                            campaign_sub_code=gold_record.sub_camp_id,
+                            cadence=gold_record.cadence or "ad-hoc",
+                            medium=gold_record.medium or "unspecified",
+                            campaign_tier="GOLD",
+                            knowledge_source="bq_metadata",
+                            gold_blueprint_id=(
+                                f"{gold_record.camp_id}::{gold_record.sub_camp_id}"
+                            ),
+                            target_population=(
+                                gold_record.campaign_purpose or gold_record.campaign_name
+                            ),
+                            filters=["standard_exclusions = 0"],
+                            brief_agent_inputs={"raw_prompt": query},
+                        )
+                    except Exception:
+                        spec = None
+
+        if spec is None:
             ThoughtDisplay.progress("No campaign context found. Building brief from your request...")
             request = nexus.build_sizing_request_from_nl(query)
             if request is None:

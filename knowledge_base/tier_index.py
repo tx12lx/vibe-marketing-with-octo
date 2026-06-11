@@ -134,6 +134,24 @@ class GoldTierIndex:
                     return rec
         return None
 
+    def search(self, hint: str) -> Optional[GoldCampaignRecord]:
+        """Fuzzy lookup -- returns the first record whose camp_id, sub_camp_id, or
+        campaign_name contains `hint` (case-insensitive).
+
+        Used when only a partial or informal campaign name is known (e.g. the user
+        typed "MNP" and the stored camp_id is "MNP Public Test, Bad Debt and
+        Collections").  Returns None if no match is found.
+        """
+        if not hint:
+            return None
+        h = hint.upper()
+        for rec in self._index.values():
+            if (h in rec.camp_id.upper()
+                    or h in rec.sub_camp_id.upper()
+                    or h in rec.campaign_name.upper()):
+                return rec
+        return None
+
     # ------------------------------------------------------------------
     # Session-only mutations (never write to disk)
     # ------------------------------------------------------------------

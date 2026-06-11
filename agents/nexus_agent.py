@@ -1076,8 +1076,18 @@ class NexusAgent(BaseAgent):
         return out[:5]
 
     def _find_brief_for_campaign(self, campaign_hint: str) -> "dict | None":
-        """Query BQ on-demand for the most recent campaign matching the hint string."""
+        """Query BQ on-demand for active deployment records matching campaign_hint.
+
+        Searches by exact camp_id or sub_camp_id match (case-insensitive).
+        The hint is sanitized to alphanumeric + safe punctuation before use
+        in the query string to prevent injection.
+        """
         if not campaign_hint:
+            return None
+
+        # Restrict to characters that appear in real campaign codes.
+        safe_hint = re.sub(r"[^A-Z0-9_\- ]", "", campaign_hint.upper().strip())
+        if not safe_hint:
             return None
 
         try:
@@ -1086,20 +1096,15 @@ class NexusAgent(BaseAgent):
                 from google.cloud import bigquery  # type: ignore
 
             client = bigquery.Client(project=self._bq_project)
-            # Canonical Data Brief retrieval query for the AAL Monthly EM portfolio
-            # initiative. Returns ALL active, non-cancelled deployment records so
-            # Nexus can study every field (including databrief_link) as the functional
-            # business requirements of the campaign before running variance analysis.
             query_str = f"""
             SELECT *
             FROM `{self._bq_table}`
             WHERE current_ind = 1
               AND closed_ind = 0
-              AND camp_id = 'AAL'
-              AND sub_camp_id = 'AALBAU'
-              AND UPPER(campaign) = 'AAL MONTHLY EM'
               AND UPPER(data_status) <> 'CANCELLED'
+              AND (UPPER(camp_id) = '{safe_hint}' OR UPPER(sub_camp_id) = '{safe_hint}')
             ORDER BY list_pull_date DESC
+            LIMIT 100
             """
             rows = [dict(r) for r in client.query(query_str).result()]
             if rows:
