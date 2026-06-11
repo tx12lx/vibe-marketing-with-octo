@@ -929,16 +929,14 @@ class VibeOctoKnowledge:
 
         print(f"  Processing {len(new_or_changed)} new/changed campaign(s).")
 
-        # Merge: update changed campaigns, keep unchanged ones from old index
-        merged = {
-            f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}": r
-            for r in old_index.get("campaigns", [])
-        }
-        for c in new_or_changed:
-            key = f"{c['camp_id']}::{c['sub_camp_id']}"
-            merged[key] = c
-
-        campaigns = list(merged.values())
+        # Use all_campaigns (fresh BQ rows) as the source.
+        # _phase3_build_and_write() carries forward brief_extraction and other
+        # enrichment fields from old_index via its own old_records lookup.
+        # Do NOT deduplicate old_index into a dict here — that would drop
+        # deployment records that share a camp_id::sub_camp_id key (17 BQ rows
+        # collapse to 8 unique keys), causing the same GOLD->BRONZE regression
+        # that occurred in run_refresh_briefs().
+        campaigns = all_campaigns
         adobe_schema = self._phase2_adobe_schema()
         camp_data_schema, gch_schema = self._phase2b_execution_schemas()
         domain_catalog = self._phase2c_domain_catalog(camp_data_schema, gch_schema)
@@ -995,6 +993,18 @@ class VibeOctoKnowledge:
 
             if needs_fetch:
                 targets.append(c)
+
+        # Deduplicate targets by URL: multiple deployment rows can share the same
+        # databrief_link. Fetching the same document twice wastes rate-limited slots
+        # (each fetch counts against the max_per_run cap).
+        _seen_urls: set = set()
+        _deduped: list = []
+        for _c in targets:
+            _url = _c.get("databrief_link", "").strip()
+            if _url not in _seen_urls:
+                _seen_urls.add(_url)
+                _deduped.append(_c)
+        targets = _deduped
 
         if not targets:
             print("\n  All campaigns have up-to-date brief extractions. Nothing to fetch.")
