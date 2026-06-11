@@ -41,6 +41,16 @@ class GoldCampaignRecord:
 _log = logging.getLogger(__name__)
 
 
+def _deployment_key(camp_id: str, sub_camp_id: str, medium: str, cadence: str) -> str:
+    """Stable unique identifier for one campaign deployment row.
+
+    Matches the key format used by the ingestion pipeline so the in-memory index
+    holds one entry per deployment (up to 17) rather than one per campaign identity
+    (8), giving NexusAgent accurate per-deployment GOLD lookups.
+    """
+    return f"{camp_id}::{sub_camp_id}::{medium}::{cadence}"
+
+
 class GoldTierIndex:
     """In-memory dictionary of GoldCampaignRecord keyed by '{camp_id}::{sub_camp_id}'."""
 
@@ -89,7 +99,7 @@ class GoldTierIndex:
                     brief_fetched_from=raw.get("brief_fetched_from", ""),
                     brief_fetched_at=raw.get("brief_fetched_at", ""),
                 )
-                key = f"{rec.camp_id}::{rec.sub_camp_id}"
+                key = _deployment_key(rec.camp_id, rec.sub_camp_id, rec.medium, rec.cadence)
                 self._index[key] = rec
             except Exception as exc:
                 _log.warning("Skipping malformed gold record %s: %s", raw, exc)
@@ -100,9 +110,29 @@ class GoldTierIndex:
     # Lookup
     # ------------------------------------------------------------------
 
-    def lookup(self, camp_id: str, sub_camp_id: str) -> Optional[GoldCampaignRecord]:
-        """Return the record for '{camp_id}::{sub_camp_id}', or None if not found."""
-        return self._index.get(f"{camp_id}::{sub_camp_id}")
+    def lookup(
+        self,
+        camp_id: str,
+        sub_camp_id: str,
+        medium: str = "",
+        cadence: str = "",
+    ) -> Optional[GoldCampaignRecord]:
+        """Return the record for this deployment, or None if not found.
+
+        Pass medium and cadence (always available on AudienceSizingRequest) for an
+        exact per-deployment match.  Omitting them falls back to the first record
+        whose camp_id+sub_camp_id matches, for call sites that genuinely lack them.
+        """
+        exact = self._index.get(_deployment_key(camp_id, sub_camp_id, medium, cadence))
+        if exact is not None:
+            return exact
+        if not medium and not cadence:
+            # Graceful fallback: caller did not supply medium/cadence — return any
+            # matching deployment so old call sites don't regress.
+            for rec in self._index.values():
+                if rec.camp_id == camp_id and rec.sub_camp_id == sub_camp_id:
+                    return rec
+        return None
 
     # ------------------------------------------------------------------
     # Session-only mutations (never write to disk)
@@ -115,13 +145,16 @@ class GoldTierIndex:
         targeting_summary: str,
         segment_summary: str,
         source: str = "verified_registry",
+        medium: str = "",
+        cadence: str = "",
     ) -> None:
         """Add or update a record in-memory for the current session.
 
-        Does NOT write to any file.  The persistent promotion happens
-        on the next run_full_refresh() call.
+        Pass medium and cadence (from UniversalJSONSpec) so the promoted record lands
+        in the correct deployment slot.  Does NOT write to any file; the persistent
+        promotion happens on the next run_full_refresh() call.
         """
-        key = f"{camp_id}::{sub_camp_id}"
+        key = _deployment_key(camp_id, sub_camp_id, medium, cadence)
         existing = self._index.get(key)
         if existing is not None:
             existing.targeting_summary = targeting_summary
@@ -135,8 +168,8 @@ class GoldTierIndex:
                 targeting_summary=targeting_summary,
                 segment_summary=segment_summary,
                 brief_text="",
-                cadence="",
-                medium="",
+                cadence=cadence,
+                medium=medium,
                 campaign_purpose="",
                 primary_products="",
                 source=source,
@@ -154,7 +187,7 @@ class GoldTierIndex:
     # ------------------------------------------------------------------
 
     def all_keys(self) -> list[str]:
-        """Return sorted list of all camp_id::sub_camp_id keys."""
+        """Return sorted list of all deployment keys (camp_id::sub_camp_id::medium::cadence)."""
         return sorted(self._index.keys())
 
     def retrieve_similar(

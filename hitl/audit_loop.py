@@ -158,6 +158,8 @@ class HITLAuditLoop:
             sub_camp_id=spec.campaign_sub_code,
             targeting_summary=targeting_summary,
             segment_summary=segment_summary,
+            medium=spec.medium,
+            cadence=spec.cadence,
         )
 
         ThoughtDisplay.campaign_approved(spec.campaign_name)

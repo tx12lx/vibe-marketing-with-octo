@@ -422,9 +422,9 @@ class KnowledgeContext:
         finally:
             conn.close()
 
-        # Build campaign lookup by key
+        # Build campaign lookup by deployment key (matches embeddings DB key format)
         camp_lookup = {
-            f"{c.get('camp_id', '')}::{c.get('sub_camp_id', '')}": c
+            f"{c.get('camp_id', '')}::{c.get('sub_camp_id', '')}::{c.get('medium', '')}::{c.get('cadence', '')}": c
             for c in self._campaigns
         }
 

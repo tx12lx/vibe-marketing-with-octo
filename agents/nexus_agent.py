@@ -661,11 +661,17 @@ class NexusAgent(BaseAgent):
         # Step 2: Gold tier lookup
         camp_id = sizing_request.campaign_code
         sub_camp_id = sizing_request.campaign_sub_code
-        gold_record = gold_index.lookup(camp_id, sub_camp_id)
+        gold_record = gold_index.lookup(
+            camp_id, sub_camp_id,
+            medium=sizing_request.medium,
+            cadence=sizing_request.cadence,
+        )
 
         if gold_record is not None:
             campaign_tier = "GOLD"
-            gold_blueprint_id = f"{camp_id}::{sub_camp_id}"
+            gold_blueprint_id = (
+                f"{camp_id}::{sub_camp_id}::{sizing_request.medium}::{sizing_request.cadence}"
+            )
             knowledge_source = "brief_text" if gold_record.brief_text else "bq_metadata"
         else:
             campaign_tier = "BRONZE"

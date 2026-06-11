@@ -386,6 +386,18 @@ def _attach_business_rules(campaign_records: list[dict]) -> None:
             camp["verified_business_rules"] = applicable
 
 
+def _deployment_key(camp_id: str, sub_camp_id: str, medium: str, cadence: str) -> str:
+    """Stable unique identifier for one campaign deployment row.
+
+    Uses all four structured fields so rows that share camp_id+sub_camp_id but differ
+    in medium or cadence remain distinct entries in all lookup dicts and the
+    embeddings database.  This prevents the deduplication collapse (17 rows → 8 keys)
+    that caused the GOLD→BRONZE regression when --refresh-briefs carried forward stale
+    old-index records instead of fresh BQ rows.
+    """
+    return f"{camp_id}::{sub_camp_id}::{medium}::{cadence}"
+
+
 def _classify_tier(targeting_summary: str, segment_summary: str, brief_accessible: bool) -> str:
     has_ts = bool(targeting_summary and targeting_summary.strip())
     has_ss = bool(segment_summary and segment_summary.strip())
@@ -912,7 +924,10 @@ class VibeOctoKnowledge:
         old_index = self._load_existing_index()
         old_timestamps: dict[str, str] = {}
         for rec in old_index.get("campaigns", []):
-            key = f"{rec.get('camp_id', '')}::{rec.get('sub_camp_id', '')}"
+            key = _deployment_key(
+                rec.get("camp_id", ""), rec.get("sub_camp_id", ""),
+                rec.get("medium", ""), rec.get("cadence", ""),
+            )
             old_timestamps[key] = rec.get("last_ingested_at", rec.get("ingested_at", ""))
 
         all_campaigns = self._phase1_campaigns_bq_only()
@@ -920,7 +935,9 @@ class VibeOctoKnowledge:
         # Only process campaigns whose BQ row is new or has a newer ingested_at timestamp
         new_or_changed = [
             c for c in all_campaigns
-            if f"{c['camp_id']}::{c['sub_camp_id']}" not in old_timestamps
+            if _deployment_key(
+                c["camp_id"], c["sub_camp_id"], c.get("medium", ""), c.get("cadence", "")
+            ) not in old_timestamps
         ]
 
         if not new_or_changed:
@@ -933,9 +950,8 @@ class VibeOctoKnowledge:
         # _phase3_build_and_write() carries forward brief_extraction and other
         # enrichment fields from old_index via its own old_records lookup.
         # Do NOT deduplicate old_index into a dict here — that would drop
-        # deployment records that share a camp_id::sub_camp_id key (17 BQ rows
-        # collapse to 8 unique keys), causing the same GOLD->BRONZE regression
-        # that occurred in run_refresh_briefs().
+        # deployment records that share an identical key, causing the same
+        # GOLD->BRONZE regression that occurred in run_refresh_briefs().
         campaigns = all_campaigns
         adobe_schema = self._phase2_adobe_schema()
         camp_data_schema, gch_schema = self._phase2b_execution_schemas()
@@ -967,7 +983,10 @@ class VibeOctoKnowledge:
         # Load existing index
         old_index = self._load_existing_index()
         old_campaigns = {
-            f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}": r
+            _deployment_key(
+                r.get("camp_id", ""), r.get("sub_camp_id", ""),
+                r.get("medium", ""), r.get("cadence", ""),
+            ): r
             for r in old_index.get("campaigns", [])
         }
 
@@ -975,7 +994,9 @@ class VibeOctoKnowledge:
         all_campaigns = self._phase1_campaigns_bq_only()
         targets = []
         for c in all_campaigns:
-            key = f"{c['camp_id']}::{c['sub_camp_id']}"
+            key = _deployment_key(
+                c["camp_id"], c["sub_camp_id"], c.get("medium", ""), c.get("cadence", "")
+            )
             existing = old_campaigns.get(key, {})
             existing_url = existing.get("brief_fetched_from", "")
             current_url = c.get("databrief_link", "")
@@ -1029,7 +1050,10 @@ class VibeOctoKnowledge:
                 _log.info("Skipping LLM extraction for %s (no brief text)", camp.get("camp_id"))
                 continue
 
-            key = f"{camp['camp_id']}::{camp['sub_camp_id']}"
+            key = _deployment_key(
+                camp["camp_id"], camp["sub_camp_id"],
+                camp.get("medium", ""), camp.get("cadence", ""),
+            )
             tier = old_campaigns.get(key, {}).get("tier", "BRONZE")
             name = camp.get("campaign_name", camp.get("camp_id", "?"))
 
@@ -1059,7 +1083,10 @@ class VibeOctoKnowledge:
             run_at = datetime.now(tz=timezone.utc).isoformat()
             updated_old_campaigns_list = []
             for r in old_index.get("campaigns", []):
-                key = f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}"
+                key = _deployment_key(
+                    r.get("camp_id", ""), r.get("sub_camp_id", ""),
+                    r.get("medium", ""), r.get("cadence", ""),
+                )
                 upd = old_campaigns.get(key, {})
                 if upd.get("brief_extraction") or upd.get("brief_fetched_from"):
                     r = dict(r)
@@ -1553,7 +1580,10 @@ Note: ACC summary is authoritative where conflicts exist."""
             conn.execute("DELETE FROM campaign_embeddings")
 
             for rec in campaign_records:
-                key = f"{rec.get('camp_id', '')}::{rec.get('sub_camp_id', '')}"
+                key = _deployment_key(
+                    rec.get("camp_id", ""), rec.get("sub_camp_id", ""),
+                    rec.get("medium", ""), rec.get("cadence", ""),
+                )
                 acc = rec.get("acc_summaries") or {}
                 summary = " ".join(filter(None, [
                     rec.get("campaign_name", ""),
@@ -1855,7 +1885,10 @@ Note: ACC summary is authoritative where conflicts exist."""
         old_records: dict[str, dict] = {}
         if old_index:
             for r in old_index.get("campaigns", []):
-                key = f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}"
+                key = _deployment_key(
+                    r.get("camp_id", ""), r.get("sub_camp_id", ""),
+                    r.get("medium", ""), r.get("cadence", ""),
+                )
                 old_records[key] = r
 
         # Separate GOLD campaigns for insight extraction.
@@ -1906,7 +1939,10 @@ Note: ACC summary is authoritative where conflicts exist."""
                 bronze_count += 1
 
             # Carry forward brief_extraction and conflict_notes from old index
-            key = f"{camp['camp_id']}::{camp['sub_camp_id']}"
+            key = _deployment_key(
+                camp["camp_id"], camp["sub_camp_id"],
+                camp.get("medium", ""), camp.get("cadence", ""),
+            )
             old_rec = old_records.get(key, {})
             current_url = camp.get("databrief_link", "").strip()
             stored_url = old_rec.get("brief_fetched_from", "")
