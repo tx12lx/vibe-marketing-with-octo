@@ -23,6 +23,7 @@ from typing import Optional, Union
 import requests
 from dotenv import load_dotenv
 from pydantic import ValidationError
+from core.resilience import resilient_post, resilient_bq_query
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -922,7 +923,7 @@ class QuantAgent(BaseAgent):
                 "cache_control": {"type": "ephemeral"},
             }
             query_block = {"type": "text", "text": prompt}
-            resp = requests.post(
+            resp = resilient_post(
                 f"{_FUELIX_BASE}/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {self._api_key}",
@@ -942,7 +943,7 @@ class QuantAgent(BaseAgent):
                 timeout=180,
             )
         else:
-            resp = requests.post(
+            resp = resilient_post(
                 f"{_FUELIX_BASE}/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {self._api_key}",
@@ -962,7 +963,6 @@ class QuantAgent(BaseAgent):
                 timeout=180,
             )
 
-        resp.raise_for_status()
         return _clean_sql(resp.json()["choices"][0]["message"]["content"].strip())
 
     def _execute_query(self, sql: str, project: str) -> list[dict]:
@@ -972,8 +972,7 @@ class QuantAgent(BaseAgent):
 
             client = bigquery.Client(project=project)
 
-        rows = [dict(r) for r in client.query(sql).result()]
-        return rows
+        return resilient_bq_query(client, sql)
 
 
 # ------------------------------------------------------------------

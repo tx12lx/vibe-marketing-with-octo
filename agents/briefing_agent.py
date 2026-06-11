@@ -29,6 +29,7 @@ from typing import Optional, TYPE_CHECKING
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
+from core.resilience import resilient_post
 
 if TYPE_CHECKING:
     from core.knowledge_context import KnowledgeContext
@@ -423,13 +424,12 @@ class BriefingAgent(BaseAgent):
             "Content-Type": "application/json",
             "anthropic-beta": "prompt-caching-2024-07-31",
         }
-        resp = requests.post(
+        resp = resilient_post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers=headers,
             json=payload,
             timeout=180,
         )
-        resp.raise_for_status()
         return self._extract_text(resp.json())
 
     def _call_standard(self, system: str, user_prompt: str) -> str:
@@ -447,13 +447,12 @@ class BriefingAgent(BaseAgent):
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        resp = requests.post(
+        resp = resilient_post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers=headers,
             json=payload,
             timeout=180,
         )
-        resp.raise_for_status()
         return self._extract_text(resp.json())
 
     @staticmethod

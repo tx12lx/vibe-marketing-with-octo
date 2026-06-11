@@ -30,6 +30,7 @@ from typing import Optional, TYPE_CHECKING
 
 import requests
 from dotenv import load_dotenv
+from core.resilience import resilient_post
 
 if TYPE_CHECKING:
     from core.knowledge_context import KnowledgeContext
@@ -818,13 +819,12 @@ class FeedbackAgent(BaseAgent):
             "Content-Type": "application/json",
             "anthropic-beta": beta,
         }
-        resp = requests.post(
+        resp = resilient_post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers=headers,
             json=payload,
             timeout=120,
         )
-        resp.raise_for_status()
         return self._extract_text(resp.json())
 
     @staticmethod

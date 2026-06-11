@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import requests
 from dotenv import load_dotenv
 from pydantic import ValidationError
+from core.resilience import resilient_post
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -1247,13 +1248,12 @@ class NexusAgent(BaseAgent):
             payload["thinking"] = thinking
             payload["temperature"] = 1  # required when thinking is enabled
             headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
-        resp = requests.post(
+        resp = resilient_post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers=headers,
             json=payload,
             timeout=180,
         )
-        resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
 
     def _call_with_cached_taxonomy(self, user_query: str) -> str:
@@ -1293,7 +1293,7 @@ class NexusAgent(BaseAgent):
             if self._session_context
             else _NEXUS_SYSTEM
         )
-        resp = requests.post(
+        resp = resilient_post(
             f"{_FUELIX_BASE}/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._api_key}",
@@ -1311,7 +1311,6 @@ class NexusAgent(BaseAgent):
             },
             timeout=180,
         )
-        resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
 
     @staticmethod

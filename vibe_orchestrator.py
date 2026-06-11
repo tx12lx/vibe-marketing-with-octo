@@ -68,6 +68,7 @@ from core.glossary import GlossaryManager  # noqa: E402
 from core.brief_fetcher import BriefFetcher  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 from core.business_rules_registry import BusinessRulesRegistry  # noqa: E402
+from core.resilience import run_startup_health_check  # noqa: E402
 
 
 _ADC_REAUTH_CMD = (
@@ -1240,6 +1241,16 @@ def main() -> None:
     rule_count = len(rules_registry._rules)
 
     _print_kb_status(gold_index, snapshot, rule_count, knowledge_ctx)
+
+    # Phase 5B: startup health gate — checks Fuel iX, BigQuery ADC, and knowledge index.
+    # Session proceeds on OK/WARN; blocked only on FAIL.
+    _fuelix_api_key = os.getenv("FUELIX_API_KEY", "")
+    _bq_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
+    run_startup_health_check(
+        api_key=_fuelix_api_key,
+        bq_project=_bq_project,
+        artifacts_dir=_ARTIFACTS_DIR,
+    )
 
     _run_console(nexus, quant, briefing, gold_index, snapshot.to_dict(), hitl, rules_registry, knowledge_ctx)
 
