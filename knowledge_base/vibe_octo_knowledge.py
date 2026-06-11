@@ -1828,10 +1828,16 @@ Note: ACC summary is authoritative where conflicts exist."""
 
         # Separate GOLD campaigns for insight extraction.
         # GOLD = has ACC-verified targeting_summary AND segment_summary.
+        # Support both flat fields (fresh BQ query) and acc_summaries nesting (old index records).
+        def _flat_ts(c: dict) -> str:
+            return c.get("targeting_summary", "") or (c.get("acc_summaries") or {}).get("targeting_summary", "")
+
+        def _flat_ss(c: dict) -> str:
+            return c.get("segment_summary", "") or (c.get("acc_summaries") or {}).get("segment_summary", "")
+
         gold_camps_raw = [
             c for c in campaigns
-            if bool(c.get("targeting_summary", "").strip())
-            and bool(c.get("segment_summary", "").strip())
+            if bool(_flat_ts(c).strip()) and bool(_flat_ss(c).strip())
         ]
         print(f"  GOLD campaigns (have ACC summaries): {len(gold_camps_raw)}")
 
@@ -1851,10 +1857,12 @@ Note: ACC summary is authoritative where conflicts exist."""
             brief_text: str = camp.pop("_brief_text", "") or ""
             brief_accessible: bool = camp.pop("_brief_accessible", False)
 
-            # In new three-mode design, tier is determined solely by BQ metadata presence
+            # In new three-mode design, tier is determined solely by BQ metadata presence.
+            # Normalize: fresh BQ records have flat fields; old index records nest them under acc_summaries.
+            _acc = camp.get("acc_summaries") or {}
             tier = _classify_tier(
-                camp.get("targeting_summary", ""),
-                camp.get("segment_summary", ""),
+                camp.get("targeting_summary", "") or _acc.get("targeting_summary", ""),
+                camp.get("segment_summary", "") or _acc.get("segment_summary", ""),
                 brief_accessible,
             )
 
@@ -1903,8 +1911,8 @@ Note: ACC summary is authoritative where conflicts exist."""
                 "primary_products": camp["primary_products"],
                 "tier":             tier,
                 "acc_summaries": {
-                    "targeting_summary": camp.get("targeting_summary") or None,
-                    "segment_summary":   camp.get("segment_summary") or None,
+                    "targeting_summary": camp.get("targeting_summary") or _acc.get("targeting_summary") or None,
+                    "segment_summary":   camp.get("segment_summary") or _acc.get("segment_summary") or None,
                     "source":            "acc_workflow_xml" if tier == "GOLD" else None,
                 },
                 "brief_extraction":   brief_extraction,
