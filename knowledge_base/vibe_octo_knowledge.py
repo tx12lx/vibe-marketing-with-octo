@@ -54,9 +54,11 @@ from typing import Optional
 
 from google.cloud import bigquery
 
-_NEXUS_DIR = Path(__file__).resolve().parent.parent / "Vibe OCTO Nexus"
-if str(_NEXUS_DIR) not in sys.path:
-    sys.path.insert(0, str(_NEXUS_DIR))
+_ROOT_DIR = Path(__file__).resolve().parent.parent
+_NEXUS_DIR = _ROOT_DIR / "Vibe OCTO Nexus"
+for _p in (str(_ROOT_DIR), str(_NEXUS_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from core.brief_fetcher import BriefFetcher, BriefFetchError  # noqa: E402
 
