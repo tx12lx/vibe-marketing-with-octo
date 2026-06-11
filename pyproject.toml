@@ -20,9 +20,12 @@ dependencies = [
     "pdfplumber>=0.10.0",
     # Numpy for optional dense-embedding cosine similarity
     "numpy>=1.26.0",
-    # Phase 4: Google Chat API server
+    # Phase 4: HTTP API server (shared by Slack and Google Chat interfaces)
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
+    # Phase 4: Slack interface (active)
+    "slack-bolt>=1.18.0",
+    # Phase 4: Google Chat interface (preserved, activate when GCP permissions resolved)
     "google-api-python-client>=2.118.0",
 ]
 

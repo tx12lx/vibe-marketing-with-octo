@@ -66,7 +66,7 @@ from core.audit_logger import HITL_YES  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
 from pydantic_schemas import BriefingOutput, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from api.session_store import SessionStore  # noqa: E402
-from api.chat_formatter import (  # noqa: E402
+from api.gchat_formatter import (  # noqa: E402
     format_audit_log_card,
     format_brief_card,
     format_combined_card,
