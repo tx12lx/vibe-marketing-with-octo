@@ -1495,7 +1495,15 @@ Note: ACC summary is authoritative where conflicts exist."""
     def _generate_embeddings(self, campaign_records: list[dict]) -> None:
         """Build sparse TF-IDF vectors for each campaign and store in SQLite."""
         import sqlite3
-        from knowledge_base.tier_index import _tfidf_vector, _cosine_sim  # noqa: F401
+        from collections import Counter as _Counter
+
+        def _tfidf_vector(text: str) -> dict[str, float]:
+            tokens = re.findall(r"[a-z]{3,}", text.lower())
+            if not tokens:
+                return {}
+            counts = _Counter(tokens)
+            total = len(tokens)
+            return {t: c / total for t, c in counts.items()}
 
         db_path = self._artifacts_dir / "campaign_embeddings.db"
         conn = sqlite3.connect(str(db_path))
@@ -1526,7 +1534,7 @@ Note: ACC summary is authoritative where conflicts exist."""
 
                 vec = _tfidf_vector(summary)
                 conn.execute(
-                    "INSERT INTO campaign_embeddings VALUES (?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO campaign_embeddings VALUES (?, ?, ?, ?)",
                     (key, json.dumps(vec, ensure_ascii=False), summary[:500], rec.get("tier", "GOLD")),
                 )
             conn.commit()
