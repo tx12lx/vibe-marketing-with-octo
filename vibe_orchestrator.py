@@ -704,7 +704,8 @@ def _build_briefing_context(intent, query, nexus, gold_index, schema_snapshot, r
       1. Session memory -- prior sizing result for same campaign (multi-step chain)
       2. Gold index -- curated campaign intelligence library
       3. BQ deployment records -- live metadata, no SQL filter extraction
-      4. Last resort -- campaign name alone (BRONZE tier)
+      4. Last resort -- campaign name alone (BRONZE tier); never returns None when
+         campaign_code is non-empty
     """
     campaign_code = intent.campaign_code if intent.campaign_identified else None
 
@@ -740,8 +741,8 @@ def _build_briefing_context(intent, query, nexus, gold_index, schema_snapshot, r
                         "prior_sizing_filters": prior.spec.filters,
                     },
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"  [briefing ctx step 1] session-memory spec failed: {exc.__class__.__name__}: {exc}")
 
     # 2. Gold index (knowledge library) -- highest-quality curated source for briefs
     if campaign_code:
@@ -765,34 +766,35 @@ def _build_briefing_context(intent, query, nexus, gold_index, schema_snapshot, r
                     target_population=gold_record.campaign_purpose or gold_record.campaign_name,
                     brief_agent_inputs={"raw_prompt": query},
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"  [briefing ctx step 2] gold-index spec failed: {exc.__class__.__name__}: {exc}")
 
     # 3. BQ deployment records (brief-oriented, no SQL filter extraction)
     if campaign_code:
-        brief = nexus._find_brief_for_campaign(campaign_code)
-        if brief:
-            spec = nexus.build_brief_context_from_bq(brief, gold_index, query)
-            if spec is not None:
-                return spec
+        try:
+            brief = nexus._find_brief_for_campaign(campaign_code)
+            if brief:
+                spec = nexus.build_brief_context_from_bq(brief, gold_index, query)
+                if spec is not None:
+                    return spec
+        except Exception as exc:
+            print(f"  [briefing ctx step 3] BQ lookup failed: {exc.__class__.__name__}: {exc}")
 
-    # 4. Last resort: campaign name alone (BRONZE -- BriefingAgent will do its best)
+    # 4. Last resort: campaign name alone (BRONZE -- BriefingAgent will do its best).
+    # No try/except: this construction is always valid when campaign_code is a non-empty str.
     name = campaign_code or ""
     if name:
-        try:
-            return UniversalJSONSpec(
-                campaign_name=name,
-                campaign_code=name,
-                campaign_sub_code=name,
-                cadence="ad-hoc",
-                medium="unspecified",
-                campaign_tier="BRONZE",
-                knowledge_source="nl_only",
-                target_population=name,
-                brief_agent_inputs={"raw_prompt": query},
-            )
-        except Exception:
-            pass
+        return UniversalJSONSpec(
+            campaign_name=name,
+            campaign_code=name,
+            campaign_sub_code=name,
+            cadence="ad-hoc",
+            medium="unspecified",
+            campaign_tier="BRONZE",
+            knowledge_source="nl_only",
+            target_population=name,
+            brief_agent_inputs={"raw_prompt": query},
+        )
 
     return None
 
@@ -955,6 +957,25 @@ def route_by_intent(
             return None, None, None
 
     elif it in ("brief_generation", "brief_qa"):
+        if spec is None:
+            # Safety net: _build_briefing_context returned None despite four fallback steps.
+            # If the campaign was identified, synthesise a minimal BRONZE spec so the bot
+            # always attempts to generate a brief rather than returning a silent failure.
+            if intent.campaign_identified and intent.campaign_code:
+                print(f"  [route_by_intent] WARNING: _build_briefing_context returned None "
+                      f"for identified campaign '{intent.campaign_code}'. Using safety-net spec.")
+                name = intent.campaign_code
+                spec = UniversalJSONSpec(
+                    campaign_name=name,
+                    campaign_code=name,
+                    campaign_sub_code=name,
+                    cadence="ad-hoc",
+                    medium="unspecified",
+                    campaign_tier="BRONZE",
+                    knowledge_source="nl_only",
+                    target_population=name,
+                    brief_agent_inputs={"raw_prompt": query},
+                )
         if spec is None:
             return None, None, None
         briefing.subscribe(spec)
