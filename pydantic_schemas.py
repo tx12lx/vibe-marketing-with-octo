@@ -127,7 +127,9 @@ class UniversalJSONSpec(BaseModel):
 
     # Audience definition
     target_population: str
-    filters: list[str]
+    # filters is required and non-empty when consumed by QuantAgent (sizing/execution).
+    # For brief-only requests it defaults to [] -- BriefingAgent does not use SQL filters.
+    filters: list[str] = []
     exclusion_layers: Optional[list[str]] = None
     optimization_context: Optional[str] = None
 
@@ -146,13 +148,6 @@ class UniversalJSONSpec(BaseModel):
     max_waterfall_steps: int = 10
     require_gch_suppression: bool = False
     dnc_channels: list[str] = []
-
-    @field_validator("filters")
-    @classmethod
-    def filters_not_empty(cls, v: list[str]) -> list[str]:
-        if not v:
-            raise ValueError("filters must contain at least one entry")
-        return v
 
     def to_audience_sizing_request(self) -> "AudienceSizingRequest":
         """Backwards-compatible downcast for QuantAgent.audit()."""

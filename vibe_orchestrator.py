@@ -22,7 +22,7 @@ import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from dotenv import load_dotenv
 
@@ -681,6 +681,134 @@ def _agent_called_for_intent(intent_type: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Intent-specific context builders
+# ---------------------------------------------------------------------------
+
+def _build_sizing_context(intent, query, nexus, gold_index, schema_snapshot, rules_registry, session_memory):
+    """Build a sizing-oriented UniversalJSONSpec for sizing_request / campaign_execution."""
+    if not intent.campaign_identified or not intent.campaign_code:
+        return None
+    ThoughtDisplay.progress("Looking up your campaign in the knowledge base...")
+    brief = nexus._find_brief_for_campaign(intent.campaign_code)
+    if not brief:
+        ThoughtDisplay.progress("Couldn't locate that campaign. Switching to custom audience mode...")
+        return None
+    ThoughtDisplay.progress("Found it! Preparing your targeting blueprint...")
+    return nexus.build_universal_spec(brief, gold_index, schema_snapshot)
+
+
+def _build_briefing_context(intent, query, nexus, gold_index, schema_snapshot, rules_registry, session_memory):
+    """Build a briefing-oriented UniversalJSONSpec for brief_generation / brief_qa.
+
+    Priority order:
+      1. Session memory -- prior sizing result for same campaign (multi-step chain)
+      2. Gold index -- curated campaign intelligence library
+      3. BQ deployment records -- live metadata, no SQL filter extraction
+      4. Last resort -- campaign name alone (BRONZE tier)
+    """
+    campaign_code = intent.campaign_code if intent.campaign_identified else None
+
+    # 1. Session memory: incorporate prior sizing into the brief
+    if session_memory is not None and not session_memory.is_empty:
+        prior = session_memory.get_prior_sizing(campaign_code)
+        if prior is not None and prior.spec is not None and prior.log is not None:
+            filters_text = "\n".join(f"  - {f}" for f in (prior.spec.filters or []))
+            augmented_prompt = (
+                f"{query}\n\nCONTEXT FROM PRIOR SIZING (incorporate into the brief):\n"
+                f"Campaign: {prior.campaign_name}\n"
+                f"Final Audience: {prior.log.final_count:,} contacts\n"
+                f"Targeting Criteria Applied:\n{filters_text}"
+            )
+            ThoughtDisplay.progress(
+                f"Using prior sizing result ({prior.log.final_count:,} contacts) "
+                "to enrich the brief..."
+            )
+            try:
+                return UniversalJSONSpec(
+                    campaign_name=prior.spec.campaign_name,
+                    campaign_code=prior.spec.campaign_code,
+                    campaign_sub_code=prior.spec.campaign_sub_code,
+                    cadence=prior.spec.cadence,
+                    medium=prior.spec.medium,
+                    campaign_tier=prior.spec.campaign_tier,
+                    knowledge_source=prior.spec.knowledge_source,
+                    gold_blueprint_id=prior.spec.gold_blueprint_id,
+                    target_population=prior.spec.target_population,
+                    brief_agent_inputs={
+                        "raw_prompt": augmented_prompt,
+                        "prior_sizing_count": prior.log.final_count,
+                        "prior_sizing_filters": prior.spec.filters,
+                    },
+                )
+            except Exception:
+                pass
+
+    # 2. Gold index (knowledge library) -- highest-quality curated source for briefs
+    if campaign_code:
+        ThoughtDisplay.progress("Looking up your campaign in the knowledge base...")
+        gold_record = gold_index.search(campaign_code)
+        if gold_record is not None:
+            ThoughtDisplay.progress(
+                f"Found '{gold_record.campaign_name}' in the knowledge library. "
+                "Building brief from stored campaign intelligence..."
+            )
+            try:
+                return UniversalJSONSpec(
+                    campaign_name=gold_record.campaign_name or campaign_code,
+                    campaign_code=gold_record.camp_id,
+                    campaign_sub_code=gold_record.sub_camp_id,
+                    cadence=gold_record.cadence or "ad-hoc",
+                    medium=gold_record.medium or "unspecified",
+                    campaign_tier="GOLD",
+                    knowledge_source="bq_metadata",
+                    gold_blueprint_id=f"{gold_record.camp_id}::{gold_record.sub_camp_id}",
+                    target_population=gold_record.campaign_purpose or gold_record.campaign_name,
+                    brief_agent_inputs={"raw_prompt": query},
+                )
+            except Exception:
+                pass
+
+    # 3. BQ deployment records (brief-oriented, no SQL filter extraction)
+    if campaign_code:
+        brief = nexus._find_brief_for_campaign(campaign_code)
+        if brief:
+            spec = nexus.build_brief_context_from_bq(brief, gold_index, query)
+            if spec is not None:
+                return spec
+
+    # 4. Last resort: campaign name alone (BRONZE -- BriefingAgent will do its best)
+    name = campaign_code or ""
+    if name:
+        try:
+            return UniversalJSONSpec(
+                campaign_name=name,
+                campaign_code=name,
+                campaign_sub_code=name,
+                cadence="ad-hoc",
+                medium="unspecified",
+                campaign_tier="BRONZE",
+                knowledge_source="nl_only",
+                target_population=name,
+                brief_agent_inputs={"raw_prompt": query},
+            )
+        except Exception:
+            pass
+
+    return None
+
+
+# Registry: maps intent_type -> context builder function.
+# To support a new intent, add one entry here -- zero changes to route_by_intent.
+_CONTEXT_BUILDERS: dict[str, Callable] = {
+    "sizing_request":     _build_sizing_context,
+    "campaign_execution": _build_sizing_context,
+    "brief_generation":   _build_briefing_context,
+    "brief_qa":           _build_briefing_context,
+    "general_question":   lambda *_: None,
+}
+
+
+# ---------------------------------------------------------------------------
 # Unified intent-based router
 # ---------------------------------------------------------------------------
 
@@ -694,6 +822,7 @@ def route_by_intent(
     schema_snapshot: dict,
     rules_registry: Optional[BusinessRulesRegistry] = None,
     allow_interactive: bool = True,
+    session_memory=None,
 ) -> tuple[Optional[UniversalJSONSpec], Optional[QuantAuditLog], Optional[BriefingOutput]]:
     """Unified intent-based pipeline dispatcher.
 
@@ -713,19 +842,15 @@ def route_by_intent(
     """
     it = intent.intent_type
 
-    # Step 4: Assemble knowledge context when campaign is identified
+    # Step 4: Build intent-appropriate context via the registry.
+    # Each intent type has its own builder; new intents register here, not in route_by_intent.
+    context_builder = _CONTEXT_BUILDERS.get(it)
     spec: Optional[UniversalJSONSpec] = None
-    if intent.campaign_identified and intent.campaign_code:
-        ThoughtDisplay.progress("Looking up your campaign in the knowledge base...")
-        brief = nexus._find_brief_for_campaign(intent.campaign_code)
-        if brief:
-            ThoughtDisplay.progress("Found it! Preparing your targeting blueprint...")
-            spec = nexus.build_universal_spec(brief, gold_index, schema_snapshot)
-            if spec is not None and spec.discrepancy_flags:
-                ThoughtDisplay.discrepancy_check(len(spec.discrepancy_flags), spec.discrepancy_flags)
-                _print_discrepancy_audit(spec)
-        else:
-            ThoughtDisplay.progress("Couldn't locate that campaign. Switching to custom audience mode...")
+    if context_builder is not None:
+        spec = context_builder(intent, query, nexus, gold_index, schema_snapshot, rules_registry, session_memory)
+        if spec is not None and spec.discrepancy_flags:
+            ThoughtDisplay.discrepancy_check(len(spec.discrepancy_flags), spec.discrepancy_flags)
+            _print_discrepancy_audit(spec)
 
     # Step 3: BusinessRulesRegistry — always consulted when campaign context is available
     if spec is not None and rules_registry is not None:
@@ -831,61 +956,7 @@ def route_by_intent(
 
     elif it in ("brief_generation", "brief_qa"):
         if spec is None:
-            # Before falling back to NL parsing, check the local knowledge index.
-            # This covers campaigns that exist in the gold_index but have no BQ
-            # deployment records (e.g. MNP, any campaign not yet in bq_plan_camp_deploy_mdc).
-            if intent.campaign_code:
-                gold_record = gold_index.search(intent.campaign_code)
-                if gold_record is not None:
-                    ThoughtDisplay.progress(
-                        f"Found '{gold_record.campaign_name}' in the knowledge library. "
-                        "Building brief from stored campaign intelligence..."
-                    )
-                    try:
-                        spec = UniversalJSONSpec(
-                            campaign_name=gold_record.campaign_name or intent.campaign_code,
-                            campaign_code=gold_record.camp_id,
-                            campaign_sub_code=gold_record.sub_camp_id,
-                            cadence=gold_record.cadence or "ad-hoc",
-                            medium=gold_record.medium or "unspecified",
-                            campaign_tier="GOLD",
-                            knowledge_source="bq_metadata",
-                            gold_blueprint_id=(
-                                f"{gold_record.camp_id}::{gold_record.sub_camp_id}"
-                            ),
-                            target_population=(
-                                gold_record.campaign_purpose or gold_record.campaign_name
-                            ),
-                            filters=["standard_exclusions = 0"],
-                            brief_agent_inputs={"raw_prompt": query},
-                        )
-                    except Exception:
-                        spec = None
-
-        if spec is None:
-            ThoughtDisplay.progress("No campaign context found. Building brief from your request...")
-            request = nexus.build_sizing_request_from_nl(query)
-            if request is None:
-                return None, None, None
-            try:
-                spec = UniversalJSONSpec(
-                    campaign_name=request.campaign_name,
-                    campaign_code=request.campaign_code,
-                    campaign_sub_code=request.campaign_sub_code,
-                    cadence=request.cadence,
-                    medium=request.medium,
-                    campaign_tier="BRONZE",
-                    knowledge_source="nl_only",
-                    target_population=request.target_population,
-                    filters=request.filters,
-                    exclusion_layers=request.exclusion_layers,
-                    optimization_context=request.optimization_context,
-                    bq_project=request.bq_project,
-                    bq_dataset=request.bq_dataset,
-                    brief_agent_inputs={"raw_prompt": query},
-                )
-            except Exception:
-                return None, None, None
+            return None, None, None
         briefing.subscribe(spec)
         brief_output: BriefingOutput = briefing.execute()
         return spec, None, brief_output
@@ -1401,6 +1472,7 @@ def process_core_request(
     rt: VibeRuntime,
     session_id: Optional[str] = None,
     user: str = "unknown",
+    session_memory=None,
 ) -> RequestResult:
     """Execute the full pipeline for a single query without any terminal I/O.
 
@@ -1428,6 +1500,7 @@ def process_core_request(
             rt.schema_snapshot.to_dict(),
             rt.rules_registry,
             allow_interactive=False,
+            session_memory=session_memory,
         )
         result = RequestResult(intent=intent, spec=spec, log=log, brief_output=brief_output)
         if rt.audit_logger is not None:

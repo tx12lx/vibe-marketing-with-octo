@@ -514,6 +514,56 @@ class NexusAgent(BaseAgent):
         )
         return self._parse_to_sizing_request(prompt)
 
+    def build_brief_context_from_bq(
+        self, brief: dict, gold_index: "GoldTierIndex", query: str,
+    ) -> Optional[UniversalJSONSpec]:
+        """Build a brief-oriented spec from BQ deployment metadata.
+
+        Does NOT extract SQL filters -- assembles campaign identity and narrative
+        context only. Called by _build_briefing_context when the gold index misses
+        but BQ deployment records exist.
+        """
+        deployments = brief.get("deployments", [])
+        if not deployments:
+            return None
+        dep = deployments[0]
+        camp_id = str(dep.get("camp_id", "")).strip()
+        sub_camp_id = str(dep.get("sub_camp_id", "")).strip()
+        campaign_name = str(dep.get("campaign_name", camp_id)).strip() or camp_id
+        cadence = str(dep.get("cadence", "")).strip() or "ad-hoc"
+        medium = str(dep.get("medium", "")).strip() or "unspecified"
+        if not camp_id:
+            return None
+        gold_record = gold_index.lookup(camp_id, sub_camp_id, medium=medium, cadence=cadence)
+        if gold_record is None:
+            gold_record = gold_index.search(camp_id)
+        campaign_tier = "GOLD" if gold_record else "BRONZE"
+        try:
+            return UniversalJSONSpec(
+                campaign_name=campaign_name,
+                campaign_code=camp_id,
+                campaign_sub_code=sub_camp_id,
+                cadence=cadence,
+                medium=medium,
+                campaign_tier=campaign_tier,
+                knowledge_source="bq_metadata",
+                gold_blueprint_id=(
+                    f"{camp_id}::{sub_camp_id}::{medium}::{cadence}" if gold_record else None
+                ),
+                target_population=(
+                    gold_record.campaign_purpose if gold_record else campaign_name
+                ),
+                brief_agent_inputs={
+                    "raw_prompt": query,
+                    "campaign_purpose": gold_record.campaign_purpose if gold_record else "",
+                    "targeting_summary": gold_record.targeting_summary if gold_record else "",
+                    "brief_text": gold_record.brief_text if gold_record else "",
+                },
+            )
+        except Exception as exc:
+            print(f"  [Nexus] Brief context build failed: {exc.__class__.__name__}: {exc}")
+            return None
+
     def build_sizing_request_from_nl(self, query: str) -> Optional[AdHocSizingRequest]:
         """Path 2 — parse a natural language audience description into an ad-hoc sizing request."""
         prompt = _NL_PARSE_PROMPT.format(query=query)

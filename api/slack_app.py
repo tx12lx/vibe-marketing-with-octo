@@ -354,9 +354,10 @@ def _process_query(
             rt.schema_snapshot.to_dict(),
             rt.rules_registry,
             allow_interactive=False,
+            session_memory=session.session_memory,
         )
 
-        # --- Store result for HITL button clicks ---
+        # --- Store result for HITL button clicks and session memory ---
         if log is not None or brief_output is not None:
             session.store_result(
                 query=message_text,
@@ -365,6 +366,28 @@ def _process_query(
                 log=log,
                 brief=brief_output,
             )
+            campaign_name = spec.campaign_name if spec else "unknown"
+            campaign_code = spec.campaign_code if spec else ""
+            if log is not None:
+                session.session_memory.record(
+                    intent_type=intent.intent_type,
+                    campaign_name=campaign_name,
+                    campaign_code=campaign_code,
+                    result_summary=f"Sized audience: {log.final_count:,} contacts",
+                    spec=spec,
+                    log=log,
+                    brief=brief_output,
+                )
+            elif brief_output is not None:
+                session.session_memory.record(
+                    intent_type=intent.intent_type,
+                    campaign_name=campaign_name,
+                    campaign_code=campaign_code,
+                    result_summary=f"Generated brief (confidence: {brief_output.confidence_score:.0%})",
+                    spec=spec,
+                    log=log,
+                    brief=brief_output,
+                )
 
         # --- Post final result ---
         _post_result(channel, thread_ts, intent, log, brief_output)

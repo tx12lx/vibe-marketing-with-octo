@@ -10,10 +10,78 @@ grows past ~10 concurrent users or when multi-process deployment is needed.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from pydantic_schemas import BriefingOutput, IntentClassification, QuantAuditLog, UniversalJSONSpec
+
+
+# ---------------------------------------------------------------------------
+# Session memory -- records completed task results within a conversation to
+# enable multi-step dependent task chains (e.g., size audience then brief it).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SessionMemoryEntry:
+    intent_type: str
+    campaign_name: str
+    campaign_code: str
+    result_summary: str
+    timestamp: str
+    spec: Optional["UniversalJSONSpec"] = None
+    log: Optional["QuantAuditLog"] = None
+    brief: Optional["BriefingOutput"] = None
+
+
+class SessionMemory:
+    """Per-channel record of completed pipeline tasks within one conversation."""
+
+    def __init__(self) -> None:
+        self._entries: list[SessionMemoryEntry] = []
+
+    def record(
+        self,
+        intent_type: str,
+        campaign_name: str,
+        campaign_code: str,
+        result_summary: str,
+        spec: Optional["UniversalJSONSpec"] = None,
+        log: Optional["QuantAuditLog"] = None,
+        brief: Optional["BriefingOutput"] = None,
+    ) -> None:
+        self._entries.append(SessionMemoryEntry(
+            intent_type=intent_type,
+            campaign_name=campaign_name,
+            campaign_code=campaign_code,
+            result_summary=result_summary,
+            timestamp=datetime.now(tz=timezone.utc).isoformat(),
+            spec=spec,
+            log=log,
+            brief=brief,
+        ))
+
+    def get_prior_sizing(self, campaign_code: Optional[str] = None) -> Optional[SessionMemoryEntry]:
+        """Return the most recent sizing_request entry, optionally filtered by campaign_code."""
+        for entry in reversed(self._entries):
+            if entry.intent_type == "sizing_request" and entry.log is not None:
+                if campaign_code is None or entry.campaign_code == campaign_code:
+                    return entry
+        return None
+
+    def to_context_string(self, max_entries: int = 3) -> str:
+        if not self._entries:
+            return ""
+        recent = self._entries[-max_entries:]
+        lines = ["PRIOR WORK THIS SESSION (use as context for the current request):"]
+        for i, e in enumerate(recent, 1):
+            lines.append(f"  {i}. {e.intent_type}: {e.campaign_name} -- {e.result_summary}")
+        return "\n".join(lines)
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self._entries) == 0
 
 
 class SessionState:
@@ -28,6 +96,7 @@ class SessionState:
         "last_query",
         "hitl_pending",
         "awaiting_correction",
+        "session_memory",
     )
 
     def __init__(self, space_id: str) -> None:
@@ -42,6 +111,7 @@ class SessionState:
         # True after the user clicked "Something's wrong"; next message is treated
         # as a free-text correction for FeedbackAgent.
         self.awaiting_correction: bool = False
+        self.session_memory: SessionMemory = SessionMemory()
 
     def store_result(
         self,

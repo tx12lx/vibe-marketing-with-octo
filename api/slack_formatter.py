@@ -152,6 +152,11 @@ def format_sizing_result(log: "QuantAuditLog") -> list[dict]:
 
 def format_brief_result(brief: "BriefingOutput") -> list[dict]:
     """Campaign brief result with HITL buttons."""
+    brief_text = (
+        brief.brief_markdown[:_SLACK_TEXT_LIMIT]
+        if brief.brief_markdown
+        else "_Brief content could not be generated. Please try again._"
+    )
     blocks: list[dict] = [
         _header(f"Campaign Brief -- {brief.campaign_name}"),
         _divider(),
@@ -160,7 +165,7 @@ def format_brief_result(brief: "BriefingOutput") -> list[dict]:
             ("Tier", brief.tier),
             ("Confidence", f"{brief.confidence_score:.0%}"),
         ),
-        _section(brief.brief_markdown[:_SLACK_TEXT_LIMIT]),
+        _section(brief_text),
     ]
 
     if brief.data_sources_cited:
