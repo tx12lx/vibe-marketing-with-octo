@@ -116,7 +116,14 @@ eligibility inclusion)\
 
 _OUTPUT_RULES = (
     "\n\nSTRICT OUTPUT RULES:\n"
-    "- Output only the Markdown brief — no preamble, no explanation, no text outside the structure\n"
+    "- Begin your response with a knowledge sources block in EXACTLY this format — list every "
+    "knowledge source you actually drew upon for this specific request and one sentence saying "
+    "why it was relevant:\n"
+    "---KNOWLEDGE_SOURCES_BEGIN---\n"
+    "- [source name]: [one sentence explaining why this source was relevant to this request]\n"
+    "---KNOWLEDGE_SOURCES_END---\n"
+    "- After the knowledge sources block, output only the Markdown brief — no other preamble, "
+    "no explanation, no text outside the section structure\n"
     "- Never reference SQL syntax, database queries, table names, column names, view names, "
     "schema labels, BigQuery, or any technical execution detail anywhere in the brief text\n"
     "- Do not hardcode or assume a fixed product line; derive the line of business, customer "
@@ -129,6 +136,12 @@ _OUTPUT_RULES = (
     "business mobility as indicated by the campaign context\n"
     "- Strategic Recommendations section: include items 1-4 always; include item 5 only if "
     "strongly warranted by the campaign context; otherwise omit it\n"
+)
+
+# Parses the machine-readable knowledge sources block the AI must prepend to every response.
+_KNOWLEDGE_BLOCK_RE = re.compile(
+    r"---KNOWLEDGE_SOURCES_BEGIN---\n(.*?)\n---KNOWLEDGE_SOURCES_END---\n?",
+    re.DOTALL,
 )
 
 # Regex to extract column-like tokens preceding SQL comparison operators.
@@ -490,17 +503,33 @@ class BriefingAgent(BaseAgent):
     def _assemble_output(
         self, spec: UniversalJSONSpec, brief_markdown: str, confidence: float
     ) -> BriefingOutput:
+        knowledge_sources, clean_markdown = self._extract_knowledge_block(brief_markdown)
         return BriefingOutput(
             campaign_name=spec.campaign_name,
             tier=spec.campaign_tier,
-            brief_markdown=brief_markdown,
-            executive_summary=self._extract_section(brief_markdown, "Campaign Overview"),
-            targeting_logic_summary=self._extract_section(brief_markdown, "Targeting Logic"),
-            strategic_recommendations=self._extract_recommendations(brief_markdown),
-            data_sources_cited=self._extract_data_sources(brief_markdown, spec),
+            brief_markdown=clean_markdown,
+            executive_summary=self._extract_section(clean_markdown, "Campaign Overview"),
+            targeting_logic_summary=self._extract_section(clean_markdown, "Targeting Logic"),
+            strategic_recommendations=self._extract_recommendations(clean_markdown),
+            data_sources_cited=self._extract_data_sources(clean_markdown, spec),
             confidence_score=confidence,
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            knowledge_sources_used=knowledge_sources if knowledge_sources else None,
         )
+
+    @staticmethod
+    def _extract_knowledge_block(raw: str) -> tuple[list[str], str]:
+        """Strip the knowledge-sources block from the AI response and return (sources, clean_brief)."""
+        m = _KNOWLEDGE_BLOCK_RE.search(raw)
+        if not m:
+            return [], raw
+        sources = [
+            line.lstrip("- ").strip()
+            for line in m.group(1).splitlines()
+            if line.strip()
+        ]
+        clean = raw[:m.start()] + raw[m.end():]
+        return sources, clean.lstrip("\n")
 
     @staticmethod
     def _extract_section(markdown: str, section_name: str) -> str:
@@ -542,4 +571,5 @@ class BriefingAgent(BaseAgent):
             data_sources_cited=[],
             confidence_score=0.0,
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            error_reason=reason,
         )

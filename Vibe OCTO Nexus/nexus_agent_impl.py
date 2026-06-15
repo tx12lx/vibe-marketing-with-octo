@@ -1247,7 +1247,7 @@ class NexusAgent:
         """Call Fuel iX with the full knowledge context pinned as an ephemeral cached block.
 
         When a KnowledgeContext is available (startup injection via set_knowledge_context),
-        uses it as the cached block -- it contains all 35 GOLD campaigns, business rules,
+        uses it as the cached block -- it contains all loaded GOLD campaigns, business rules,
         glossary, and patterns.  Falls back to the sparse taxonomy for backward compat.
 
         The first content block carries cache_control: ephemeral per the Anthropic
@@ -1255,9 +1255,10 @@ class NexusAgent:
         tokens for the knowledge block are charged at ~10% of normal cost.
         """
         if self._knowledge_ctx is not None:
+            _campaign_count = getattr(self._knowledge_ctx, "campaign_count", "all")
             cached_text = (
                 "VIBE OCTO COMPLETE KNOWLEDGE BASE\n"
-                "(Authoritative reference -- all 35 GOLD campaigns, business rules, "
+                f"(Authoritative reference -- {_campaign_count} GOLD campaigns, business rules, "
                 "glossary, and schema)\n\n"
                 + self._knowledge_ctx.nexus_context
             )

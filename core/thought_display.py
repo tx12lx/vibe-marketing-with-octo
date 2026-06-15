@@ -474,10 +474,10 @@ class ThoughtDisplay:
             body.append(_row(f"  {_CHECK}  GOLD Campaign: {gold_campaign[:44]}"))
 
         if knowledge_sources:
-            for src in knowledge_sources[:3]:
+            for src in knowledge_sources[:6]:
                 body.append(_row(f"  {_CHECK}  {src[:60]}"))
         else:
-            body.append(_row(f"  {_CHECK}  GOLD campaign summaries (all 35 campaigns)"))
+            body.append(_row(f"  {_CHECK}  GOLD campaign knowledge base"))
 
         if schema_table:
             body.append(_row(f"  {_CHECK}  Schema: {schema_table[:54]}"))

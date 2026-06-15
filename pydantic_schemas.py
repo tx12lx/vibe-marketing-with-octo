@@ -198,6 +198,8 @@ class BriefingOutput(BaseModel):
     data_sources_cited: list[str]
     confidence_score: float  # 0.0 to 1.0
     generated_at: str        # ISO 8601
+    error_reason: Optional[str] = None
+    knowledge_sources_used: Optional[list[str]] = None
 
 
 class SemanticFailureLog(BaseModel):

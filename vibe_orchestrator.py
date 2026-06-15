@@ -869,7 +869,9 @@ def route_by_intent(
             )
             spec = rules_registry.apply_rules_to_spec(spec, applicable_rules)
 
-    # Display which knowledge assets were consulted before any agent fires
+    # Display which knowledge assets were consulted before any agent fires.
+    # Brief intents are skipped here — their knowledge box is shown after the
+    # brief is generated so it reflects what the AI model actually used.
     _applied_rule_count = 0
     if spec is not None and rules_registry is not None:
         # Re-use already-computed applicable_rules count when available
@@ -881,12 +883,13 @@ def route_by_intent(
     if spec is not None:
         bai = spec.brief_agent_inputs or {}
         _brief_req_count = len(bai.get("brief_requirements") or [])
-    ThoughtDisplay.show_knowledge_used(
-        gold_campaign=spec.campaign_name if spec is not None else None,
-        rules_applied=_applied_rule_count,
-        brief_requirements=_brief_req_count,
-        confidence=getattr(intent, "confidence_score", None),
-    )
+    if it not in ("brief_generation", "brief_qa"):
+        ThoughtDisplay.show_knowledge_used(
+            gold_campaign=spec.campaign_name if spec is not None else None,
+            rules_applied=_applied_rule_count,
+            brief_requirements=_brief_req_count,
+            confidence=getattr(intent, "confidence_score", None),
+        )
 
     # Step 5: Agent activation based on intent type
     if it == "sizing_request":
@@ -1077,6 +1080,8 @@ def _format_audit_log(log: QuantAuditLog) -> str:
 def _print_brief(brief: BriefingOutput) -> None:
     """Print the BriefingAgent Markdown output with a structured wrapper."""
     if not brief.brief_markdown:
+        reason = brief.error_reason or "The brief could not be generated. Please try again."
+        ThoughtDisplay.error(f"Brief generation failed: {reason}")
         return
     sep = "=" * 66
     thin = "-" * 44
@@ -1092,6 +1097,11 @@ def _print_brief(brief: BriefingOutput) -> None:
     conf_label = f"Confidence: {brief.confidence_score:.0%}"
     print(f"  {tier_label:<22}  {conf_label}")
     print(sep)
+    ThoughtDisplay.show_knowledge_used(
+        gold_campaign=brief.campaign_name,
+        knowledge_sources=brief.knowledge_sources_used,
+        confidence=brief.confidence_score,
+    )
 
 
 # ---------------------------------------------------------------------------
