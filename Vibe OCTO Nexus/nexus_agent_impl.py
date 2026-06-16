@@ -263,7 +263,10 @@ A consultant submitted the following request to a Canadian telecom marketing AI:
 
 Knowledge context loaded:
   Known glossary terms: {glossary_summary}
-  Known campaign codes: {campaign_codes}
+  Known campaign codes (fallback): {campaign_codes}
+
+Campaigns retrieved from the knowledge layer most relevant to this request:
+{retrieved_campaigns}
 
 Classify this request into exactly one intent type:
 
@@ -284,10 +287,21 @@ Classify this request into exactly one intent type:
                          strategy that does not require SQL execution or
                          brief generation.
 
-Priority rules:
-  1. Named campaign code + execution verb (run, execute, size, pull) -> "campaign_execution".
-  2. Named campaign code + count/size question -> "sizing_request".
-  3. Count or how-many question without named campaign -> "sizing_request".
+Campaign identification rules:
+  - Read the retrieved campaign records above carefully.
+  - If any retrieved campaign matches what the user is asking about — whether
+    by product name, campaign type, marketing objective, or customer action
+    described in the strategy summary — set campaign_identified to true and
+    return that campaign's camp_id as campaign_code.
+  - Do not require an exact code match. Use the strategy and description text
+    to reason about whether the user's words refer to a campaign in the records.
+  - If no retrieved campaign matches the user's request, set campaign_identified
+    to false and campaign_code to null.
+
+Priority routing rules:
+  1. Identified campaign + execution verb (run, execute, size, pull) -> "campaign_execution".
+  2. Identified campaign + count/size question -> "sizing_request".
+  3. Count or how-many question without identified campaign -> "sizing_request".
   4. Question about what campaigns exist or how something works -> "general_question".
 
 Return exactly this JSON (no markdown, no explanation):
@@ -295,7 +309,7 @@ Return exactly this JSON (no markdown, no explanation):
   "intent_type": "<one of the 5 types above>",
   "confidence": <0.0 to 1.0>,
   "campaign_identified": <true or false>,
-  "campaign_code": "<campaign code if identified, else null>",
+  "campaign_code": "<camp_id from retrieved records if identified, else null>",
   "knowledge_sources_consulted": ["glossary", "campaign_index"],
   "business_rules_applied": [],
   "reasoning": "<one sentence explaining the classification>"
@@ -503,8 +517,10 @@ class NexusAgent:
     def classify_intent(self, query: str) -> IntentClassification:
         """Classify user intent by consulting the knowledge layer.
 
-        Always loads a compact glossary summary and known campaign codes before
-        calling the LLM so classification is grounded in actual knowledge assets.
+        Queries the knowledge layer semantically for campaigns relevant to the
+        user's request so the AI can identify campaigns by natural language
+        description rather than exact code. Falls back to the static code list
+        when the knowledge layer is unavailable.
         Returns an IntentClassification with 5 possible intent types, confidence,
         campaign identification, and which knowledge sources were consulted.
         """
@@ -514,10 +530,22 @@ class NexusAgent:
         if self._taxonomy.get("known_targeting_patterns"):
             sources_consulted.append("gold_patterns")
 
+        # Query the knowledge layer for campaigns relevant to this specific request.
+        # This gives the AI real campaign intelligence to reason over rather than
+        # bare code labels, enabling natural-language campaign identification.
+        retrieved_campaigns_xml = "(knowledge layer not available — using code list only)"
+        if self._knowledge_ctx is not None:
+            try:
+                retrieved_campaigns_xml = self._knowledge_ctx.retrieve_campaigns_xml(query, top_k=5)
+                sources_consulted.append("knowledge_layer")
+            except Exception:
+                pass
+
         prompt = _INTENT_CLASSIFY_V2_PROMPT.format(
             query=query,
             glossary_summary=glossary_summary,
             campaign_codes=campaign_codes,
+            retrieved_campaigns=retrieved_campaigns_xml,
         )
         try:
             raw = self._call_simple(

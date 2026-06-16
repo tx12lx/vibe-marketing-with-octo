@@ -780,9 +780,10 @@ def _build_briefing_context(intent, query, nexus, gold_index, schema_snapshot, r
         except Exception as exc:
             print(f"  [briefing ctx step 3] BQ lookup failed: {exc.__class__.__name__}: {exc}")
 
-    # 4. Last resort: campaign name alone (BRONZE -- BriefingAgent will do its best).
-    # No try/except: this construction is always valid when campaign_code is a non-empty str.
-    name = campaign_code or ""
+    # 4. Last resort: campaign name or raw query (BRONZE -- BriefingAgent will do its best).
+    # Falls back to the raw user query when no campaign code was identified so the
+    # system always produces a brief rather than returning None.
+    name = campaign_code or query.strip()
     if name:
         return UniversalJSONSpec(
             campaign_name=name,
@@ -961,13 +962,14 @@ def route_by_intent(
 
     elif it in ("brief_generation", "brief_qa"):
         if spec is None:
-            # Safety net: _build_briefing_context returned None despite four fallback steps.
-            # If the campaign was identified, synthesise a minimal BRONZE spec so the bot
-            # always attempts to generate a brief rather than returning a silent failure.
-            if intent.campaign_identified and intent.campaign_code:
-                print(f"  [route_by_intent] WARNING: _build_briefing_context returned None "
-                      f"for identified campaign '{intent.campaign_code}'. Using safety-net spec.")
-                name = intent.campaign_code
+            # Safety net: _build_briefing_context returned None despite four fallback steps
+            # (which now include a raw-query fallback). This should be extremely rare.
+            # Create a BRONZE spec from the raw query for any brief request so the system
+            # always attempts brief generation rather than returning a silent failure.
+            name = (intent.campaign_code or query).strip()
+            if name:
+                print(f"  [route_by_intent] WARNING: _build_briefing_context returned None. "
+                      f"Using safety-net BRONZE spec from query.")
                 spec = UniversalJSONSpec(
                     campaign_name=name,
                     campaign_code=name,
@@ -1316,6 +1318,11 @@ def _run_console(
                 print(_format_audit_log(log))
             if brief_output:
                 _print_brief(brief_output)
+            elif intent.intent_type in ("brief_generation", "brief_qa") and brief_output is None:
+                ThoughtDisplay.error(
+                    "Brief generation did not produce output. "
+                    "Please try again or check the system logs for details."
+                )
 
             # Step 7: HITL — always triggered for any execution that produced output.
             # Full HITL (spec + log) fires for campaign sizing and execution.
