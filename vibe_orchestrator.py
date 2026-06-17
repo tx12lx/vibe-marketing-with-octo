@@ -1076,25 +1076,68 @@ def _format_audit_log(log: QuantAuditLog) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Brief output formatter
+# Brief output formatters
 # ---------------------------------------------------------------------------
 
-def _print_brief(brief: BriefingOutput) -> None:
-    """Print the BriefingAgent Markdown output with a structured wrapper."""
-    if not brief.brief_markdown:
-        reason = brief.error_reason or "The brief could not be generated. Please try again."
-        ThoughtDisplay.error(f"Brief generation failed: {reason}")
+def _print_targeting_criteria(brief: BriefingOutput) -> None:
+    """Print only the structured targeting criteria (universe + exclusions)."""
+    sep = "=" * 66
+    thin = "-" * 44
+    print()
+    print(sep)
+    print(f"  DATA BRIEF — {brief.campaign_name.upper()}")
+    print(sep)
+    print()
+    if brief.structured_universe:
+        print("  Initial Universe")
+        print("  " + thin)
+        print(f"  {brief.structured_universe}")
+        print()
+    if brief.structured_exclusions:
+        print("  Exclusion Criteria")
+        print("  " + thin)
+        for i, excl in enumerate(brief.structured_exclusions, start=1):
+            _print_wrapped(f"  {i}. {excl}", indent=5)
+        print()
+    tier_label = f"Tier: {brief.tier}"
+    conf_label = f"Confidence: {brief.confidence_score:.0%}"
+    print(f"  {tier_label:<22}  {conf_label}")
+    print(sep)
+
+
+def _print_final_brief(brief: BriefingOutput) -> None:
+    """Print the complete finalized data brief — targeting criteria plus segments if present."""
+    if brief.error_reason:
+        ThoughtDisplay.error(f"Brief generation failed: {brief.error_reason}")
         return
     sep = "=" * 66
     thin = "-" * 44
     print()
     print(sep)
-    print("  VIBE OCTO BRIEFING — CAMPAIGN INTELLIGENCE BRIEF")
+    print(f"  FINALIZED DATA BRIEF — {brief.campaign_name.upper()}")
     print(sep)
     print()
-    print(brief.brief_markdown)
-    print()
+
+    print("  Initial Universe")
     print("  " + thin)
+    universe = brief.structured_universe or "(not available)"
+    _print_wrapped(f"  {universe}", indent=2)
+    print()
+
+    if brief.structured_exclusions:
+        print("  Exclusion Criteria")
+        print("  " + thin)
+        for i, excl in enumerate(brief.structured_exclusions, start=1):
+            _print_wrapped(f"  {i}. {excl}", indent=5)
+        print()
+
+    if brief.structured_segments:
+        print("  Segmentation Criteria")
+        print("  " + thin)
+        for seg in brief.structured_segments:
+            _print_wrapped(f"  {seg.name}: {seg.description}", indent=4)
+        print()
+
     tier_label = f"Tier: {brief.tier}"
     conf_label = f"Confidence: {brief.confidence_score:.0%}"
     print(f"  {tier_label:<22}  {conf_label}")
@@ -1104,6 +1147,152 @@ def _print_brief(brief: BriefingOutput) -> None:
         knowledge_sources=brief.knowledge_sources_used,
         confidence=brief.confidence_score,
     )
+
+
+def _print_brief(brief: BriefingOutput) -> None:
+    """Legacy display — used for non-brief intents that still produce a BriefingOutput.
+    For brief_generation and brief_qa the new _print_final_brief is used instead."""
+    _print_final_brief(brief)
+
+
+def _print_wrapped(text: str, indent: int = 0, width: int = 66) -> None:
+    """Print text with word-wrapping, preserving leading indent on continuation lines."""
+    import textwrap
+    # Determine the leading spaces already in text so the first line prints as-is.
+    stripped = text.lstrip(" ")
+    leading = len(text) - len(stripped)
+    first_indent = " " * leading
+    continuation = " " * indent
+    wrapped = textwrap.fill(
+        stripped,
+        width=width - leading,
+        initial_indent=first_indent,
+        subsequent_indent=continuation,
+    )
+    print(wrapped)
+
+
+# ---------------------------------------------------------------------------
+# Interactive targeting criteria refinement loop
+# ---------------------------------------------------------------------------
+
+def _run_targeting_criteria_loop(
+    spec: UniversalJSONSpec,
+    brief_output: BriefingOutput,
+    briefing: "BriefingAgent",
+) -> BriefingOutput:
+    """Show targeting criteria to the user and allow iterative refinement.
+
+    Loops until the user confirms the criteria are correct.
+    Returns the final confirmed BriefingOutput.
+    """
+    current = brief_output
+
+    while True:
+        if not current.structured_universe and not current.structured_exclusions:
+            ThoughtDisplay.error(
+                "Targeting criteria could not be parsed from the brief output. "
+                "Please try generating the brief again."
+            )
+            return current
+
+        _print_targeting_criteria(current)
+
+        print()
+        print("  Do these targeting criteria look correct?")
+        print("  1  Yes, they look good")
+        print("  2  No, I'd like to make a change")
+        print()
+
+        while True:
+            response = input("  Enter 1 or 2: ").strip()
+            if response == "1":
+                print("\n  Targeting criteria confirmed.\n")
+                return current
+            elif response == "2":
+                print(
+                    "\n  Please describe the change you'd like to make — for example,\n"
+                    "  'add an exclusion for customers contacted in the past 60 days'\n"
+                    "  or 'the universe should only include English-language customers'.\n"
+                )
+                correction = input("  > ").strip()
+                if correction:
+                    print("\n  Updating targeting criteria...\n")
+                    updated = briefing.refine_targeting(
+                        universe=current.structured_universe or "",
+                        exclusions=current.structured_exclusions or [],
+                        user_correction=correction,
+                    )
+                    if updated.error_reason:
+                        ThoughtDisplay.error(
+                            f"Could not apply the change: {updated.error_reason}. "
+                            "Please try rephrasing."
+                        )
+                    else:
+                        current = updated
+                break
+            else:
+                print("  Please enter 1 or 2.")
+
+
+# ---------------------------------------------------------------------------
+# Segmentation step — asked after targeting criteria are confirmed
+# ---------------------------------------------------------------------------
+
+def _run_segmentation_step(
+    spec: UniversalJSONSpec,
+    confirmed_brief: BriefingOutput,
+    briefing: "BriefingAgent",
+) -> BriefingOutput:
+    """Ask the user whether segmentation criteria is needed.
+
+    If yes, collects the segmentation basis, generates mutually exclusive segments,
+    and returns a BriefingOutput with structured_segments populated.
+    If no, returns the confirmed_brief unchanged.
+    """
+    print()
+    print("  Would you like segmentation criteria as well?")
+    print("  1  Yes, generate segmentation criteria")
+    print("  2  No, the targeting criteria is all I need")
+    print()
+
+    while True:
+        response = input("  Enter 1 or 2: ").strip()
+        if response == "2":
+            print()
+            return confirmed_brief
+        elif response == "1":
+            print(
+                "\n  Please describe the basis for segmentation — for example,\n"
+                "  'by prior mobility tenure' or 'by whether the customer has\n"
+                "  previously churned vs never had the service'.\n"
+            )
+            basis = input("  > ").strip()
+            if not basis:
+                return confirmed_brief
+            print("\n  Generating segmentation criteria...\n")
+            segmented = briefing.generate_segments(
+                universe=confirmed_brief.structured_universe or "",
+                exclusions=confirmed_brief.structured_exclusions or [],
+                segmentation_basis=basis,
+            )
+            if segmented.error_reason:
+                ThoughtDisplay.error(
+                    f"Segmentation generation failed: {segmented.error_reason}. "
+                    "The targeting criteria have been saved without segmentation."
+                )
+                return confirmed_brief
+            # Merge: keep confirmed targeting criteria, add generated segments
+            return confirmed_brief.model_copy(update={
+                "structured_segments": segmented.structured_segments,
+                "brief_markdown": segmented.brief_markdown,
+                "knowledge_sources_used": (
+                    (confirmed_brief.knowledge_sources_used or [])
+                    + (segmented.knowledge_sources_used or [])
+                ) or None,
+            })
+        else:
+            print("  Please enter 1 or 2.")
 
 
 # ---------------------------------------------------------------------------
@@ -1316,13 +1505,32 @@ def _run_console(
             if log:
                 last_log = log
                 print(_format_audit_log(log))
-            if brief_output:
-                _print_brief(brief_output)
+
+            # Brief generation follows a guided interactive flow:
+            #   1. Targeting criteria refinement loop (confirm or revise)
+            #   2. Segmentation step (optional)
+            #   3. Final brief display
+            # All other intents that produce a brief use the legacy display.
+            if brief_output is not None and intent.intent_type in ("brief_generation", "brief_qa"):
+                if brief_output.error_reason or (
+                    not brief_output.structured_universe and not brief_output.structured_exclusions
+                ):
+                    reason = brief_output.error_reason or (
+                        "Targeting criteria could not be parsed. Please try again."
+                    )
+                    ThoughtDisplay.error(f"Brief generation failed: {reason}")
+                else:
+                    confirmed_brief = _run_targeting_criteria_loop(spec, brief_output, briefing)
+                    final_brief = _run_segmentation_step(spec, confirmed_brief, briefing)
+                    _print_final_brief(final_brief)
+                    brief_output = final_brief
             elif intent.intent_type in ("brief_generation", "brief_qa") and brief_output is None:
                 ThoughtDisplay.error(
                     "Brief generation did not produce output. "
                     "Please try again or check the system logs for details."
                 )
+            elif brief_output is not None:
+                _print_brief(brief_output)
 
             # Step 7: HITL — always triggered for any execution that produced output.
             # Full HITL (spec + log) fires for campaign sizing and execution.

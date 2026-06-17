@@ -2,20 +2,24 @@
 Vibe OCTO Briefing — BriefingAgent Worker
 Worker ID: briefing_v1
 
-Generates structured campaign intelligence briefs via the Fuel iX API.
+Generates structured data brief targeting criteria by analyzing all related
+campaigns in the knowledge layer, then producing:
 
-GOLD path: few-shot inference anchored to a verified GoldCampaignRecord.
-  System prompt and historical campaign context are frozen via
-  anthropic-beta prompt-caching headers.
-  Confidence: 0.90 (brief_text present) or 0.70 (brief_text absent).
+  Phase 1 — Targeting Criteria:
+    An initial universe sentence + an ordered list of exclusion criteria.
+    GOLD path: few-shot inference from all verified GoldCampaignRecords.
+    BRONZE path: zero-shot inference from live schema context.
 
-BRONZE path: zero-shot inference grounded in the live INFORMATION_SCHEMA
-  snapshot injected by the orchestrator.
-  Confidence: 0.60 (>= 80% filter coverage in schema) or 0.40 (lower coverage).
+  Phase 2 — Refinement (optional):
+    User can request changes to the targeting criteria. The agent updates
+    and returns revised criteria within the same session.
 
-Output: structured BriefingOutput with a mandatory 6-section Markdown brief.
-Strictly banned from output: SQL syntax, database view labels, column names,
-schema identifiers, or any technical execution detail.
+  Phase 3 — Segmentation (optional):
+    User requests segmentation criteria. The agent generates named,
+    strictly mutually exclusive segments with no new exclusions.
+
+Output: BriefingOutput with structured_universe, structured_exclusions,
+and optionally structured_segments populated.
 """
 from __future__ import annotations
 
@@ -28,7 +32,6 @@ from typing import Optional, TYPE_CHECKING
 
 import requests
 from dotenv import load_dotenv
-from pydantic import BaseModel
 from core.resilience import resilient_post
 
 if TYPE_CHECKING:
@@ -36,7 +39,7 @@ if TYPE_CHECKING:
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
-_BRIEFING_DIR = _ROOT_DIR / "Vibe OCTO Briefing"  # original subdirectory for .env loading
+_BRIEFING_DIR = _ROOT_DIR / "Vibe OCTO Briefing"
 
 for _p in [str(_ROOT_DIR)]:
     if _p not in sys.path:
@@ -44,127 +47,116 @@ for _p in [str(_ROOT_DIR)]:
 
 load_dotenv(_BRIEFING_DIR / ".env")
 
-from pydantic_schemas import BriefingOutput, UniversalJSONSpec  # noqa: E402
+from pydantic_schemas import BriefingOutput, SegmentCriterion, UniversalJSONSpec  # noqa: E402
 from core.base_agent import BaseAgent  # noqa: E402
-from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
+from knowledge_base.tier_index import GoldTierIndex, GoldCampaignRecord  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 
 _FUELIX_BASE = "https://api.fuelix.ai"
 
 # ---------------------------------------------------------------------------
-# System prompt — identity anchor is immutable
+# System prompt — identity anchor
 # ---------------------------------------------------------------------------
 
 _BRIEFING_SYSTEM = (
-    "You are Vibe OCTO Briefing, a senior telecom marketing strategist "
-    "for TELUS and Koodo. You generate structured campaign intelligence "
-    "briefs combining data brief content, targeting logic, and predictive "
-    "strategic recommendations. Output must be valid Markdown matching the "
-    "prescribed section structure exactly. Strategic recommendations must be "
-    "grounded in Canadian telecom industry dynamics: rate plan migration "
-    "trends, ARPU optimization, device lifecycle economics, and omni-channel "
-    "contact sequencing. Never reference SQL, BigQuery, or technical "
-    "execution details in the brief output."
+    "You are Vibe OCTO Briefing, a senior telecom data analyst for TELUS and Koodo. "
+    "You generate precise, structured data brief targeting criteria by studying the full "
+    "knowledge library of existing campaigns. Your output must be grounded in patterns "
+    "observed across all related campaigns — not invented, not generic. "
+    "Never reference SQL, BigQuery, table names, column names, or any technical "
+    "execution details anywhere in your output."
 )
 
 # ---------------------------------------------------------------------------
-# Output section template — campaign name, tier, timestamp, confidence,
-# and medium are interpolated at request time; everything else is structural.
+# Structured output delimiters — parsed by the agent after each API call
 # ---------------------------------------------------------------------------
 
-_SECTION_TEMPLATE = """\
-# Campaign Brief: {campaign_name}
-**Tier**: {tier} | **Generated**: {timestamp} | **Confidence**: {confidence}
+_TC_BEGIN = "---TARGETING_CRITERIA_BEGIN---"
+_TC_END = "---TARGETING_CRITERIA_END---"
+_SEG_BEGIN = "---SEGMENTATION_CRITERIA_BEGIN---"
+_SEG_END = "---SEGMENTATION_CRITERIA_END---"
 
-## Campaign Overview
-[2-3 sentence executive summary grounded in the campaign's actual targeting \
-logic and business objective — identify the customer lifecycle state, operational \
-mechanic (cross-sell / retention / upgrade / win-back), and revenue impact]
-
-## Data Brief Reference
-[Summary of the source documentation content, or "No data brief available" if none was provided]
-
-## Targeting Logic
-[Structured description of audience inclusion and exclusion criteria entirely in \
-business language — customer tenure, product eligibility state, geographic scope, \
-behavioral indicators, contact channel eligibility; no technical identifiers]
-
-## Audience Segmentation
-[Breakdown of key audience sub-segments: provincial or regional distribution, \
-product eligibility tiers, customer lifecycle cohorts, behavioral cohorts; \
-include relative sizing commentary where the context supports it]
-
-## Strategic Recommendations
-1. [Rate plan migration or ARPU growth recommendation grounded in the campaign's \
-target lifecycle state and product eligibility profile]
-2. [Device lifecycle, handset tenure, or upgrade pathway recommendation]
-3. [Cross-sell or bundle attachment recommendation aligned to the campaign's \
-primary product vertical]
-4. [Omni-channel contact sequencing or channel prioritization recommendation \
-matched to the campaign medium and customer reachability profile]
-5. [Competitive positioning, retention defence, or segment-specific recommendation \
-— omit this line entirely if not strongly indicated by the brief context]
-
-## Execution Checklist
-- [ ] GCH recency suppression applied (confirm lookback window)
-- [ ] DNC channel flags verified for {medium}
-- [ ] Control group flag excluded (final audience filter step)
-- [ ] Quebec province codes cover both historical billing codes
-- [ ] Product eligibility pair logic confirmed (ownership exclusion paired with \
-eligibility inclusion)\
-"""
-
-_OUTPUT_RULES = (
-    "\n\nSTRICT OUTPUT RULES:\n"
-    "- Begin your response with a knowledge sources block in EXACTLY this format — list every "
-    "knowledge source you actually drew upon for this specific request and one sentence saying "
-    "why it was relevant:\n"
-    "---KNOWLEDGE_SOURCES_BEGIN---\n"
-    "- [source name]: [one sentence explaining why this source was relevant to this request]\n"
-    "---KNOWLEDGE_SOURCES_END---\n"
-    "- After the knowledge sources block, output only the Markdown brief — no other preamble, "
-    "no explanation, no text outside the section structure\n"
-    "- Never reference SQL syntax, database queries, table names, column names, view names, "
-    "schema labels, BigQuery, or any technical execution detail anywhere in the brief text\n"
-    "- Do not hardcode or assume a fixed product line; derive the line of business, customer "
-    "segment, and strategic vertical organically from the campaign metadata provided\n"
-    "- Evaluate the campaign's target customer base, operational mechanics, and strategic "
-    "vertical from the filters, exclusions, campaign purpose, and brief content — then tailor "
-    "the narrative to that specific context\n"
-    "- All recommendations must address Canadian telecom industry dynamics specific to the "
-    "campaign's derived vertical: wireless mobility, fixed internet, TV, bundled FFH, or "
-    "business mobility as indicated by the campaign context\n"
-    "- Strategic Recommendations section: include items 1-4 always; include item 5 only if "
-    "strongly warranted by the campaign context; otherwise omit it\n"
+_TC_BLOCK_RE = re.compile(
+    r"---TARGETING_CRITERIA_BEGIN---\n(.*?)\n---TARGETING_CRITERIA_END---",
+    re.DOTALL,
 )
-
-# Parses the machine-readable knowledge sources block the AI must prepend to every response.
+_SEG_BLOCK_RE = re.compile(
+    r"---SEGMENTATION_CRITERIA_BEGIN---\n(.*?)\n---SEGMENTATION_CRITERIA_END---",
+    re.DOTALL,
+)
 _KNOWLEDGE_BLOCK_RE = re.compile(
     r"---KNOWLEDGE_SOURCES_BEGIN---\n(.*?)\n---KNOWLEDGE_SOURCES_END---\n?",
     re.DOTALL,
 )
 
-# Regex to extract column-like tokens preceding SQL comparison operators.
-# Used for BRONZE schema coverage scoring — never applied to brief output.
-_COL_BEFORE_OP = re.compile(
-    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*"
-    r"(?:=|!=|<>|<=|>=|<|>|(?:NOT\s+)?IN\b|LIKE\b|IS\b)",
-    re.IGNORECASE,
+# ---------------------------------------------------------------------------
+# Targeting criteria output rules — injected into every generation call
+# ---------------------------------------------------------------------------
+
+_TC_OUTPUT_RULES = (
+    "\n\nSTRICT OUTPUT RULES:\n"
+    "1. Begin with a knowledge sources block in EXACTLY this format:\n"
+    "---KNOWLEDGE_SOURCES_BEGIN---\n"
+    "- [campaign name or source]: [one sentence why this source was relevant]\n"
+    "---KNOWLEDGE_SOURCES_END---\n\n"
+    "2. Then output the targeting criteria in EXACTLY this format — no other text:\n"
+    f"{_TC_BEGIN}\n"
+    "UNIVERSE: [One precise sentence describing the initial customer population before any exclusions. "
+    "Name the product line, customer type, geography, and key eligibility condition.]\n"
+    "EXCLUSION 1: [One precise sentence. Start with 'Exclude'.]\n"
+    "EXCLUSION 2: [One precise sentence. Start with 'Exclude'.]\n"
+    "EXCLUSION N: [Continue numbering until all exclusions are listed.]\n"
+    f"{_TC_END}\n\n"
+    "3. Rules:\n"
+    "- The UNIVERSE sentence must stand alone — it must fully describe who qualifies without "
+    "referencing the exclusions.\n"
+    "- Each EXCLUSION must be a complete, self-contained sentence. Never combine two exclusions "
+    "into one line.\n"
+    "- Always include standard telecom exclusions: DNC for the channel, control group, and GCH "
+    "recency suppression (with the lookback window if known).\n"
+    "- Never reference SQL, BigQuery, table names, column names, or any technical execution detail.\n"
+    "- Do not write any text outside the two blocks above.\n"
 )
 
-# Strips SQL function wrappers (e.g. UPPER, DATE) that appear before the real column name.
-_FUNC_WRAPPER = re.compile(r"^(?:UPPER|LOWER|DATE|TRIM|CAST)\b", re.IGNORECASE)
+# ---------------------------------------------------------------------------
+# Segmentation output rules
+# ---------------------------------------------------------------------------
+
+_SEG_OUTPUT_RULES = (
+    "\n\nSTRICT SEGMENTATION RULES:\n"
+    "1. Begin with a knowledge sources block:\n"
+    "---KNOWLEDGE_SOURCES_BEGIN---\n"
+    "- [source]: [relevance]\n"
+    "---KNOWLEDGE_SOURCES_END---\n\n"
+    "2. Then output segments in EXACTLY this format:\n"
+    f"{_SEG_BEGIN}\n"
+    "SEGMENT 1 - [Segment Name]: [One precise sentence describing exactly who qualifies for this segment.]\n"
+    "SEGMENT 2 - [Segment Name]: [One precise sentence.]\n"
+    "SEGMENT N - [Segment Name]: [Continue until all segments are listed.]\n"
+    f"{_SEG_END}\n\n"
+    "3. Rules:\n"
+    "- CRITICAL: No customer can fall into more than one segment. All segments must be strictly "
+    "mutually exclusive. If criteria could overlap, rewrite until they do not.\n"
+    "- CRITICAL: Do NOT add any new exclusion criteria. Segments may only subdivide the "
+    "already-confirmed targeting universe. If the user's request implies a new exclusion, "
+    "flag it explicitly and refuse to apply it.\n"
+    "- Every customer in the confirmed universe must belong to exactly one segment — "
+    "add a catch-all segment (e.g. 'All Others') if needed to ensure complete coverage.\n"
+    "- Never reference SQL, BigQuery, table names, or column names.\n"
+    "- Do not write any text outside the two blocks above.\n"
+)
 
 
 class BriefingAgent(BaseAgent):
-    """Pillar 4 Worker B — structured campaign brief generation.
+    """Pillar 4 Worker B — structured data brief targeting criteria generation.
 
     Implements the BaseAgent contract:
       subscribe(spec)  -> stores the UniversalJSONSpec
-      execute()        -> generates and returns BriefingOutput
+      execute()        -> generates targeting criteria and returns BriefingOutput
 
-    Never raises to the orchestrator; wraps all failures in a minimal
-    BriefingOutput with empty brief_markdown and confidence_score=0.0.
+    Additional interactive methods:
+      refine_targeting(universe, exclusions, correction) -> updated BriefingOutput
+      generate_segments(universe, exclusions, basis)     -> BriefingOutput with segments
     """
 
     WORKER_ID = "briefing_v1"
@@ -185,34 +177,31 @@ class BriefingAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
-        """Bind the centralised KnowledgeContext built at startup."""
         self._knowledge_ctx = ctx
 
     def set_gold_index(self, gold_index: GoldTierIndex) -> None:
-        """Bind the in-memory GoldTierIndex for GOLD path record lookup."""
         self._gold_index = gold_index
 
     def set_runtime_schema(self, schema_str: str) -> None:
-        """Receive the live INFORMATION_SCHEMA snapshot (Pillar 2) for BRONZE path."""
         self._runtime_schema = schema_str
 
     def set_session_context(self, context: str) -> None:
-        """No-op: briefing agent does not consume session glossary context."""
+        pass  # briefing agent does not consume session glossary context
 
     # ------------------------------------------------------------------
     # BaseAgent contract
     # ------------------------------------------------------------------
 
     def subscribe(self, spec: UniversalJSONSpec) -> None:
-        """Store the UniversalJSONSpec for this execution cycle."""
         self._spec = spec
 
     def execute(self) -> BriefingOutput:
-        """Generate the campaign brief.
+        """Generate targeting criteria for the subscribed campaign.
 
-        GOLD path: few-shot inference from GoldCampaignRecord with prompt caching.
+        GOLD path: analysis of all GOLD campaign records + this campaign's verified record.
         BRONZE path: zero-shot inference from live schema context.
-        Returns BriefingOutput; never raises.
+        Returns BriefingOutput with structured_universe and structured_exclusions populated.
+        Never raises to the orchestrator.
         """
         if self._spec is None:
             return self._minimal_error_output("subscribe() must be called before execute()")
@@ -231,104 +220,177 @@ class BriefingAgent(BaseAgent):
             return self._minimal_error_output(str(exc)[:400])
 
     # ------------------------------------------------------------------
-    # GOLD path — few-shot with prompt-cached historical context
+    # Interactive refinement — called by orchestrator when user requests changes
     # ------------------------------------------------------------------
 
-    def _execute_gold(self, spec: UniversalJSONSpec, gold_record) -> BriefingOutput:
-        has_brief = bool(
-            gold_record is not None and getattr(gold_record, "brief_text", "")
-        )
+    def refine_targeting(
+        self,
+        universe: str,
+        exclusions: list[str],
+        user_correction: str,
+    ) -> BriefingOutput:
+        """Update targeting criteria based on user's requested change.
+
+        Takes the current confirmed universe and exclusion list plus the user's
+        plain-language correction and returns a new BriefingOutput with updated
+        structured_universe and structured_exclusions.
+        Never raises.
+        """
+        spec = self._spec
+        if spec is None:
+            return self._minimal_error_output("No active spec — subscribe() must be called first")
+        try:
+            current_block = self._format_criteria_for_refinement(universe, exclusions)
+            prompt = (
+                f"Campaign: {spec.campaign_name}\n\n"
+                "Current targeting criteria:\n"
+                f"{current_block}\n\n"
+                f"User's requested change: {user_correction}\n\n"
+                "Apply the user's change and output the revised targeting criteria. "
+                "Keep all other criteria unchanged unless the correction specifically affects them."
+                + _TC_OUTPUT_RULES
+            )
+            raw = self._call_standard(_BRIEFING_SYSTEM, prompt)
+            return self._assemble_output(spec, raw, confidence=0.85)
+        except Exception as exc:
+            return self._minimal_error_output(str(exc)[:400])
+
+    def generate_segments(
+        self,
+        universe: str,
+        exclusions: list[str],
+        segmentation_basis: str,
+    ) -> BriefingOutput:
+        """Generate mutually exclusive segmentation criteria for the confirmed targeting universe.
+
+        Takes the finalized universe and exclusions (for context) plus the user's
+        segmentation basis and returns a BriefingOutput with structured_segments populated.
+        Enforces: no new exclusions, strictly mutually exclusive, complete coverage.
+        Never raises.
+        """
+        spec = self._spec
+        if spec is None:
+            return self._minimal_error_output("No active spec — subscribe() must be called first")
+        try:
+            all_campaigns_block = self._build_all_campaigns_context(
+                focus_query=f"{spec.campaign_name} {segmentation_basis}"
+            )
+            criteria_block = self._format_criteria_for_refinement(universe, exclusions)
+            prompt = (
+                f"Campaign: {spec.campaign_name}\n\n"
+                "Knowledge library of existing campaign segmentation patterns:\n"
+                f"{all_campaigns_block}\n\n"
+                "Confirmed targeting criteria for this campaign:\n"
+                f"{criteria_block}\n\n"
+                f"User's segmentation basis: {segmentation_basis}\n\n"
+                "Generate the segmentation criteria. Every segment must subdivide the confirmed "
+                "targeting universe only — do not add any new exclusions."
+                + _SEG_OUTPUT_RULES
+            )
+            raw = self._call_standard(_BRIEFING_SYSTEM, prompt)
+            return self._assemble_output(spec, raw, confidence=0.85, is_segmentation=True)
+        except Exception as exc:
+            return self._minimal_error_output(str(exc)[:400])
+
+    # ------------------------------------------------------------------
+    # GOLD path
+    # ------------------------------------------------------------------
+
+    def _execute_gold(self, spec: UniversalJSONSpec, gold_record: Optional[GoldCampaignRecord]) -> BriefingOutput:
+        has_brief = bool(gold_record is not None and getattr(gold_record, "brief_text", ""))
         confidence = 0.90 if has_brief else 0.70
 
-        gold_context = self._build_gold_context_block(spec, gold_record)
-        request_prompt = self._build_request_prompt(spec, confidence)
+        # Build the all-campaigns analysis block (cached — same for every request)
+        all_campaigns_block = self._build_all_campaigns_context(
+            focus_query=f"{spec.campaign_name} {spec.target_population}"
+        )
 
-        # GOLD API call: structured content blocks with cache_control on the
-        # stable historical context so Fuel iX / Claude can freeze it in cache.
+        # Build this campaign's specific context
+        campaign_block = self._build_specific_campaign_block(spec, gold_record)
+
+        request_prompt = self._build_targeting_request_prompt(spec, confidence)
+
         system_blocks = [
+            {"type": "text", "text": _BRIEFING_SYSTEM, "cache_control": {"type": "ephemeral"}},
+        ]
+
+        user_content: list[dict] = [
             {
                 "type": "text",
-                "text": _BRIEFING_SYSTEM,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-        # When KnowledgeContext is available, prepend all GOLD campaign briefs as
-        # context so the briefing agent can draw on similar campaigns as templates.
-        if self._knowledge_ctx is not None:
-            kb_block = {
-                "type": "text",
                 "text": (
-                    "VIBE OCTO BRIEF TEMPLATES (All GOLD campaigns for reference)\n\n"
-                    + self._knowledge_ctx.briefing_context
+                    "FULL KNOWLEDGE LIBRARY — all campaigns for pattern analysis:\n\n"
+                    + all_campaigns_block
                 ),
                 "cache_control": {"type": "ephemeral"},
-            }
-            campaign_block = {
+            },
+            {
                 "type": "text",
-                "text": gold_context,
+                "text": campaign_block,
                 "cache_control": {"type": "ephemeral"},
-            }
-            user_content = [
-                kb_block,
-                campaign_block,
-                {"type": "text", "text": request_prompt},
-            ]
-        else:
-            user_content = [
-                {
-                    "type": "text",
-                    "text": gold_context,
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {
-                    "type": "text",
-                    "text": request_prompt,
-                },
-            ]
+            },
+            {"type": "text", "text": request_prompt},
+        ]
 
-        brief_markdown = self._call_with_caching(system_blocks, user_content)
-        return self._assemble_output(spec, brief_markdown, confidence)
+        raw = self._call_with_caching(system_blocks, user_content)
+        return self._assemble_output(spec, raw, confidence)
 
-    def _build_gold_context_block(self, spec: UniversalJSONSpec, gold_record) -> str:
-        parts = ["=== VERIFIED CAMPAIGN INTELLIGENCE (GOLD TIER) ===\n\n"]
+    def _build_specific_campaign_block(
+        self, spec: UniversalJSONSpec, gold_record: Optional[GoldCampaignRecord]
+    ) -> str:
+        parts = ["=== THIS CAMPAIGN (primary source of truth) ===\n\n"]
+        parts.append(f"Campaign: {spec.campaign_name}\n")
+        parts.append(f"Code: {spec.campaign_code} / {spec.campaign_sub_code}\n")
+        parts.append(f"Medium: {spec.medium} | Cadence: {spec.cadence}\n")
+        parts.append(f"Target Population (from spec): {spec.target_population}\n")
 
         if gold_record is not None:
-            parts.append(f"Campaign: {gold_record.campaign_name}\n")
             ts = getattr(gold_record, "targeting_summary", "")
             ss = getattr(gold_record, "segment_summary", "")
             bt = getattr(gold_record, "brief_text", "")
             pp = getattr(gold_record, "primary_products", "")
             cp = getattr(gold_record, "campaign_purpose", "")
-            med = getattr(gold_record, "medium", spec.medium)
-            cad = getattr(gold_record, "cadence", spec.cadence)
+            be = getattr(gold_record, "brief_extraction", None) or {}
 
             if ts:
-                parts.append(f"\nTargeting Summary (verified):\n{ts}\n")
+                parts.append(f"\nVerified Targeting Summary:\n{ts}\n")
             if ss:
-                parts.append(f"\nAudience Segment Summary (verified):\n{ss}\n")
+                parts.append(f"\nVerified Segment Summary:\n{ss}\n")
             if bt:
-                parts.append(f"\nData Brief Content:\n{bt[:6000]}\n")
-            parts.append(
-                f"\nPrimary Products: {pp or 'Not specified'}\n"
-                f"Campaign Purpose: {cp or 'Not specified'}\n"
-                f"Medium: {med} | Cadence: {cad}\n"
-            )
+                parts.append(f"\nOriginal Data Brief:\n{bt[:6000]}\n")
+            if pp:
+                parts.append(f"\nPrimary Products: {pp}\n")
+            if cp:
+                parts.append(f"Campaign Purpose: {cp}\n")
+            excl = be.get("exclusion_rules", [])
+            if excl:
+                parts.append("\nExtracted Exclusion Rules:\n")
+                for e in excl:
+                    parts.append(f"  - {e}\n")
+            targeting_filters = be.get("targeting_filters", [])
+            if targeting_filters:
+                parts.append("\nExtracted Targeting Filters:\n")
+                for f in targeting_filters:
+                    parts.append(f"  - {f}\n")
         else:
-            parts.append(
-                "No verified record found for this campaign key. "
-                "Generating from spec context only.\n"
-            )
+            parts.append("\nNo verified record found — generating from spec context only.\n")
 
-        parts.append(
-            "\nUse the verified intelligence above as the primary source of truth "
-            "for the campaign's targeting logic and audience characteristics. "
-            "Where the data brief provides richer context, let it inform the "
-            "strategic recommendations section.\n"
-        )
+        if spec.filters:
+            parts.append("\nSpec Filters:\n")
+            for f in spec.filters:
+                parts.append(f"  - {f}\n")
+        if spec.exclusion_layers:
+            parts.append("\nSpec Exclusion Layers:\n")
+            for e in spec.exclusion_layers:
+                parts.append(f"  - {e}\n")
+
+        raw_prompt = (spec.brief_agent_inputs or {}).get("raw_prompt", "")
+        if raw_prompt:
+            parts.append(f"\nOriginal Request: {raw_prompt}\n")
+
         return "".join(parts)
 
     # ------------------------------------------------------------------
-    # BRONZE path — zero-shot with live schema context
+    # BRONZE path
     # ------------------------------------------------------------------
 
     def _execute_bronze(self, spec: UniversalJSONSpec) -> BriefingOutput:
@@ -336,97 +398,127 @@ class BriefingAgent(BaseAgent):
         confidence = 0.60 if coverage >= 0.80 else 0.40
 
         schema_block = (
-            f"=== LIVE DATA ENVIRONMENT SCHEMA CONTEXT ===\n\n{self._runtime_schema[:4000]}"
+            f"=== LIVE SCHEMA CONTEXT ===\n\n{self._runtime_schema[:4000]}"
             if self._runtime_schema
-            else "=== LIVE DATA ENVIRONMENT SCHEMA CONTEXT ===\n\n(Schema context unavailable)"
+            else "=== LIVE SCHEMA CONTEXT ===\n\n(Schema context unavailable)"
         )
 
-        combined_prompt = "\n\n".join([
+        prompt = "\n\n".join([
             schema_block,
-            self._build_request_prompt(spec, confidence),
+            self._build_targeting_request_prompt(spec, confidence),
         ])
-
-        brief_markdown = self._call_standard(_BRIEFING_SYSTEM, combined_prompt)
-        return self._assemble_output(spec, brief_markdown, confidence)
+        raw = self._call_standard(_BRIEFING_SYSTEM, prompt)
+        return self._assemble_output(spec, raw, confidence)
 
     def _compute_schema_coverage(self, spec: UniversalJSONSpec) -> float:
-        """Fraction of filter-referenced column tokens found in the runtime schema."""
         if not self._runtime_schema:
             return 0.0
-
+        _COL_BEFORE_OP = re.compile(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|!=|<>|<=|>=|<|>|(?:NOT\s+)?IN\b|LIKE\b|IS\b)",
+            re.IGNORECASE,
+        )
+        _FUNC_WRAPPER = re.compile(r"^(?:UPPER|LOWER|DATE|TRIM|CAST)\b", re.IGNORECASE)
         all_filters = list(spec.filters) + list(spec.exclusion_layers or [])
         filter_text = " ".join(all_filters)
-
-        # Extract candidate column names — strip SQL function wrappers
         raw_tokens = {m.group(1) for m in _COL_BEFORE_OP.finditer(filter_text)}
-        bare_cols = {
-            tok.lower()
-            for tok in raw_tokens
-            if not _FUNC_WRAPPER.match(tok)
-        }
-
+        bare_cols = {tok.lower() for tok in raw_tokens if not _FUNC_WRAPPER.match(tok)}
         if not bare_cols:
             return 1.0
-
         schema_lower = self._runtime_schema.lower()
         found = sum(1 for col in bare_cols if col in schema_lower)
         return found / len(bare_cols)
 
     # ------------------------------------------------------------------
-    # Shared request prompt builder
+    # All-campaigns context builder (for knowledge layer analysis)
     # ------------------------------------------------------------------
 
-    def _build_request_prompt(self, spec: UniversalJSONSpec, confidence: float) -> str:
-        timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        filters_text = "\n".join(f"  - {f}" for f in spec.filters)
-        exclusions_text = (
-            "\n".join(f"  - {e}" for e in spec.exclusion_layers)
-            if spec.exclusion_layers
-            else "  None specified"
-        )
+    def _build_all_campaigns_context(self, focus_query: str = "") -> str:
+        """Return a compact block containing ALL campaigns from the gold index.
 
-        raw_context = ""
-        if spec.brief_agent_inputs:
-            raw_prompt = spec.brief_agent_inputs.get("raw_prompt", "")
-            if raw_prompt:
-                raw_context = f"\nOriginal Request Context:\n{raw_prompt}\n"
+        Every campaign's targeting summary, segment summary, key exclusion rules,
+        and brief extraction strategy are included so the AI can analyze patterns
+        across the full knowledge library before making recommendations.
+        """
+        if self._gold_index is None:
+            if self._knowledge_ctx is not None:
+                return self._knowledge_ctx.briefing_context
+            return "(No campaign knowledge available)"
 
-        structure = _SECTION_TEMPLATE.format(
-            campaign_name=spec.campaign_name,
-            tier=spec.campaign_tier,
-            timestamp=timestamp,
-            confidence=f"{confidence:.2f}",
-            medium=spec.medium,
-        )
+        records = list(self._gold_index._index.values())
+        if not records:
+            return "(Knowledge library is empty)"
 
+        parts = [
+            f"KNOWLEDGE LIBRARY — {len(records)} campaign records\n"
+            "Study ALL of these before generating targeting criteria.\n\n"
+        ]
+        seen_keys: set[str] = set()
+        for rec in records:
+            key = f"{rec.camp_id}::{rec.sub_camp_id}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            parts.append(f"--- {rec.campaign_name} ({rec.camp_id} / {rec.sub_camp_id}) ---\n")
+            parts.append(f"Medium: {rec.medium} | Cadence: {rec.cadence}\n")
+            if rec.campaign_purpose:
+                parts.append(f"Purpose: {rec.campaign_purpose}\n")
+            if rec.targeting_summary:
+                parts.append(f"Targeting: {rec.targeting_summary[:600]}\n")
+            if rec.segment_summary:
+                parts.append(f"Segmentation: {rec.segment_summary[:300]}\n")
+            if rec.brief_text:
+                parts.append(f"Data Brief: {rec.brief_text[:1500]}\n")
+            be = rec.brief_extraction or {}
+            excl = be.get("exclusion_rules", [])
+            if excl:
+                parts.append("Exclusions: " + " | ".join(str(e) for e in excl[:6]) + "\n")
+            targeting_filters = be.get("targeting_filters", [])
+            if targeting_filters:
+                parts.append("Key Filters: " + " | ".join(str(f) for f in targeting_filters[:4]) + "\n")
+            parts.append("\n")
+
+        return "".join(parts)
+
+    # ------------------------------------------------------------------
+    # Request prompt builder
+    # ------------------------------------------------------------------
+
+    def _build_targeting_request_prompt(self, spec: UniversalJSONSpec, confidence: float) -> str:
         return (
-            f"Campaign: {spec.campaign_name}\n"
-            f"Code: {spec.campaign_code} / {spec.campaign_sub_code}\n"
-            f"Tier: {spec.campaign_tier}\n"
-            f"Medium: {spec.medium} | Cadence: {spec.cadence}\n"
-            f"Target Population: {spec.target_population}\n"
-            f"\nAudience Filters:\n{filters_text}\n"
-            f"\nExclusion Layers:\n{exclusions_text}\n"
-            f"{raw_context}"
-            f"\n{structure}"
-            f"{_OUTPUT_RULES}"
+            f"Now generate targeting criteria for: {spec.campaign_name}\n"
+            f"Tier: {spec.campaign_tier} | Medium: {spec.medium} | Cadence: {spec.cadence}\n\n"
+            "Instructions:\n"
+            "1. Study the full knowledge library above to understand what targeting and exclusion "
+            "patterns are standard across all related campaigns.\n"
+            "2. Read the verified data for this specific campaign (targeting summary, segment summary, "
+            "data brief, extracted filters).\n"
+            "3. Synthesize both to produce targeting criteria that reflect this campaign's specific "
+            "audience while adhering to the patterns common across the knowledge library.\n"
+            "4. The UNIVERSE must describe the starting population precisely — product line, customer "
+            "type, geography, and primary eligibility condition.\n"
+            "5. Each EXCLUSION must be a complete sentence starting with 'Exclude'. Always include "
+            "DNC for the channel, control group exclusion, and GCH recency suppression.\n"
+            + _TC_OUTPUT_RULES
         )
+
+    # ------------------------------------------------------------------
+    # Criteria formatting helper (for refinement prompts)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_criteria_for_refinement(universe: str, exclusions: list[str]) -> str:
+        lines = [f"{_TC_BEGIN}", f"UNIVERSE: {universe}"]
+        for i, excl in enumerate(exclusions, start=1):
+            lines.append(f"EXCLUSION {i}: {excl}")
+        lines.append(_TC_END)
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # API callers
     # ------------------------------------------------------------------
 
-    def _call_with_caching(
-        self,
-        system_blocks: list[dict],
-        user_content: list[dict],
-    ) -> str:
-        """GOLD path: Anthropic Messages API format with prompt-caching header.
-
-        Posts to /v1/chat/completions with structured content arrays.
-        The anthropic-beta header signals Fuel iX to forward caching semantics
-        to the upstream Claude API, freezing the historical context block.
-        """
+    def _call_with_caching(self, system_blocks: list[dict], user_content: list[dict]) -> str:
         payload: dict = {
             "model": self._model,
             "system": system_blocks,
@@ -447,7 +539,6 @@ class BriefingAgent(BaseAgent):
         return self._extract_text(resp.json())
 
     def _call_standard(self, system: str, user_prompt: str) -> str:
-        """BRONZE path: standard OpenAI-compatible chat completions call."""
         payload = {
             "model": self._model,
             "messages": [
@@ -471,8 +562,6 @@ class BriefingAgent(BaseAgent):
 
     @staticmethod
     def _extract_text(resp_json: dict) -> str:
-        """Extract the text payload from either OpenAI or Anthropic response shapes."""
-        # OpenAI chat completions format
         choices = resp_json.get("choices") or []
         if choices:
             msg = choices[0].get("message") or {}
@@ -484,8 +573,6 @@ class BriefingAgent(BaseAgent):
                     if block.get("type") == "text"
                 ).strip()
             return str(content).strip()
-
-        # Anthropic Messages API format fallback
         content = resp_json.get("content") or []
         if isinstance(content, list):
             return "".join(
@@ -493,33 +580,57 @@ class BriefingAgent(BaseAgent):
                 for block in content
                 if block.get("type") == "text"
             ).strip()
-
         return ""
 
     # ------------------------------------------------------------------
-    # Output assembly and section parsing
+    # Output assembly and parsing
     # ------------------------------------------------------------------
 
     def _assemble_output(
-        self, spec: UniversalJSONSpec, brief_markdown: str, confidence: float
+        self,
+        spec: UniversalJSONSpec,
+        raw: str,
+        confidence: float,
+        is_segmentation: bool = False,
     ) -> BriefingOutput:
-        knowledge_sources, clean_markdown = self._extract_knowledge_block(brief_markdown)
+        knowledge_sources, clean = self._extract_knowledge_block(raw)
+
+        if is_segmentation:
+            segments = self._parse_segments(clean)
+            return BriefingOutput(
+                campaign_name=spec.campaign_name,
+                tier=spec.campaign_tier,
+                brief_markdown=clean,
+                executive_summary="",
+                targeting_logic_summary="",
+                strategic_recommendations=[],
+                data_sources_cited=self._build_data_sources(spec),
+                confidence_score=confidence,
+                generated_at=datetime.now(tz=timezone.utc).isoformat(),
+                knowledge_sources_used=knowledge_sources or None,
+                structured_segments=segments,
+            )
+
+        universe, exclusions = self._parse_targeting_criteria(clean)
+
+        # brief_markdown holds the clean raw text for audit/display
         return BriefingOutput(
             campaign_name=spec.campaign_name,
             tier=spec.campaign_tier,
-            brief_markdown=clean_markdown,
-            executive_summary=self._extract_section(clean_markdown, "Campaign Overview"),
-            targeting_logic_summary=self._extract_section(clean_markdown, "Targeting Logic"),
-            strategic_recommendations=self._extract_recommendations(clean_markdown),
-            data_sources_cited=self._extract_data_sources(clean_markdown, spec),
+            brief_markdown=clean,
+            executive_summary="",
+            targeting_logic_summary=f"Universe: {universe}" if universe else "",
+            strategic_recommendations=[],
+            data_sources_cited=self._build_data_sources(spec),
             confidence_score=confidence,
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
-            knowledge_sources_used=knowledge_sources if knowledge_sources else None,
+            knowledge_sources_used=knowledge_sources or None,
+            structured_universe=universe,
+            structured_exclusions=exclusions if exclusions else None,
         )
 
     @staticmethod
     def _extract_knowledge_block(raw: str) -> tuple[list[str], str]:
-        """Strip the knowledge-sources block from the AI response and return (sources, clean_brief)."""
         m = _KNOWLEDGE_BLOCK_RE.search(raw)
         if not m:
             return [], raw
@@ -532,32 +643,47 @@ class BriefingAgent(BaseAgent):
         return sources, clean.lstrip("\n")
 
     @staticmethod
-    def _extract_section(markdown: str, section_name: str) -> str:
-        pattern = re.compile(
-            r"##\s+" + re.escape(section_name) + r"\s*\n(.*?)(?=\n##\s|\Z)",
-            re.DOTALL | re.IGNORECASE,
-        )
-        m = pattern.search(markdown)
-        return m.group(1).strip() if m else ""
+    def _parse_targeting_criteria(text: str) -> tuple[str, list[str]]:
+        """Extract universe sentence and ordered exclusion list from the structured block."""
+        m = _TC_BLOCK_RE.search(text)
+        if not m:
+            return "", []
+        block = m.group(1)
+        universe = ""
+        exclusions: list[str] = []
+        for line in block.splitlines():
+            line = line.strip()
+            if line.startswith("UNIVERSE:"):
+                universe = line[len("UNIVERSE:"):].strip()
+            elif re.match(r"EXCLUSION\s+\d+:", line, re.IGNORECASE):
+                val = re.sub(r"^EXCLUSION\s+\d+:\s*", "", line, flags=re.IGNORECASE).strip()
+                if val:
+                    exclusions.append(val)
+        return universe, exclusions
 
     @staticmethod
-    def _extract_recommendations(markdown: str) -> list[str]:
-        section = BriefingAgent._extract_section(markdown, "Strategic Recommendations")
-        recs: list[str] = []
-        for line in section.splitlines():
-            stripped = line.strip()
-            if re.match(r"^\d+\.\s+", stripped):
-                recs.append(re.sub(r"^\d+\.\s+", "", stripped))
-        return recs
+    def _parse_segments(text: str) -> list[SegmentCriterion]:
+        """Extract named mutually exclusive segments from the segmentation block."""
+        m = _SEG_BLOCK_RE.search(text)
+        if not m:
+            return []
+        block = m.group(1)
+        segments: list[SegmentCriterion] = []
+        for line in block.splitlines():
+            line = line.strip()
+            seg_m = re.match(r"SEGMENT\s+\d+\s*-\s*(.+?):\s*(.+)", line, re.IGNORECASE)
+            if seg_m:
+                name = seg_m.group(1).strip()
+                description = seg_m.group(2).strip()
+                if name and description:
+                    segments.append(SegmentCriterion(name=name, description=description))
+        return segments
 
     @staticmethod
-    def _extract_data_sources(markdown: str, spec: UniversalJSONSpec) -> list[str]:
-        sources: list[str] = []
+    def _build_data_sources(spec: UniversalJSONSpec) -> list[str]:
+        sources = []
         if spec.campaign_tier == "GOLD":
-            sources.append("GOLD tier verified campaign record")
-        ref_text = BriefingAgent._extract_section(markdown, "Data Brief Reference")
-        if ref_text and "no data brief available" not in ref_text.lower():
-            sources.append("campaign data brief document")
+            sources.append("GOLD tier verified campaign records (full knowledge library)")
         return sources
 
     def _minimal_error_output(self, reason: str) -> BriefingOutput:

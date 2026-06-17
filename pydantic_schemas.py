@@ -186,6 +186,13 @@ class IntentClassification(BaseModel):
     reasoning: str = ""
 
 
+class SegmentCriterion(BaseModel):
+    """A single named, mutually exclusive audience segment."""
+
+    name: str        # Short label, e.g. "Never Had Mobility"
+    description: str  # One precise sentence describing who qualifies
+
+
 class BriefingOutput(BaseModel):
     """Output produced by BriefingAgent.execute()."""
 
@@ -200,6 +207,11 @@ class BriefingOutput(BaseModel):
     generated_at: str        # ISO 8601
     error_reason: Optional[str] = None
     knowledge_sources_used: Optional[list[str]] = None
+
+    # Structured targeting criteria — populated by all data brief generation paths
+    structured_universe: Optional[str] = None          # one-sentence initial universe
+    structured_exclusions: Optional[list[str]] = None  # ordered list of exclusion criteria
+    structured_segments: Optional[list[SegmentCriterion]] = None  # mutually exclusive segments
 
 
 class SemanticFailureLog(BaseModel):
