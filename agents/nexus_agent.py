@@ -488,6 +488,20 @@ class NexusAgent(BaseAgent):
         """Bind the centralised KnowledgeContext built at startup."""
         self._knowledge_ctx = ctx
 
+    def retrieve_related_campaigns(self, query: str, top_k: int = 10) -> list[dict]:
+        """Return campaign records semantically related to the query.
+
+        Uses embedding similarity so relevance is determined by meaning rather
+        than name matching. Returns an empty list when no knowledge context is
+        available or if retrieval fails.
+        """
+        if self._knowledge_ctx is None:
+            return []
+        try:
+            return self._knowledge_ctx.retrieve_campaigns(query, top_k=top_k)
+        except Exception:
+            return []
+
     def set_session_context(self, context: str) -> None:
         """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
         self._session_context = context
@@ -540,6 +554,7 @@ class NexusAgent(BaseAgent):
         deployments = brief.get("deployments", [])
         if not deployments:
             return None
+        # Most recent deployment (ORDER BY list_pull_date DESC from BQ) as primary anchor
         dep = deployments[0]
         camp_id = str(dep.get("camp_id", "")).strip()
         sub_camp_id = str(dep.get("sub_camp_id", "")).strip()
@@ -552,6 +567,22 @@ class NexusAgent(BaseAgent):
         if gold_record is None:
             gold_record = gold_index.search(camp_id)
         campaign_tier = "GOLD" if gold_record else "BRONZE"
+
+        # Gather channel+cadence history from ALL deployment records so the BriefingAgent
+        # can reason about the full execution history of this campaign.
+        dep_history: list[str] = []
+        seen_dep_keys: set[str] = set()
+        for d in deployments:
+            d_medium = str(d.get("medium", "")).strip() or "unspecified"
+            d_cadence = str(d.get("cadence", "")).strip() or "ad-hoc"
+            d_date = str(d.get("list_pull_date", "")).strip()
+            dep_key = f"{d_medium}::{d_cadence}"
+            if dep_key not in seen_dep_keys:
+                seen_dep_keys.add(dep_key)
+                dep_history.append(
+                    f"{d_medium} / {d_cadence}" + (f" (as of {d_date})" if d_date else "")
+                )
+
         try:
             return UniversalJSONSpec(
                 campaign_name=campaign_name,
@@ -572,6 +603,7 @@ class NexusAgent(BaseAgent):
                     "campaign_purpose": gold_record.campaign_purpose if gold_record else "",
                     "targeting_summary": gold_record.targeting_summary if gold_record else "",
                     "brief_text": gold_record.brief_text if gold_record else "",
+                    "deployment_history": dep_history,
                 },
             )
         except Exception as exc:
@@ -709,12 +741,20 @@ class NexusAgent(BaseAgent):
         5. Returns a Pydantic-validated UniversalJSONSpec, or None on failure.
         """
         # Step 0: Check for a previously captured operator override in the registry.
-        # If found, inject it as an absolute authority block before any LLM call runs.
+        # Scans ALL deployment records (not just the most recent) so that operator
+        # corrections captured for any earlier run of this campaign are not missed.
         deployments = brief.get("deployments", [])
         if deployments:
-            peek_camp_id = str(deployments[0].get("camp_id", "")).strip()
-            peek_sub_camp_id = str(deployments[0].get("sub_camp_id", "")).strip()
-            if peek_camp_id and peek_sub_camp_id:
+            seen_override_pairs: set[str] = set()
+            for dep_row in deployments:
+                peek_camp_id = str(dep_row.get("camp_id", "")).strip()
+                peek_sub_camp_id = str(dep_row.get("sub_camp_id", "")).strip()
+                pair_key = f"{peek_camp_id}::{peek_sub_camp_id}"
+                if not peek_camp_id or not peek_sub_camp_id:
+                    continue
+                if pair_key in seen_override_pairs:
+                    continue
+                seen_override_pairs.add(pair_key)
                 override_text = self._load_override_from_registry(
                     peek_camp_id, peek_sub_camp_id
                 )
@@ -729,6 +769,7 @@ class NexusAgent(BaseAgent):
                         "=== END OVERRIDE (this takes absolute precedence over any inferred logic) ===\n\n"
                     )
                     self._session_context = override_block + self._session_context
+                    break  # First override found takes precedence; do not stack multiple
 
         # Step 1: Derive the AudienceSizingRequest via existing brief logic
         ThoughtDisplay.progress("Translating your campaign brief into targeting rules...")

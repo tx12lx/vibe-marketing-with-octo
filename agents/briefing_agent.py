@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -387,6 +388,29 @@ class BriefingAgent(BaseAgent):
         if raw_prompt:
             parts.append(f"\nOriginal Request: {raw_prompt}\n")
 
+        dep_history = (spec.brief_agent_inputs or {}).get("deployment_history", [])
+        if dep_history:
+            parts.append(f"\nHistorical Deployments ({len(dep_history)} records):\n")
+            for dep in dep_history:
+                parts.append(f"  - {dep}\n")
+
+        related = (spec.brief_agent_inputs or {}).get("related_campaigns", [])
+        if related:
+            parts.append(
+                f"\nAI-Identified Related Campaigns ({len(related)} found via semantic search):\n"
+            )
+            for r in related[:10]:
+                name = r.get("campaign_name", r.get("camp_id", "Unknown"))
+                acc = r.get("acc_summaries") or {}
+                ts = (acc.get("targeting_summary") or "")[:300]
+                medium = r.get("medium", "")
+                cadence = r.get("cadence", "")
+                channel = f" [{medium}/{cadence}]" if (medium or cadence) else ""
+                if ts:
+                    parts.append(f"  - {name}{channel}: {ts}\n")
+                else:
+                    parts.append(f"  - {name}{channel}\n")
+
         return "".join(parts)
 
     # ------------------------------------------------------------------
@@ -448,34 +472,99 @@ class BriefingAgent(BaseAgent):
         if not records:
             return "(Knowledge library is empty)"
 
-        parts = [
-            f"KNOWLEDGE LIBRARY — {len(records)} campaign records\n"
-            "Study ALL of these before generating targeting criteria.\n\n"
-        ]
-        seen_keys: set[str] = set()
+        # Group all deployment records by campaign identity (camp_id + sub_camp_id).
+        # Deployments of the same campaign at different channels or cadences are merged
+        # into one unified profile so the AI sees complete per-campaign intelligence
+        # rather than one arbitrarily-chosen deployment variant per campaign.
+        campaign_groups: dict[str, list] = defaultdict(list)
         for rec in records:
             key = f"{rec.camp_id}::{rec.sub_camp_id}"
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
+            campaign_groups[key].append(rec)
 
-            parts.append(f"--- {rec.campaign_name} ({rec.camp_id} / {rec.sub_camp_id}) ---\n")
-            parts.append(f"Medium: {rec.medium} | Cadence: {rec.cadence}\n")
-            if rec.campaign_purpose:
-                parts.append(f"Purpose: {rec.campaign_purpose}\n")
-            if rec.targeting_summary:
-                parts.append(f"Targeting: {rec.targeting_summary[:600]}\n")
-            if rec.segment_summary:
-                parts.append(f"Segmentation: {rec.segment_summary[:300]}\n")
-            if rec.brief_text:
-                parts.append(f"Data Brief: {rec.brief_text[:1500]}\n")
-            be = rec.brief_extraction or {}
-            excl = be.get("exclusion_rules", [])
-            if excl:
-                parts.append("Exclusions: " + " | ".join(str(e) for e in excl[:6]) + "\n")
-            targeting_filters = be.get("targeting_filters", [])
-            if targeting_filters:
-                parts.append("Key Filters: " + " | ".join(str(f) for f in targeting_filters[:4]) + "\n")
+        # Order campaigns by semantic relevance to the focus query when possible.
+        # This puts the most relevant campaigns first in the AI's context window.
+        group_order: list[str] = list(campaign_groups.keys())
+        if focus_query and self._knowledge_ctx is not None:
+            try:
+                ranked = self._knowledge_ctx.retrieve_campaigns(
+                    focus_query, top_k=len(campaign_groups)
+                )
+                ranked_keys = [
+                    f"{r.get('camp_id', '')}::{r.get('sub_camp_id', '')}"
+                    for r in ranked
+                ]
+                seen_ranked: set[str] = set(ranked_keys)
+                group_order = ranked_keys + [k for k in campaign_groups if k not in seen_ranked]
+            except Exception:
+                pass
+
+        parts = [
+            f"KNOWLEDGE LIBRARY — {len(campaign_groups)} campaigns "
+            f"({len(records)} deployment records)\n"
+            "Study ALL of these before generating targeting criteria.\n\n"
+        ]
+
+        for key in group_order:
+            group_recs = campaign_groups.get(key)
+            if not group_recs:
+                continue
+            primary = group_recs[0]
+            parts.append(
+                f"--- {primary.campaign_name} ({primary.camp_id} / {primary.sub_camp_id}) ---\n"
+            )
+
+            dep_variants = [
+                f"{r.medium}/{r.cadence}" for r in group_recs if r.medium or r.cadence
+            ]
+            if dep_variants:
+                parts.append("Deployments: " + " | ".join(dep_variants) + "\n")
+
+            if primary.campaign_purpose:
+                parts.append(f"Purpose: {primary.campaign_purpose}\n")
+
+            # Merge targeting summaries: include each unique summary across all deployments
+            seen_targeting: set[str] = set()
+            for r in group_recs:
+                ts = (r.targeting_summary or "").strip()
+                if ts and ts not in seen_targeting:
+                    seen_targeting.add(ts)
+                    label = f"{r.medium}/{r.cadence}" if (r.medium or r.cadence) else "all"
+                    parts.append(f"Targeting [{label}]: {ts[:600]}\n")
+
+            best_ss = max((r.segment_summary or "" for r in group_recs), key=len)
+            if best_ss:
+                parts.append(f"Segmentation: {best_ss[:300]}\n")
+
+            best_bt = max((r.brief_text or "" for r in group_recs), key=len)
+            if best_bt:
+                parts.append(f"Data Brief: {best_bt[:1500]}\n")
+
+            # Merge exclusion rules across all deployments (deduplicate by content)
+            all_excls: list[str] = []
+            seen_excls: set[str] = set()
+            for r in group_recs:
+                be = r.brief_extraction or {}
+                for e in be.get("exclusion_rules", []):
+                    e_str = str(e)
+                    if e_str not in seen_excls:
+                        seen_excls.add(e_str)
+                        all_excls.append(e_str)
+            if all_excls:
+                parts.append("Exclusions: " + " | ".join(all_excls[:8]) + "\n")
+
+            # Merge targeting filters across all deployments (deduplicate by content)
+            all_tf: list[str] = []
+            seen_tf: set[str] = set()
+            for r in group_recs:
+                be = r.brief_extraction or {}
+                for f in be.get("targeting_filters", []):
+                    f_str = str(f)
+                    if f_str not in seen_tf:
+                        seen_tf.add(f_str)
+                        all_tf.append(f_str)
+            if all_tf:
+                parts.append("Key Filters: " + " | ".join(all_tf[:6]) + "\n")
+
             parts.append("\n")
 
         return "".join(parts)

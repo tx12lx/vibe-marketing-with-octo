@@ -744,13 +744,29 @@ def _build_briefing_context(intent, query, nexus, gold_index, schema_snapshot, r
             except Exception as exc:
                 print(f"  [briefing ctx step 1] session-memory spec failed: {exc.__class__.__name__}: {exc}")
 
-    # 2. Gold index (knowledge library) -- highest-quality curated source for briefs
+    # 2. Gold index (knowledge library) -- highest-quality curated source for briefs.
+    # Primary anchor: intent-identified campaign found by name/code lookup.
+    # Semantic fallback: if name lookup misses, AI embedding search resolves the campaign.
+    # Related campaigns: all semantically relevant campaigns are gathered and passed to
+    # the BriefingAgent so it can draw on the full knowledge library, not just one record.
     if campaign_code:
         ThoughtDisplay.progress("Looking up your campaign in the knowledge base...")
         gold_record = gold_index.search(campaign_code)
+        if gold_record is None:
+            # Name lookup missed — use semantic search to resolve from the full query
+            related_fallback = nexus.retrieve_related_campaigns(query, top_k=1)
+            if related_fallback:
+                fb = related_fallback[0]
+                fb_camp_id = fb.get("camp_id", "")
+                fb_sub_camp_id = fb.get("sub_camp_id", "")
+                gold_record = gold_index.lookup(fb_camp_id, fb_sub_camp_id)
+                if gold_record is None:
+                    gold_record = gold_index.search(fb_camp_id)
         if gold_record is not None:
+            related = nexus.retrieve_related_campaigns(query, top_k=10)
             ThoughtDisplay.progress(
-                f"Found '{gold_record.campaign_name}' in the knowledge library. "
+                f"Found '{gold_record.campaign_name}' in the knowledge library "
+                f"({len(related)} related campaigns identified by AI). "
                 "Building brief from stored campaign intelligence..."
             )
             try:
@@ -764,7 +780,10 @@ def _build_briefing_context(intent, query, nexus, gold_index, schema_snapshot, r
                     knowledge_source="bq_metadata",
                     gold_blueprint_id=f"{gold_record.camp_id}::{gold_record.sub_camp_id}",
                     target_population=gold_record.campaign_purpose or gold_record.campaign_name,
-                    brief_agent_inputs={"raw_prompt": query},
+                    brief_agent_inputs={
+                        "raw_prompt": query,
+                        "related_campaigns": related,
+                    },
                 )
             except Exception as exc:
                 print(f"  [briefing ctx step 2] gold-index spec failed: {exc.__class__.__name__}: {exc}")
