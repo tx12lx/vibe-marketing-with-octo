@@ -375,8 +375,8 @@ class KnowledgeContext:
             except Exception:
                 pass
         if stale_count > 0:
-            _log.warning(
-                "%d campaign(s) have stale knowledge (>%d days) — run --incremental to refresh",
+            _log.debug(
+                "%d campaign(s) have stale knowledge (>%d days)",
                 stale_count, _FRESHNESS_WARN_DAYS,
             )
 

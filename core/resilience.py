@@ -118,9 +118,9 @@ def resilient_bq_query(
 # ---------------------------------------------------------------------------
 
 def _check_fuelix(api_key: str, base_url: str = "https://api.fuelix.ai") -> tuple[str, str]:
-    """Check Fuel iX API reachability. Returns (status, message)."""
+    """Check Fuel iX API reachability. Returns (status, plain-English message)."""
     if not api_key:
-        return "FAIL", "FUELIX_API_KEY not set — check Vibe OCTO Nexus/.env"
+        return "FAIL", "The AI service key is missing. Contact your system administrator."
     try:
         resp = requests.get(
             f"{base_url}/v1/models",
@@ -129,18 +129,18 @@ def _check_fuelix(api_key: str, base_url: str = "https://api.fuelix.ai") -> tupl
         )
         # 200 = success; 401/403 = reachable but key issue (still reachable)
         if resp.status_code in (200, 401, 403):
-            return "OK", f"Fuel iX API reachable (HTTP {resp.status_code})"
-        return "WARN", f"Fuel iX API returned HTTP {resp.status_code}"
+            return "OK", ""
+        return "WARN", "The AI service returned an unexpected response. Try again in a few minutes."
     except requests.exceptions.ConnectionError:
-        return "FAIL", "Fuel iX API unreachable — check network / VPN"
+        return "FAIL", "We can't reach the AI service. Check your network or VPN connection, then restart."
     except requests.exceptions.Timeout:
-        return "WARN", "Fuel iX API timed out (>10s) — API may be degraded"
+        return "WARN", "The AI service is responding slowly. It should recover on its own — try again in a few minutes."
     except Exception as exc:
-        return "WARN", f"Fuel iX check inconclusive: {type(exc).__name__}"
+        return "WARN", f"The AI service check was inconclusive ({type(exc).__name__}). Try restarting."
 
 
 def _check_bq(project: str) -> tuple[str, str]:
-    """Validate BigQuery ADC credentials with a dry-run query. Returns (status, message)."""
+    """Validate BigQuery ADC credentials with a dry-run query. Returns (status, plain-English message)."""
     try:
         import warnings
         with warnings.catch_warnings():
@@ -150,28 +150,37 @@ def _check_bq(project: str) -> tuple[str, str]:
         client = bigquery.Client(project=project)
         job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
         client.query("SELECT 1", job_config=job_config)
-        return "OK", f"BigQuery ADC credentials valid (project: {project})"
+        return "OK", ""
     except Exception as exc:
         msg = str(exc)[:140]
         if "credentials" in msg.lower() or "401" in msg or "403" in msg or "unauthenticated" in msg.lower():
-            return "FAIL", "BigQuery auth error — run: python refresh_adc_scopes.py"
-        return "WARN", f"BigQuery check inconclusive: {type(exc).__name__}: {msg[:80]}"
+            return "FAIL", "Your data access has expired. To renew it, run:  python refresh_adc_scopes.py"
+        return "WARN", f"The data connection check was inconclusive ({type(exc).__name__}). Try restarting."
 
 
 def _check_knowledge(artifacts_dir: Path) -> tuple[str, str]:
-    """Verify the knowledge index exists and contains at least one campaign. Returns (status, message)."""
+    """Verify the knowledge index exists and contains at least one campaign. Returns (status, plain-English message)."""
     try:
         import json
         idx_path = Path(artifacts_dir) / "semantic_knowledge_index.json"
         if not idx_path.exists():
-            return "FAIL", "Knowledge index missing — run: python -m knowledge_base.vibe_octo_knowledge --full-refresh"
+            return "FAIL", (
+                "No campaign data was found. To load it, run:\n"
+                "    python -m knowledge_base.vibe_octo_knowledge --full-refresh"
+            )
         data = json.loads(idx_path.read_text(encoding="utf-8"))
         campaigns = data.get("campaigns", [])
         if not campaigns:
-            return "FAIL", "Knowledge index empty — run: python -m knowledge_base.vibe_octo_knowledge --full-refresh"
-        return "OK", f"Knowledge index ready ({len(campaigns)} campaigns)"
+            return "FAIL", (
+                "Campaign data is empty. To reload it, run:\n"
+                "    python -m knowledge_base.vibe_octo_knowledge --full-refresh"
+            )
+        return "OK", ""
     except Exception as exc:
-        return "FAIL", f"Knowledge index unreadable: {type(exc).__name__}"
+        return "FAIL", (
+            f"Campaign data could not be read ({type(exc).__name__}). Try running:\n"
+            "    python -m knowledge_base.vibe_octo_knowledge --full-refresh"
+        )
 
 
 def run_startup_health_check(
@@ -180,43 +189,32 @@ def run_startup_health_check(
     artifacts_dir: Path,
     base_url: str = "https://api.fuelix.ai",
 ) -> bool:
-    """Run all pre-session health checks and print a formatted status table.
-
-    Checks:
-      1. Fuel iX API reachability (GET /v1/models)
-      2. BigQuery ADC credentials (dry-run query)
-      3. Knowledge index loaded and non-empty
+    """Run all pre-session health checks and print a plain-English status summary.
 
     Returns True when all checks are OK or WARN (degraded but operable).
     Returns False when any check is FAIL (caller should block session start).
     """
     checks = [
-        ("Fuel iX API",      _check_fuelix(api_key, base_url)),
-        ("BigQuery ADC",     _check_bq(bq_project)),
-        ("Knowledge Index",  _check_knowledge(artifacts_dir)),
+        _check_fuelix(api_key, base_url),
+        _check_bq(bq_project),
+        _check_knowledge(artifacts_dir),
     ]
 
-    col_name = 20
-    sep = "=" * 66
-    thin = "-" * 44
+    failures = [(status, msg) for status, msg in checks if status == "FAIL"]
 
-    print(sep)
-    print("  Dependency Health Check")
-    print(f"  {thin}")
-
-    any_fail = False
-    for name, (status, message) in checks:
-        indicator = f"[{status}]"
-        print(f"  {indicator:<8} {name:<{col_name}} {message}")
-        if status == "FAIL":
-            any_fail = True
-
-    print(sep)
-
-    if any_fail:
+    if not failures:
+        print("All connections are working — you're good to go!")
         print()
-        print("  [!] One or more required dependencies are unavailable.")
-        print("      Resolve the FAIL items above, then restart Vibe OCTO.")
-        print()
+        return True
 
-    return not any_fail
+    count = len(failures)
+    intro = "something needs attention" if count == 1 else f"{count} things need attention"
+    print(f"Heads up — {intro} before you can get started.")
+    print("Here is what to do, step by step:")
+    print()
+    for i, (_, msg) in enumerate(failures, 1):
+        print(f"  Step {i} — {msg}")
+        print()
+    print("Once all steps are done, restart the tool and you should be good to go.")
+    print()
+    return False

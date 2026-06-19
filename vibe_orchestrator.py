@@ -177,7 +177,7 @@ def _print_kb_status(
     rule_count: int,
     knowledge_ctx: Optional["KnowledgeContext"] = None,
 ) -> None:
-    """Print the warm startup banner showing knowledge base readiness."""
+    """Print a plain-English startup summary."""
     kb_meta: dict = {}
     try:
         kb_meta = json.loads((_ARTIFACTS_DIR / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
@@ -186,31 +186,38 @@ def _print_kb_status(
 
     summary = kb_meta.get("ingestion_summary") or kb_meta
     total = summary.get("total_campaigns") or (summary.get("gold_count") or 0) + (summary.get("bronze_count") or 0)
-    gold = summary.get("gold_count") or 0
     generated_at = kb_meta.get("generated_at") or ""
-    ts_display = generated_at[:16].replace("T", " ") + " UTC" if generated_at else "unknown"
-    view_count = len({c.table_name for c in snapshot.columns})
-    ctx_campaigns = knowledge_ctx.campaign_count if knowledge_ctx is not None else gold
 
-    sep = "=" * 66
+    date_display = "unknown"
+    stale_count = 0
+    _STALE_DAYS = 7
+    now = datetime.now(tz=timezone.utc)
+    if generated_at:
+        try:
+            dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+            date_display = dt.strftime(f"%B {dt.day}, %Y")
+        except Exception:
+            date_display = generated_at[:10]
+    for c in kb_meta.get("campaigns", []):
+        ts = c.get("last_ingested_at") or c.get("ingested_at", "")
+        if not ts:
+            continue
+        try:
+            ingested = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if ingested.tzinfo is None:
+                ingested = ingested.replace(tzinfo=timezone.utc)
+            if (now - ingested).days > _STALE_DAYS:
+                stale_count += 1
+        except Exception:
+            pass
+
     print()
-    print(sep)
-    print("  Welcome to Vibe Marketing with OCTO!")
-    print(sep)
-    print()
-    print("  Knowledge base loaded successfully:")
-    print(f"    [OK] {total:,} campaigns ready")
-    print(f"    [OK] {gold} GOLD tier blueprints")
-    print(f"    [OK] {rule_count} verified business rules")
-    print(f"    [OK] Adobe schema: {view_count} views ready")
-    print(f"    [OK] Full knowledge context: {ctx_campaigns} campaigns injected into all agents")
-    print()
-    print(f"  Knowledge base last refreshed: {ts_display}")
-    print()
-    print("  To refresh knowledge base manually:")
-    print("    python -m knowledge_base.vibe_octo_knowledge --full-refresh")
-    print()
-    print(sep)
+    print("Vibe Marketing with OCTO is ready.")
+    campaign_line = f"{total:,} campaigns loaded" if total else "Campaigns loaded"
+    print(f"{campaign_line}, data last updated {date_display}.")
+    if stale_count > 0:
+        print(f"Note: {stale_count} campaign(s) haven't been updated in over a week. To refresh, run:")
+        print("  python -m knowledge_base.vibe_octo_knowledge --incremental")
     print()
 
 
