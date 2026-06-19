@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vibe Marketing with OCTO</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:        #4B2E8C;
+  --brand-dark:   #3C2370;
+  --brand-light:  #F0EDFB;
+  --bg:           #F7F6FA;
+  --surface:      #FFFFFF;
+  --border:       rgba(74, 60, 110, 0.12);
+  --border-mid:   rgba(74, 60, 110, 0.2);
+  --txt:          #1A1523;
+  --txt-2:        #6B6880;
+  --txt-3:        #9895A8;
+  --green:        #0D6E50;
+  --green-bg:     #E8F6F1;
+  --green-border: rgba(13, 110, 80, 0.3);
+  --amber:        #7A4800;
+  --amber-bg:     #FDF2E6;
+  --amber-border: rgba(122, 72, 0, 0.3);
+  --gold-bg:      #FFF8E6;
+  --gold-txt:     #7A5000;
+  --gold-border:  rgba(122, 80, 0, 0.25);
+  --silver-bg:    #F2F2F7;
+  --silver-txt:   #4A4860;
+  --silver-border:rgba(74, 72, 96, 0.25);
+  --bronze-bg:    #F5EDE6;
+  --bronze-txt:   #6A3E1C;
+  --bronze-border:rgba(106, 62, 28, 0.25);
+  --info-bg:      #E6EFF8;
+  --info-txt:     #1A4E82;
+  --r-sm:  6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  color: var(--txt);
+  background: var(--bg);
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.header-logo {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-md);
+  background: var(--brand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.header-logo svg { fill: #fff; width: 18px; height: 18px; }
+
+.header-title { font-size: 15px; font-weight: 600; color: var(--txt); }
+.header-sub   { font-size: 12px; color: var(--txt-2); margin-top: 1px; }
+
+.header-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--green);
+  background: var(--green-bg);
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
+.header-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+/* ── Messages ─────────────────────────────────────────────── */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  scroll-behavior: smooth;
+}
+
+/* Welcome banner */
+.welcome {
+  align-self: center;
+  text-align: center;
+  max-width: 420px;
+  padding: 28px 0 8px;
+}
+
+.welcome-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--txt);
+  margin-bottom: 6px;
+}
+
+.welcome-sub { font-size: 13px; color: var(--txt-2); line-height: 1.6; }
+
+/* User message */
+.msg-user {
+  align-self: flex-end;
+  max-width: 68%;
+}
+
+.msg-user-bubble {
+  background: var(--brand);
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: var(--r-xl) var(--r-xl) 4px var(--r-xl);
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+/* Bot message group */
+.msg-bot { align-self: flex-start; max-width: 560px; width: 100%; }
+
+/* Processing / thinking */
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+  font-size: 12px;
+  color: var(--txt-3);
+}
+
+.thinking-dots span {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--txt-3);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes pulse {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%            { opacity: 1;    transform: scale(1);    }
+}
+
+/* Discovery notes */
+.note {
+  font-size: 11px;
+  color: var(--txt-2);
+  padding: 2px 0 2px 10px;
+  border-left: 2px solid var(--border-mid);
+  margin-bottom: 3px;
+  line-height: 1.4;
+}
+
+/* ── Result card ─────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--brand-light);
+  border-bottom: 1px solid var(--border);
+}
+
+.card-header-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--brand);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.card-body { padding: 14px 16px; }
+
+.meta-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+
+.meta-table td {
+  padding: 3px 0;
+  vertical-align: top;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.meta-table td:first-child {
+  color: var(--txt-2);
+  width: 80px;
+  font-size: 11px;
+  padding-top: 4px;
+}
+
+.meta-table td:last-child {
+  font-weight: 500;
+  color: var(--txt);
+}
+
+.code-val {
+  font-family: ui-monospace, 'Cascadia Code', Menlo, monospace;
+  font-size: 11px;
+  font-weight: 400;
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.divider { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+
+.audience-label { font-size: 11px; color: var(--txt-2); margin-bottom: 3px; }
+.audience-count { font-size: 28px; font-weight: 600; color: var(--txt); line-height: 1.1; margin-bottom: 8px; }
+
+.tier-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+
+.badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-gold   { background: var(--gold-bg);   color: var(--gold-txt);   border-color: var(--gold-border); }
+.badge-silver { background: var(--silver-bg); color: var(--silver-txt); border-color: var(--silver-border); }
+.badge-bronze { background: var(--bronze-bg); color: var(--bronze-txt); border-color: var(--bronze-border); }
+
+.confidence { font-size: 12px; color: var(--txt-2); }
+
+/* Brief box */
+.brief-box {
+  background: var(--bg);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+}
+
+.brief-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--txt-2);
+  margin-bottom: 4px;
+  margin-top: 10px;
+}
+
+.brief-section-label:first-child { margin-top: 0; }
+
+.brief-text {
+  font-size: 12px;
+  color: var(--txt);
+  line-height: 1.65;
+}
+
+.brief-text.muted { color: var(--txt-2); font-style: italic; }
+
+.exclusion-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.exclusion-list li {
+  font-size: 12px;
+  color: var(--txt);
+  line-height: 1.55;
+  padding: 2px 0 2px 14px;
+  position: relative;
+}
+
+.exclusion-list li::before {
+  content: '–';
+  position: absolute;
+  left: 0;
+  color: var(--txt-3);
+}
+
+.optimization-note {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--info-bg);
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  color: var(--info-txt);
+  line-height: 1.5;
+}
+
+/* Discrepancy flag */
+.flag-box {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-border);
+  border-radius: var(--r-sm);
+  font-size: 11px;
+  color: var(--amber);
+  line-height: 1.5;
+}
+
+/* ── HITL section ─────────────────────────────────────────── */
+.hitl {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px 14px;
+}
+
+.hitl-prompt {
+  font-size: 12px;
+  color: var(--txt-2);
+  margin-bottom: 10px;
+}
+
+.hitl-buttons {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 7px 13px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  border: 1px solid;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+
+.btn:hover  { opacity: 0.82; }
+.btn:active { opacity: 0.65; }
+.btn:disabled { opacity: 0.4; cursor: default; }
+
+.btn-yes  { background: var(--green-bg);  color: var(--green);  border-color: var(--green-border); }
+.btn-rev  { background: var(--surface);   color: var(--txt);    border-color: var(--border-mid); }
+.btn-no   { background: var(--amber-bg);  color: var(--amber);  border-color: var(--amber-border); }
+.btn-conf { background: var(--green-bg);  color: var(--green);  border-color: var(--green-border); }
+.btn-send { background: var(--brand);     color: #fff;          border-color: transparent; }
+
+/* Correction textarea */
+.correction-wrap {
+  margin-top: 4px;
+}
+
+.correction-label {
+  font-size: 12px;
+  color: var(--txt-2);
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.correction-input {
+  width: 100%;
+  min-height: 72px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-md);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--txt);
+  background: var(--bg);
+  resize: vertical;
+  line-height: 1.55;
+  margin-bottom: 8px;
+}
+
+.correction-input:focus {
+  outline: none;
+  border-color: var(--brand);
+}
+
+/* Confirmation / flywheel message */
+.flywheel {
+  padding: 11px 13px;
+  background: var(--green-bg);
+  border: 1px solid var(--green-border);
+  border-radius: var(--r-md);
+}
+
+.flywheel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--green);
+  margin-bottom: 2px;
+}
+
+.flywheel-detail {
+  font-size: 11px;
+  color: var(--green);
+  opacity: 0.85;
+}
+
+/* SQL / sources review */
+.review-section { padding: 12px 16px 14px; border-top: 1px solid var(--border); }
+
+.review-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--txt-2);
+  margin-bottom: 8px;
+}
+
+.sql-block {
+  font-family: ui-monospace, 'Cascadia Code', Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--txt);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre;
+  margin-bottom: 12px;
+}
+
+.waterfall-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.waterfall-table th {
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--txt-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.waterfall-table td {
+  padding: 5px 8px;
+  color: var(--txt);
+  border-bottom: 1px solid var(--border);
+}
+
+.waterfall-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+
+.sources-list {
+  list-style: none;
+  padding: 0;
+  margin-bottom: 12px;
+}
+
+.sources-list li {
+  font-size: 12px;
+  color: var(--txt);
+  padding: 4px 0 4px 16px;
+  position: relative;
+  border-bottom: 1px solid var(--border);
+}
+
+.sources-list li:last-child { border-bottom: none; }
+
+.sources-list li::before {
+  content: '✓';
+  position: absolute;
+  left: 0;
+  color: var(--green);
+  font-size: 11px;
+}
+
+/* Error card */
+.error-card {
+  background: var(--surface);
+  border: 1px solid rgba(180,60,60,0.2);
+  border-radius: var(--r-lg);
+  padding: 12px 16px;
+}
+
+.error-title { font-size: 13px; font-weight: 600; color: #A33030; margin-bottom: 3px; }
+.error-detail { font-size: 12px; color: var(--txt-2); }
+
+/* General answer */
+.general-answer {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 13px 16px;
+  font-size: 13px;
+  color: var(--txt);
+  line-height: 1.6;
+}
+
+/* ── Input area ──────────────────────────────────────────── */
+.input-area {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  padding: 10px 16px 12px;
+}
+
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.input-wrap { flex: 1; }
+
+#user-input {
+  width: 100%;
+  resize: none;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-md);
+  padding: 9px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--txt);
+  background: var(--bg);
+  line-height: 1.5;
+  min-height: 40px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+#user-input:focus { outline: none; border-color: var(--brand); }
+#user-input::placeholder { color: var(--txt-3); }
+
+.send-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--r-md);
+  background: var(--brand);
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.send-btn:hover    { background: var(--brand-dark); }
+.send-btn:disabled { background: var(--txt-3); cursor: default; }
+
+.send-btn svg { fill: #fff; width: 16px; height: 16px; }
+
+.input-hint { font-size: 10px; color: var(--txt-3); margin-top: 4px; padding: 0 2px; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="header-logo" aria-hidden="true">
+    <svg viewBox="0 0 20 20"><path d="M10 2a8 8 0 100 16A8 8 0 0010 2zm0 1.5a6.5 6.5 0 110 13 6.5 6.5 0 010-13zm0 3a1 1 0 100 2 1 1 0 000-2zm-.75 3.5v4.5h1.5V10H9.25z"/></svg>
+  </div>
+  <div>
+    <div class="header-title">Vibe Marketing with OCTO</div>
+    <div class="header-sub">OCTO marketing intelligence</div>
+  </div>
+  <div class="header-status" id="status-pill">
+    <div class="header-status-dot"></div>
+    <span id="status-text">{{CAMPAIGN_COUNT}} campaigns ready</span>
+  </div>
+</header>
+
+<!-- Messages -->
+<main class="messages" id="messages" role="log" aria-live="polite" aria-label="Conversation">
+  <div class="welcome">
+    <div class="welcome-title">Vibe Marketing with OCTO is ready</div>
+    <div class="welcome-sub">Type a campaign name or question below. The tool will size the audience, generate a brief, and walk you through confirmation.</div>
+  </div>
+</main>
+
+<!-- Input -->
+<footer class="input-area">
+  <div class="input-row">
+    <div class="input-wrap">
+      <textarea id="user-input" rows="1" placeholder="Type a campaign name or question…" aria-label="Your message"></textarea>
+    </div>
+    <button class="send-btn" id="send-btn" aria-label="Send" title="Send (Enter)">
+      <svg viewBox="0 0 20 20"><path d="M2.3 10.7L17 3 9.3 17.7l-1.6-5.1-5.4-1.9zm2.5-.1l3.2 1.1.9 2.8L15 5.3 4.8 10.6z"/></svg>
+    </button>
+  </div>
+  <div class="input-hint">Press Enter to send &nbsp;&middot;&nbsp; Shift+Enter for a new line</div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Session ID ─────────────────────────────────────────────
+  const sessionId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+      });
+
+  // ── DOM refs ─────────────────────────────────────────────
+  const messagesEl = document.getElementById('messages');
+  const inputEl    = document.getElementById('user-input');
+  const sendBtn    = document.getElementById('send-btn');
+
+  // ── State ─────────────────────────────────────────────
+  let busy = false;
+  let currentHitlEl = null;  // The .hitl div of the most recent result
+
+  // ── Utilities ─────────────────────────────────────────
+  function esc(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function fmt(n) {
+    return Number(n).toLocaleString('en-CA');
+  }
+
+  function scrollBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function setBusy(b) {
+    busy = b;
+    sendBtn.disabled = b;
+    inputEl.disabled = b;
+  }
+
+  // ── Append helpers ─────────────────────────────────────
+  function appendUserMsg(text) {
+    const div = document.createElement('div');
+    div.className = 'msg-user';
+    div.innerHTML = `<div class="msg-user-bubble">${esc(text)}</div>`;
+    messagesEl.appendChild(div);
+    scrollBottom();
+  }
+
+  function appendThinking() {
+    const div = document.createElement('div');
+    div.className = 'msg-bot';
+    div.id = 'thinking';
+    div.innerHTML = `
+      <div class="thinking">
+        <div class="thinking-dots"><span></span><span></span><span></span></div>
+        <span>Thinking…</span>
+      </div>`;
+    messagesEl.appendChild(div);
+    scrollBottom();
+    return div;
+  }
+
+  function removeThinking() {
+    const el = document.getElementById('thinking');
+    if (el) el.remove();
+  }
+
+  function appendNotes(notes, container) {
+    notes.forEach(note => {
+      const p = document.createElement('p');
+      p.className = 'note';
+      p.textContent = note;
+      container.appendChild(p);
+    });
+  }
+
+  // ── Tier badge ─────────────────────────────────────────
+  function tierBadgeHtml(tier) {
+    const t = (tier || '').toUpperCase();
+    const cls = t === 'GOLD' ? 'badge-gold' : t === 'SILVER' ? 'badge-silver' : 'badge-bronze';
+    const label = t === 'GOLD' ? '★ GOLD blueprint' : t === 'SILVER' ? 'SILVER blueprint' : 'BRONZE';
+    return `<span class="badge ${cls}">${label}</span>`;
+  }
+
+  // ── Result card ─────────────────────────────────────────
+  function buildResultCard(data) {
+    const hasAudience = data.audience_count != null;
+    const hasBrief    = data.brief_universe || (data.brief_exclusions && data.brief_exclusions.length);
+
+    const metaRows = [];
+    if (data.campaign_name)    metaRows.push(['Campaign', esc(data.campaign_name)]);
+    if (data.campaign_code) {
+      const code = data.campaign_sub_code && data.campaign_sub_code !== data.campaign_code
+        ? `<span class="code-val">${esc(data.campaign_code)}</span> / <span class="code-val">${esc(data.campaign_sub_code)}</span>`
+        : `<span class="code-val">${esc(data.campaign_code)}</span>`;
+      metaRows.push(['Code', code]);
+    }
+    if (data.medium)  metaRows.push(['Medium', esc(data.medium)]);
+    if (data.cadence) metaRows.push(['Cadence', esc(data.cadence)]);
+
+    const metaHtml = metaRows.length
+      ? `<table class="meta-table">${metaRows.map(([l,v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join('')}</table>`
+      : '';
+
+    const audienceHtml = hasAudience
+      ? `<hr class="divider">
+         <div class="audience-label">Qualified contacts</div>
+         <div class="audience-count">${fmt(data.audience_count)}</div>`
+      : '';
+
+    const tierHtml = data.tier
+      ? `<div class="tier-row">
+           ${tierBadgeHtml(data.tier)}
+           ${data.confidence != null ? `<span class="confidence">Confidence ${data.confidence}%</span>` : ''}
+         </div>`
+      : '';
+
+    let briefHtml = '';
+    if (hasBrief) {
+      let inner = '';
+      if (data.brief_universe) {
+        inner += `<div class="brief-section-label">Initial universe</div>
+                  <div class="brief-text">${esc(data.brief_universe)}</div>`;
+      }
+      if (data.brief_exclusions && data.brief_exclusions.length) {
+        inner += `<div class="brief-section-label">Exclusion criteria</div>
+                  <ul class="exclusion-list">${data.brief_exclusions.map(e => `<li>${esc(e)}</li>`).join('')}</ul>`;
+      }
+      if (data.brief_segments && data.brief_segments.length) {
+        inner += `<div class="brief-section-label">Segments</div>`;
+        data.brief_segments.forEach(s => {
+          inner += `<div class="brief-text" style="margin-bottom:4px"><strong>${esc(s.name)}:</strong> ${esc(s.description)}</div>`;
+        });
+      }
+      briefHtml = `<div class="brief-box">${inner}</div>`;
+    } else if (data.brief_executive_summary) {
+      briefHtml = `<div class="brief-box">
+                     <div class="brief-section-label">Campaign brief</div>
+                     <div class="brief-text">${esc(data.brief_executive_summary)}</div>
+                   </div>`;
+    }
+
+    const noteHtml = data.optimization_note
+      ? `<div class="optimization-note">${esc(data.optimization_note)}</div>`
+      : '';
+
+    const flagsHtml = (data.discrepancy_flags && data.discrepancy_flags.length)
+      ? data.discrepancy_flags.map(f => `<div class="flag-box">Advisory: ${esc(f)}</div>`).join('')
+      : '';
+
+    const headerTitle = hasAudience && hasBrief ? 'Audience + brief — Vibe OCTO'
+                      : hasAudience             ? 'Audience audit log — Vibe OCTO Quant'
+                      :                          'Campaign brief — Vibe OCTO Briefing';
+
+    return `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-header-title">${headerTitle}</div>
+        </div>
+        <div class="card-body">
+          ${metaHtml}${audienceHtml}${tierHtml}${briefHtml}${noteHtml}${flagsHtml}
+        </div>
+        <div class="hitl" id="hitl-zone">
+          <p class="hitl-prompt">Does this look right to you?</p>
+          <div class="hitl-buttons">
+            <button class="btn btn-yes"  onclick="handleHitl('yes')">Looks good</button>
+            <button class="btn btn-rev"  onclick="handleHitl('review')">Show me how it was built</button>
+            <button class="btn btn-no"   onclick="handleHitl('no')">Something looks wrong</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // ── Render response ─────────────────────────────────────
+  function renderResponse(data, container) {
+    if (data.type === 'error') {
+      container.innerHTML += `
+        <div class="error-card">
+          <div class="error-title">I ran into an issue</div>
+          <div class="error-detail">${esc(data.message || '')}${data.detail ? ' — ' + esc(data.detail) : ''}</div>
+        </div>`;
+      return;
+    }
+
+    if (data.type === 'general_answer') {
+      container.innerHTML += `<div class="general-answer">${esc(data.message || '')}</div>`;
+      return;
+    }
+
+    if (data.type === 'result') {
+      container.innerHTML += buildResultCard(data);
+      currentHitlEl = container.querySelector('#hitl-zone');
+      return;
+    }
+  }
+
+  // ── HITL handler (called from button onclick) ────────────
+  window.handleHitl = async function (action) {
+    if (!currentHitlEl) return;
+    const zone = currentHitlEl;
+
+    // Disable all buttons immediately
+    zone.querySelectorAll('button').forEach(b => { b.disabled = true; });
+
+    try {
+      const res = await fetch('/hitl', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, action }),
+      });
+      const data = await res.json();
+      applyHitlResponse(zone, data);
+    } catch (err) {
+      zone.innerHTML = `<div class="error-card"><div class="error-title">Request failed</div><div class="error-detail">${esc(String(err))}</div></div>`;
+    }
+  };
+
+  function applyHitlResponse(zone, data) {
+    if (data.type === 'hitl_confirmed') {
+      zone.innerHTML = `
+        <div class="flywheel">
+          <div class="flywheel-title">${esc(data.message)}</div>
+          ${data.detail ? `<div class="flywheel-detail">${esc(data.detail)}</div>` : ''}
+        </div>`;
+      return;
+    }
+
+    if (data.type === 'review_sql') {
+      const rows = (data.waterfall || []).map(w =>
+        `<tr><td>${esc(w.step)}</td><td>${fmt(w.count)}</td></tr>`
+      ).join('');
+      zone.innerHTML = `
+        <div class="review-section">
+          <div class="review-label">SQL query</div>
+          <div class="sql-block">${esc(data.sql || '')}</div>
+          ${rows ? `<div class="review-label">Audience waterfall</div>
+                    <table class="waterfall-table">
+                      <thead><tr><th>Step</th><th style="text-align:right">Count</th></tr></thead>
+                      <tbody>${rows}</tbody>
+                    </table>` : ''}
+          <div class="hitl-buttons">
+            <button class="btn btn-conf" onclick="handleHitl('yes')">Confirmed, looks correct</button>
+            <button class="btn btn-no"   onclick="handleHitl('no')">Still something wrong</button>
+          </div>
+        </div>`;
+      return;
+    }
+
+    if (data.type === 'review_sources') {
+      const all = [...(data.sources || []), ...(data.knowledge_sources || [])];
+      const unique = [...new Set(all)];
+      const items = unique.map(s => `<li>${esc(s)}</li>`).join('');
+      zone.innerHTML = `
+        <div class="review-section">
+          <div class="review-label">Data sources used</div>
+          <ul class="sources-list">${items || '<li>No sources recorded.</li>'}</ul>
+          <div class="hitl-buttons">
+            <button class="btn btn-conf" onclick="handleHitl('yes')">Confirmed, looks correct</button>
+            <button class="btn btn-no"   onclick="handleHitl('no')">Still something wrong</button>
+          </div>
+        </div>`;
+      return;
+    }
+
+    if (data.type === 'correction_prompt') {
+      zone.innerHTML = `
+        <div class="hitl" style="border-top:none; padding-top:0;">
+          <div class="correction-wrap">
+            <p class="correction-label">${esc(data.message)}</p>
+            <textarea class="correction-input" id="correction-text" placeholder="Describe what was incorrect…" rows="3"></textarea>
+            <button class="btn btn-send" onclick="submitCorrection()">Submit correction</button>
+          </div>
+        </div>`;
+      const ta = document.getElementById('correction-text');
+      if (ta) ta.focus();
+      return;
+    }
+
+    if (data.type === 'error') {
+      zone.innerHTML = `
+        <div class="error-card">
+          <div class="error-title">Something went wrong</div>
+          <div class="error-detail">${esc(data.message || '')}</div>
+        </div>`;
+    }
+  }
+
+  // ── Correction submit ─────────────────────────────────
+  window.submitCorrection = async function () {
+    const ta = document.getElementById('correction-text');
+    if (!ta) return;
+    const text = ta.value.trim();
+    if (!text) { ta.focus(); return; }
+
+    const zone = currentHitlEl;
+    if (zone) {
+      zone.querySelectorAll('button').forEach(b => { b.disabled = true; });
+      ta.disabled = true;
+    }
+
+    try {
+      const res = await fetch('/correction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, text }),
+      });
+      const data = await res.json();
+
+      if (zone) {
+        zone.innerHTML = `
+          <div class="flywheel">
+            <div class="flywheel-title">${esc(data.message || 'Feedback noted.')}</div>
+            ${data.detail ? `<div class="flywheel-detail">${esc(data.detail)}</div>` : ''}
+          </div>`;
+      }
+    } catch (err) {
+      if (zone) {
+        zone.innerHTML = `<div class="error-card"><div class="error-title">Request failed</div><div class="error-detail">${esc(String(err))}</div></div>`;
+      }
+    }
+  };
+
+  // ── Main send ─────────────────────────────────────────
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text || busy) return;
+
+    setBusy(true);
+    inputEl.value = '';
+    autoResize();
+
+    appendUserMsg(text);
+    const thinkEl = appendThinking();
+
+    try {
+      const res = await fetch('/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, text }),
+      });
+      const data = await res.json();
+
+      removeThinking();
+
+      const botDiv = document.createElement('div');
+      botDiv.className = 'msg-bot';
+
+      if (data.processing_notes && data.processing_notes.length) {
+        appendNotes(data.processing_notes, botDiv);
+      }
+
+      renderResponse(data, botDiv);
+      messagesEl.appendChild(botDiv);
+      scrollBottom();
+
+    } catch (err) {
+      removeThinking();
+      const botDiv = document.createElement('div');
+      botDiv.className = 'msg-bot';
+      botDiv.innerHTML = `
+        <div class="error-card">
+          <div class="error-title">Request failed</div>
+          <div class="error-detail">${esc(String(err))}</div>
+        </div>`;
+      messagesEl.appendChild(botDiv);
+      scrollBottom();
+    } finally {
+      setBusy(false);
+      inputEl.focus();
+    }
+  }
+
+  // ── Auto-resize textarea ───────────────────────────────
+  function autoResize() {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  }
+
+  // ── Event listeners ─────────────────────────────────────
+  sendBtn.addEventListener('click', sendMessage);
+
+  inputEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  inputEl.addEventListener('input', autoResize);
+
+  inputEl.focus();
+})();
+</script>
+</body>
+</html>
