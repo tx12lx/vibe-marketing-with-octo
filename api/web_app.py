@@ -381,6 +381,13 @@ def _process_correction_sync(
                 knowledge_ctx=_runtime.knowledge_ctx,
                 non_interactive=True,
             )
+            # Reload both the registry and knowledge context so the new rule is
+            # visible to the very next query without restarting the server.
+            # This mirrors what the console does at lines 1571-1596 in vibe_orchestrator.py.
+            if _runtime.rules_registry is not None:
+                _runtime.rules_registry._load()
+            if _runtime.knowledge_ctx is not None:
+                _runtime.knowledge_ctx.reload_rules()
             return {
                 "type": "correction_saved",
                 "message": "Thank you for the feedback! I've recorded your correction.",

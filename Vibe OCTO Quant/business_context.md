@@ -75,7 +75,7 @@ Aggregate group (no carrier prefix) → `AND lob_desc IN (...)`
 - "prepaid"  → `IN ('Telus Prepaid','Koodo Prepaid','Public Mobile')`
 
 Multiple specifics → `AND lob_desc IN ('A','B', ...)`.
-No brand mentioned → omit the brand filter.
+No brand mentioned → omit the lob_desc filter entirely. Do NOT default to postpaid. "Mobility customers" alone does not imply postpaid.
 
 ### Province — `province`
 Codes: `'ON'`, `'BC'`, `'AB'`, `'NS'`, `'MB'`, `'NB'`, `'NL'`.
@@ -88,9 +88,12 @@ Codes: `'ON'`, `'BC'`, `'AB'`, `'NS'`, `'MB'`, `'NB'`, `'NL'`.
 - "outside AB/BC and QC" → `AND province NOT IN ('AB','BC','PQ','QC')`
 
 ### Customer type — `mnh_ffh_ban`
-"Naked" is a customer-type modifier. When a user says "naked postpaid", treat that as TWO filters (customer type + brand).
+"Naked" is a customer-type modifier. It refers to customers WITHOUT home solutions services. It says NOTHING about brand or LOB.
 
-- "naked" / "naked mobility" / "mobility only" → `AND COALESCE(mnh_ffh_ban, 0) = 0`
+CRITICAL: "naked", "naked mobility", or "MNH" alone NEVER implies a `lob_desc` filter. Do NOT default to postpaid when the user says "naked" without also naming a brand.
+
+- "naked" / "naked mobility" / "mobility only" / "MNH" → `AND COALESCE(mnh_ffh_ban, 0) = 0`  (no lob_desc filter added)
+- "naked postpaid" → TWO filters: `AND COALESCE(mnh_ffh_ban, 0) = 0 AND UPPER(lob_desc) IN ('TELUS POSTPAID','KOODO POSTPAID','TELUS EPP')`
 - "MNH" / "M&H" / "has both mobility and home" → `AND COALESCE(mnh_ffh_ban, 0) > 0`
 
 ### Device — `device_type`
