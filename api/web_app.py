@@ -377,7 +377,9 @@ def _process_correction_sync(
         try:
             from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
             _run_adhoc_feedback(
-                spec, log, query, correction, knowledge_ctx=_runtime.knowledge_ctx
+                spec, log, query, correction,
+                knowledge_ctx=_runtime.knowledge_ctx,
+                non_interactive=True,
             )
             return {
                 "type": "correction_saved",

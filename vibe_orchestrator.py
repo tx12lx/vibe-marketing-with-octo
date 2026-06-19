@@ -1331,6 +1331,7 @@ def _run_adhoc_feedback(
     query: str,
     correction: str,
     knowledge_ctx: Optional[KnowledgeContext] = None,
+    non_interactive: bool = False,
 ) -> None:
     """Invoke FeedbackAgent for ad-hoc sizing, brief-only, and general-question corrections.
 
@@ -1362,6 +1363,8 @@ def _run_adhoc_feedback(
         agent = FeedbackAgent()
         if knowledge_ctx is not None:
             agent.set_knowledge_context(knowledge_ctx)
+        if non_interactive:
+            agent.set_non_interactive()
         agent.subscribe(feedback_input)
         agent.execute()
     except Exception:

@@ -169,6 +169,11 @@ class FeedbackAgent(BaseAgent):
         self._input: Optional[FeedbackInput] = None
         self._registry = BusinessRulesRegistry(_RULES_PATH)
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
+        self._non_interactive: bool = False
+
+    def set_non_interactive(self) -> None:
+        """Skip all input() prompts — auto-confirms rules and silently drops clarifications."""
+        self._non_interactive = True
 
     # ------------------------------------------------------------------
     # Injection points
@@ -428,6 +433,8 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _stage3_resolve_unknown_terms(self, unknown_terms: list[str]) -> None:
+        if self._non_interactive:
+            return
         glossary = self._load_json_safe(_GLOSSARY_PATH) or {}
         user_terms: dict = glossary.setdefault("user_defined_terms", {})
         existing_lower = {k.lower() for k in user_terms.keys()}
@@ -471,6 +478,11 @@ class FeedbackAgent(BaseAgent):
         updated = list(rules_raw)
         for i, rule in enumerate(updated):
             if not rule.get("needs_clarification"):
+                continue
+
+            if self._non_interactive:
+                # Mark as no longer needing clarification so it flows through to save.
+                updated[i] = {**rule, "needs_clarification": False}
                 continue
 
             question = rule.get("clarifying_question", "Could you clarify this correction?")
@@ -551,6 +563,9 @@ class FeedbackAgent(BaseAgent):
             f"  Let me confirm each one with you."
         )
 
+        if self._non_interactive:
+            return
+
         for conflict in conflicts:
             indices = conflict.get("rule_indices", [])
             desc = conflict.get("conflict_description", "")
@@ -577,6 +592,11 @@ class FeedbackAgent(BaseAgent):
             if rule.get("scope_detected", "unclear") != "unclear":
                 continue
             if rule.get("_skipped"):
+                continue
+
+            if self._non_interactive:
+                # Default to campaign scope when there is no user to ask.
+                updated[i] = {**rule, "scope_detected": "campaign"}
                 continue
 
             raw_text = rule.get("raw_text", inp.raw_correction)
@@ -623,6 +643,10 @@ class FeedbackAgent(BaseAgent):
         for i, rule_dict in enumerate(rules_raw):
             if rule_dict.get("_skipped"):
                 pending.append(self._dict_to_rule(rule_dict, inp))
+                continue
+
+            if self._non_interactive:
+                confirmed.append(self._dict_to_rule(rule_dict, inp))
                 continue
 
             scope = rule_dict.get("scope_detected", "campaign")
