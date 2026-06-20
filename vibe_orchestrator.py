@@ -1759,6 +1759,35 @@ def build_runtime() -> VibeRuntime:
     )
 
 
+def generate_stuck_explanation(
+    nexus: NexusAgent,
+    query: str,
+    intent,
+    spec,
+    brief_output,
+) -> str:
+    """Call the AI to explain why a request produced no result and ask one follow-up question.
+
+    Fully request-agnostic -- collects whatever context is available and delegates
+    all reasoning to NexusAgent.explain_stuck_request().
+    """
+    intent_type = intent.intent_type if intent else "unknown"
+    knowledge_sources = list(intent.knowledge_sources_consulted or []) if intent else []
+
+    error_details = ""
+    if brief_output is not None and getattr(brief_output, "error_reason", None):
+        error_details = brief_output.error_reason
+    elif not knowledge_sources:
+        error_details = "No matching data sources were found for this request."
+
+    return nexus.explain_stuck_request(
+        original_query=query,
+        intent_type=intent_type,
+        knowledge_sources=knowledge_sources,
+        error_details=error_details,
+    )
+
+
 def process_core_request(
     query: str,
     rt: VibeRuntime,

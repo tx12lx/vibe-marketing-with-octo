@@ -532,6 +532,99 @@ body {
   line-height: 1.6;
 }
 
+/* ── Stuck card ──────────────────────────────────────────── */
+.stuck-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.stuck-header {
+  padding: 10px 16px 0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--txt-3);
+}
+
+.stuck-explanation {
+  padding: 12px 16px 14px;
+  font-size: 13px;
+  color: var(--txt);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.stuck-input-area {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px 14px;
+}
+
+.stuck-input-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--txt-2);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stuck-textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--r-md);
+  padding: 9px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--txt);
+  background: var(--bg);
+  line-height: 1.5;
+  min-height: 72px;
+  margin-bottom: 10px;
+}
+
+.stuck-textarea:focus { outline: none; border-color: var(--brand); }
+
+.stuck-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn-retry {
+  padding: 7px 14px;
+  border-radius: var(--r-md);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--brand);
+  color: #fff;
+  transition: background 0.15s;
+}
+
+.btn-retry:hover { background: var(--brand-dark); }
+.btn-retry:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-close-stuck {
+  padding: 7px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-mid);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  background: transparent;
+  color: var(--txt-2);
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.btn-close-stuck:hover { border-color: var(--brand); color: var(--brand); }
+.btn-close-stuck:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ── Input area ──────────────────────────────────────────── */
 .input-area {
   flex-shrink: 0;
@@ -814,6 +907,23 @@ body {
       </div>`;
   }
 
+  function buildStuckCard(explanation) {
+    const cardId = 'stuck-' + Math.random().toString(36).slice(2, 9);
+    return `
+      <div class="stuck-card" id="${cardId}">
+        <div class="stuck-header">I need your help to continue</div>
+        <div class="stuck-explanation">${esc(explanation)}</div>
+        <div class="stuck-input-area">
+          <div class="stuck-input-label">Your response</div>
+          <textarea class="stuck-textarea" id="${cardId}-text" placeholder="Type your answer here…" rows="3"></textarea>
+          <div class="stuck-actions">
+            <button class="btn-retry" onclick="submitClarification('${cardId}')">Try again with this context</button>
+            <button class="btn-close-stuck" onclick="closeStuckRequest('${cardId}')">Close this request</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
   // ── Render response ─────────────────────────────────────
   function renderResponse(data, container) {
     if (data.type === 'error') {
@@ -827,6 +937,11 @@ body {
 
     if (data.type === 'general_answer') {
       container.innerHTML += `<div class="general-answer">${esc(data.message || '')}</div>`;
+      return;
+    }
+
+    if (data.type === 'stuck') {
+      container.innerHTML += buildStuckCard(data.explanation || '');
       return;
     }
 
@@ -1060,6 +1175,85 @@ body {
         ta.setSelectionRange(ta.value.length, ta.value.length);
       }
     }
+  };
+
+  // ── Stuck card handlers ──────────────────────────────
+  window.submitClarification = async function (cardId) {
+    const ta = document.getElementById(cardId + '-text');
+    if (!ta) return;
+    const text = ta.value.trim();
+    if (!text) { ta.focus(); return; }
+
+    const card = document.getElementById(cardId);
+    if (card) {
+      card.querySelectorAll('button').forEach(b => { b.disabled = true; });
+      ta.disabled = true;
+      const label = card.querySelector('.stuck-input-label');
+      if (label) label.textContent = 'Working on it…';
+    }
+
+    try {
+      const res = await fetch('/clarify-query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, text }),
+      });
+      const data = await res.json();
+
+      if (!card) return;
+
+      if (data.type === 'stuck') {
+        // Still blocked -- replace the card content with a fresh explanation
+        card.innerHTML = `
+          <div class="stuck-header">I need your help to continue</div>
+          <div class="stuck-explanation">${esc(data.explanation || '')}</div>
+          <div class="stuck-input-area">
+            <div class="stuck-input-label">Your response</div>
+            <textarea class="stuck-textarea" id="${cardId}-text" placeholder="Type your answer here…" rows="3"></textarea>
+            <div class="stuck-actions">
+              <button class="btn-retry" onclick="submitClarification('${cardId}')">Try again with this context</button>
+              <button class="btn-close-stuck" onclick="closeStuckRequest('${cardId}')">Close this request</button>
+            </div>
+          </div>`;
+        const newTa = document.getElementById(cardId + '-text');
+        if (newTa) newTa.focus();
+      } else {
+        // Got a real result -- replace the stuck card with it
+        const botDiv = document.createElement('div');
+        botDiv.className = 'msg-bot';
+        if (data.processing_notes && data.processing_notes.length) {
+          appendNotes(data.processing_notes, botDiv);
+        }
+        renderResponse(data, botDiv);
+        card.replaceWith(botDiv);
+        scrollBottom();
+        if (data.type === 'result') {
+          currentHitlEl = botDiv.querySelector('#hitl-zone');
+        }
+      }
+    } catch (err) {
+      if (card) {
+        card.innerHTML = `
+          <div class="stuck-explanation" style="color:var(--txt-2);">Something went wrong while retrying. Please try again.</div>
+          <div class="stuck-input-area">
+            <div class="stuck-input-label">Your response</div>
+            <textarea class="stuck-textarea" id="${cardId}-text" rows="3">${esc(text)}</textarea>
+            <div class="stuck-actions">
+              <button class="btn-retry" onclick="submitClarification('${cardId}')">Try again</button>
+              <button class="btn-close-stuck" onclick="closeStuckRequest('${cardId}')">Close this request</button>
+            </div>
+          </div>`;
+      }
+    }
+  };
+
+  window.closeStuckRequest = function (cardId) {
+    const card = document.getElementById(cardId);
+    if (!card) return;
+    card.innerHTML = `
+      <div class="stuck-explanation" style="color:var(--txt-2); padding:14px 16px;">
+        No problem at all. If you would like to come back to this or try a different approach, I will be here.
+      </div>`;
   };
 
   // ── Main send ─────────────────────────────────────────

@@ -42,6 +42,7 @@ from vibe_orchestrator import (  # noqa: E402
     VibeRuntime,
     _ARTIFACTS_DIR,
     build_runtime,
+    generate_stuck_explanation,
     process_core_request,
 )
 from core.audit_logger import HITL_YES  # noqa: E402
@@ -223,6 +224,29 @@ async def confirm_correction_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+@app.post("/clarify-query")
+async def clarify_query_endpoint(request: Request) -> JSONResponse:
+    body = await request.json()
+    session_id: str = body.get("session_id", "")
+    text: str = body.get("text", "").strip()
+
+    if not session_id or not text:
+        raise HTTPException(status_code=400, detail="session_id and text are required")
+    if _runtime is None:
+        return JSONResponse({"type": "error", "message": "Runtime not available."})
+
+    session = _session_store.get(session_id)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        _executor,
+        _process_clarification_sync,
+        text,
+        session_id,
+        session,
+    )
+    return JSONResponse(result)
+
+
 # ---------------------------------------------------------------------------
 # Sync pipeline functions (all run in thread pool executor)
 # ---------------------------------------------------------------------------
@@ -261,31 +285,18 @@ def _process_query_sync(text: str, session_id: str) -> dict:
             "message": "I've answered from the knowledge base. Is there anything else I can help with?",
         }
 
-    # If a non-general-question intent produced nothing useful, surface it as
-    # an explicit incomplete result rather than silently returning empty fields.
+    # If a non-general-question intent produced nothing useful, use the AI to
+    # generate a warm explanation and ask the user for a clarifying detail.
     if result.log is None and result.brief_output is None:
-        brief_error = None
+        session.last_query = text  # store for retry without user retyping
+        explanation = generate_stuck_explanation(
+            _runtime.nexus, text, result.intent, result.spec, result.brief_output
+        )
         return {
-            "type": "result",
+            "type": "stuck",
+            "explanation": explanation,
             "processing_notes": processing_notes,
             "intent_type": intent_type,
-            "empty_result": True,
-            "error": None,
-            "campaign_name": result.spec.campaign_name if result.spec else "",
-            "campaign_code": result.spec.campaign_code if result.spec else "",
-            "campaign_sub_code": result.spec.campaign_sub_code if result.spec else "",
-            "medium": result.spec.medium if result.spec else "",
-            "cadence": result.spec.cadence if result.spec else "",
-            "tier": result.spec.campaign_tier if result.spec else "",
-            "discrepancy_flags": [],
-            "audience_count": None,
-            "optimization_note": None,
-            "confidence": round(result.intent.confidence * 100) if result.intent else None,
-            "brief_universe": "",
-            "brief_exclusions": [],
-            "brief_segments": [],
-            "brief_executive_summary": "",
-            "knowledge_sources": result.intent.knowledge_sources_consulted if result.intent else [],
         }
 
     return _format_result(result, processing_notes)
@@ -505,3 +516,49 @@ def _save_confirmed_correction_sync(session, pending: dict) -> dict:
                 "type": "correction_confirmed",
                 "message": "Your feedback has been saved.",
             }
+
+
+def _process_clarification_sync(clarification: str, session_id: str, session) -> dict:
+    """Handle a clarification submitted from the stuck card.
+
+    1. Run the clarification through the feedback learning pipeline (same as /correction).
+    2. Inject it into session.active_corrections so the retry sees it immediately.
+    3. Re-run session.last_query with all accumulated context loaded.
+    4. Return a full result dict (type: result) or another type: stuck if still blocked.
+    """
+    original_query = session.last_query
+    if not original_query:
+        return {"type": "error", "message": "No previous query found to retry."}
+
+    # --- Persist as a learned rule (same pipeline as the correction flow) ---
+    try:
+        from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
+        feedback_output = _run_adhoc_feedback(
+            session.last_spec,
+            session.last_audit_log,
+            original_query,
+            clarification,
+            knowledge_ctx=_runtime.knowledge_ctx,
+            non_interactive=True,
+        )
+        if feedback_output is not None:
+            rules = feedback_output.rules_confirmed or []
+            interpretation = feedback_output.interpretation_summary or ""
+            with _write_lock:
+                if rules and _runtime.rules_registry is not None:
+                    for rule in rules:
+                        _runtime.rules_registry.add_rule(rule)
+                if _runtime.rules_registry is not None:
+                    _runtime.rules_registry._load()
+                if _runtime.knowledge_ctx is not None:
+                    _runtime.knowledge_ctx.reload_rules()
+            record = clarification + (f" [Understood: {interpretation}]" if interpretation else "")
+            session.active_corrections.append(record)
+        else:
+            session.active_corrections.append(clarification)
+    except Exception as exc:
+        _log.warning("Clarification learning failed (will still retry): %s", exc)
+        session.active_corrections.append(clarification)
+
+    # --- Retry the original query with enriched context ---
+    return _process_query_sync(original_query, session_id)
