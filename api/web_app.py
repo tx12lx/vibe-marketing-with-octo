@@ -261,6 +261,33 @@ def _process_query_sync(text: str, session_id: str) -> dict:
             "message": "I've answered from the knowledge base. Is there anything else I can help with?",
         }
 
+    # If a non-general-question intent produced nothing useful, surface it as
+    # an explicit incomplete result rather than silently returning empty fields.
+    if result.log is None and result.brief_output is None:
+        brief_error = None
+        return {
+            "type": "result",
+            "processing_notes": processing_notes,
+            "intent_type": intent_type,
+            "empty_result": True,
+            "error": None,
+            "campaign_name": result.spec.campaign_name if result.spec else "",
+            "campaign_code": result.spec.campaign_code if result.spec else "",
+            "campaign_sub_code": result.spec.campaign_sub_code if result.spec else "",
+            "medium": result.spec.medium if result.spec else "",
+            "cadence": result.spec.cadence if result.spec else "",
+            "tier": result.spec.campaign_tier if result.spec else "",
+            "discrepancy_flags": [],
+            "audience_count": None,
+            "optimization_note": None,
+            "confidence": round(result.intent.confidence * 100) if result.intent else None,
+            "brief_universe": "",
+            "brief_exclusions": [],
+            "brief_segments": [],
+            "brief_executive_summary": "",
+            "knowledge_sources": result.intent.knowledge_sources_consulted if result.intent else [],
+        }
+
     return _format_result(result, processing_notes)
 
 

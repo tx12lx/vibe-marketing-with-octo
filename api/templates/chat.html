@@ -772,6 +772,15 @@ body {
                      <div class="brief-section-label">Campaign brief</div>
                      <div class="brief-text">${esc(data.brief_executive_summary)}</div>
                    </div>`;
+    } else if (!hasAudience) {
+      // Nothing was produced -- show a friendly placeholder so the user knows
+      // something went wrong and can flag it via the HITL buttons below.
+      briefHtml = `<div class="brief-box" style="background:var(--surface-2,#f5f5f5); border-style:dashed;">
+                     <div class="brief-text" style="color:var(--text-secondary,#666);">
+                       I wasn't able to generate a result for this request. This can happen if the data needed for this specific question isn't in my knowledge base yet, or if the request was outside my current scope.<br><br>
+                       If you think this should have worked, please use the <strong>Something looks wrong</strong> button below to let me know.
+                     </div>
+                   </div>`;
     }
 
     const noteHtml = data.optimization_note

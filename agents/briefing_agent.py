@@ -172,6 +172,7 @@ class BriefingAgent(BaseAgent):
         self._runtime_schema: str = ""
         self._gold_index: Optional[GoldTierIndex] = None
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
+        self._non_interactive: bool = False
 
     # ------------------------------------------------------------------
     # Injection points called by the orchestrator
@@ -185,6 +186,10 @@ class BriefingAgent(BaseAgent):
 
     def set_runtime_schema(self, schema_str: str) -> None:
         self._runtime_schema = schema_str
+
+    def set_non_interactive(self) -> None:
+        """Skip all terminal display calls -- used for web/API mode."""
+        self._non_interactive = True
 
     def set_session_context(self, context: str) -> None:
         pass  # briefing agent does not consume session glossary context
@@ -209,7 +214,8 @@ class BriefingAgent(BaseAgent):
 
         spec = self._spec
         try:
-            ThoughtDisplay.brief_generating(spec.campaign_name, spec.campaign_tier)
+            if not self._non_interactive:
+                ThoughtDisplay.brief_generating(spec.campaign_name, spec.campaign_tier)
             if spec.campaign_tier == "GOLD" and self._gold_index is not None:
                 gold_record = self._gold_index.lookup(
                     spec.campaign_code, spec.campaign_sub_code,

@@ -1015,6 +1015,8 @@ def route_by_intent(
                 )
         if spec is None:
             return None, None, None
+        if not allow_interactive and hasattr(briefing, "set_non_interactive"):
+            briefing.set_non_interactive()
         briefing.subscribe(spec)
         brief_output: BriefingOutput = briefing.execute()
         return spec, None, brief_output
@@ -1052,6 +1054,8 @@ def route_by_intent(
                 )
                 return None, None, None
 
+        if not allow_interactive and hasattr(briefing, "set_non_interactive"):
+            briefing.set_non_interactive()
         briefing.subscribe(spec)
         brief_output = briefing.execute()
         return spec, result, brief_output
