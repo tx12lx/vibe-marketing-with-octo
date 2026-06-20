@@ -722,6 +722,51 @@ class NexusAgent(BaseAgent):
                 "Please try rephrasing or contact the OCTO team."
             )
 
+    def explain_stuck_request(
+        self,
+        original_query: str,
+        intent_type: str,
+        knowledge_sources: list,
+        error_details: str,
+    ) -> str:
+        """Generate a warm, conversational explanation for a request the tool could not complete.
+
+        Tells the user what was understood, what specifically blocked progress, and
+        asks one focused follow-up question. Fully agnostic to request type.
+        """
+        glossary_summary = self._get_glossary_summary()
+        campaign_codes = self._get_known_campaign_codes()
+        patterns_summary = self._get_cross_campaign_patterns_summary()
+
+        sources_text = ", ".join(knowledge_sources) if knowledge_sources else "none"
+        intent_label = intent_type.replace("_", " ") if intent_type else "unknown"
+
+        prompt = (
+            f'A user asked: "{original_query}"\n\n'
+            f"The tool classified this as a {intent_label} and consulted these knowledge sources: {sources_text}.\n"
+            + (f"The following issue was encountered: {error_details}\n\n" if error_details else "\n")
+            + "Write a short response (3-5 sentences) that:\n"
+            "1. Acknowledges what you understood the user was asking for, in warm and plain language.\n"
+            "2. Explains specifically what piece of information or context is missing or unclear.\n"
+            "3. Asks one focused, direct question that the user could answer to help you proceed.\n\n"
+            "Do not use bullet points. Write in a warm, friendly, conversational tone. "
+            "Do not mention SQL, database columns, or technical identifiers. "
+            "Do not say you are an AI. Do not apologize excessively.\n\n"
+            "KNOWLEDGE CONTEXT:\n"
+            f"  Known glossary terms: {glossary_summary}\n"
+            f"  Known campaign codes: {campaign_codes}\n"
+            f"  Cross-campaign patterns: {patterns_summary}\n"
+        )
+        try:
+            return self._call_simple(prompt)
+        except Exception:
+            return (
+                "I understood your request but I wasn't able to generate a result with the "
+                "information I currently have. Could you share any additional context that "
+                "might help me proceed? For example, any specific criteria, timeframes, or "
+                "definitions that apply to this request."
+            )
+
     def build_universal_spec(
         self,
         brief: dict,
