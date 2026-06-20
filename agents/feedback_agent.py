@@ -822,12 +822,28 @@ class FeedbackAgent(BaseAgent):
     def _build_summary(
         confirmed: list[BusinessRule], pending: list[BusinessRule]
     ) -> str:
-        parts: list[str] = []
-        if confirmed:
-            parts.append(f"{len(confirmed)} rule(s) saved")
-        if pending:
-            parts.append(f"{len(pending)} rule(s) pending clarification")
-        return "; ".join(parts) + "." if parts else "No rules extracted."
+        lines: list[str] = []
+
+        for i, rule in enumerate(confirmed, 1):
+            desc = rule.rule_description.strip()
+            if desc:
+                prefix = f"{i}. " if len(confirmed) + len(pending) > 1 else ""
+                lines.append(f"{prefix}{desc}")
+
+        for i, rule in enumerate(pending, len(confirmed) + 1):
+            desc = rule.rule_description.strip()
+            if desc:
+                prefix = f"{i}. " if len(confirmed) + len(pending) > 1 else ""
+                lines.append(f"{prefix}{desc} (I need a little more information to apply this one -- I'll ask you below.)")
+
+        if lines:
+            return "\n\n".join(lines)
+
+        if confirmed or pending:
+            total = len(confirmed) + len(pending)
+            return f"I picked up {total} correction{'s' if total > 1 else ''} from your feedback. Does this match what you intended?"
+
+        return "I wasn't able to extract a specific learning from that feedback. Could you try rephrasing it?"
 
     # ------------------------------------------------------------------
     # API callers
