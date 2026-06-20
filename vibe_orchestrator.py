@@ -1773,6 +1773,7 @@ def generate_stuck_explanation(
     """
     intent_type = intent.intent_type if intent else "unknown"
     knowledge_sources = list(intent.knowledge_sources_consulted or []) if intent else []
+    campaign_identified = intent.campaign_identified if intent else False
 
     error_details = ""
     if brief_output is not None and getattr(brief_output, "error_reason", None):
@@ -1785,6 +1786,7 @@ def generate_stuck_explanation(
         intent_type=intent_type,
         knowledge_sources=knowledge_sources,
         error_details=error_details,
+        campaign_identified=campaign_identified,
     )
 
 

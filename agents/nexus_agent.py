@@ -728,6 +728,7 @@ class NexusAgent(BaseAgent):
         intent_type: str,
         knowledge_sources: list,
         error_details: str,
+        campaign_identified: bool = False,
     ) -> str:
         """Generate a warm, conversational explanation for a request the tool could not complete.
 
@@ -741,10 +742,20 @@ class NexusAgent(BaseAgent):
         sources_text = ", ".join(knowledge_sources) if knowledge_sources else "none"
         intent_label = intent_type.replace("_", " ") if intent_type else "unknown"
 
+        # When no campaign was identified, explicitly prevent the AI from borrowing
+        # campaign vocabulary from its background context.
+        scope_instruction = (
+            "IMPORTANT: This is NOT a campaign-specific request. The user did not name "
+            "a specific campaign. Do not use the word 'campaign' in your response. "
+            "Treat this as a general audience or data question.\n\n"
+            if not campaign_identified else ""
+        )
+
         prompt = (
             f'A user asked: "{original_query}"\n\n'
             f"The tool classified this as a {intent_label} and consulted these knowledge sources: {sources_text}.\n"
             + (f"The following issue was encountered: {error_details}\n\n" if error_details else "\n")
+            + scope_instruction
             + "Write a short response (3-5 sentences) that:\n"
             "1. Acknowledges what you understood the user was asking for, in warm and plain language.\n"
             "2. Explains specifically what piece of information or context is missing or unclear.\n"
@@ -754,7 +765,6 @@ class NexusAgent(BaseAgent):
             "Do not say you are an AI. Do not apologize excessively.\n\n"
             "KNOWLEDGE CONTEXT:\n"
             f"  Known glossary terms: {glossary_summary}\n"
-            f"  Known campaign codes: {campaign_codes}\n"
             f"  Cross-campaign patterns: {patterns_summary}\n"
         )
         try:
