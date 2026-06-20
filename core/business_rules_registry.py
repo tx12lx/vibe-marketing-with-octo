@@ -39,7 +39,13 @@ class BusinessRulesRegistry:
         self._rules: list[BusinessRule] = []
         self._cache_generation: int = 0
         self._loaded_generation: int = 0
+        self._last_applied_ids: list[str] = []
         self._load()
+
+    @property
+    def last_applied_ids(self) -> list[str]:
+        """Rule IDs applied in the most recent apply_rules_to_spec() call."""
+        return list(self._last_applied_ids)
 
     # ------------------------------------------------------------------
     # Public API
@@ -156,6 +162,144 @@ class BusinessRulesRegistry:
             dt = rule.created_at[:10] if rule.created_at else "unknown date"
             lines.append(f"  - {rule.rule_description} (verified {dt})")
         return "\n".join(lines)
+
+    def record_rules_applied(self, rules: list[BusinessRule]) -> None:
+        """Increment applied_count and update last_applied_at for each rule, then persist."""
+        if not rules:
+            self._last_applied_ids = []
+            return
+        self._last_applied_ids = [r.rule_id for r in rules]
+        now = datetime.now(tz=timezone.utc).isoformat()
+        ids = {r.rule_id for r in rules}
+        changed = False
+        for i, existing in enumerate(self._rules):
+            if existing.rule_id in ids:
+                self._rules[i] = existing.model_copy(update={
+                    "applied_count": existing.applied_count + 1,
+                    "last_applied_at": now,
+                })
+                changed = True
+        if changed:
+            self._persist()
+            self._cache_generation += 1
+
+    def record_hitl_yes(self, rule_ids: list[str]) -> None:
+        """Increment hitl_yes_after_rule_count for each rule ID, then persist.
+
+        Called by the orchestrator when the user confirms YES on a query where
+        rules were applied, so each rule's effectiveness score grows over time.
+        """
+        if not rule_ids:
+            return
+        id_set = set(rule_ids)
+        changed = False
+        for i, existing in enumerate(self._rules):
+            if existing.rule_id in id_set:
+                self._rules[i] = existing.model_copy(update={
+                    "hitl_yes_after_rule_count": existing.hitl_yes_after_rule_count + 1,
+                })
+                changed = True
+        if changed:
+            self._persist()
+            self._cache_generation += 1
+
+    def find_similar_or_conflicting(
+        self, new_rule: BusinessRule, api_key: str, model: str
+    ) -> dict:
+        """Use LLM to check whether new_rule duplicates or conflicts with any existing rule.
+
+        Returns a dict with keys:
+          is_duplicate   : bool
+          duplicate_of   : Optional[str]   — rule_id of the existing rule
+          conflicts_with : Optional[str]   — rule_id of the conflicting rule
+          conflict_description : Optional[str]
+          reinforced_confidence : Optional[float]  — merged confidence if duplicate
+        """
+        if not self._rules or not api_key:
+            return {"is_duplicate": False, "conflicts_with": None}
+
+        existing_summaries = "\n".join(
+            f'{i+1}. rule_id={r.rule_id} scope={r.scope} '
+            f'type={r.rule_type} description="{r.rule_description}" '
+            f'structured_value={json.dumps(r.structured_value)}'
+            for i, r in enumerate(self._rules[:30])
+            if r.applies_to_future
+        )
+        if not existing_summaries:
+            return {"is_duplicate": False, "conflicts_with": None}
+
+        prompt = (
+            "You are checking whether a new business rule duplicates or conflicts with existing rules.\n\n"
+            f"New rule:\n"
+            f"  rule_id: {new_rule.rule_id}\n"
+            f"  scope: {new_rule.scope}\n"
+            f"  rule_type: {new_rule.rule_type}\n"
+            f"  description: \"{new_rule.rule_description}\"\n"
+            f"  structured_value: {json.dumps(new_rule.structured_value)}\n\n"
+            f"Existing rules:\n{existing_summaries}\n\n"
+            "Answer these three questions:\n"
+            "1. Is the new rule saying essentially the same thing as any existing rule "
+            "(even if worded differently)?\n"
+            "2. Does the new rule directly contradict any existing rule?\n"
+            "3. If duplicate: what is the merged confidence (average of both, max 1.0)?\n\n"
+            'Output JSON only — no explanation:\n'
+            '{"is_duplicate": <bool>, "duplicate_of": "<rule_id or null>", '
+            '"conflicts_with": "<rule_id or null>", '
+            '"conflict_description": "<one sentence or null>", '
+            '"reinforced_confidence": <float or null>}'
+        )
+        try:
+            import requests  # noqa: PLC0415
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 256,
+                "temperature": 0,
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            resp = requests.post(
+                f"{_FUELIX_BASE}/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            choices = resp.json().get("choices") or []
+            text = ""
+            if choices:
+                msg = choices[0].get("message") or {}
+                text = str(msg.get("content") or "")
+            m = re.search(r"\{[^}]+\}", text, re.DOTALL)
+            if m:
+                return json.loads(m.group(0))
+        except Exception:
+            pass
+        return {"is_duplicate": False, "conflicts_with": None}
+
+    def disable_rule(self, rule_id: str, conflict_note: str) -> None:
+        """Mark a rule as applies_to_future=False and record why, then persist."""
+        for i, existing in enumerate(self._rules):
+            if existing.rule_id == rule_id:
+                self._rules[i] = existing.model_copy(update={
+                    "applies_to_future": False,
+                    "conflict_notes": conflict_note,
+                })
+                self._persist()
+                self._cache_generation += 1
+                return
+
+    def reinforce_rule(self, rule_id: str, extra_confidence: float) -> None:
+        """Increase confidence of an existing rule (capped at 1.0), then persist."""
+        for i, existing in enumerate(self._rules):
+            if existing.rule_id == rule_id:
+                new_conf = min(1.0, (existing.confidence + extra_confidence) / 2.0)
+                self._rules[i] = existing.model_copy(update={"confidence": new_conf})
+                self._persist()
+                self._cache_generation += 1
+                return
 
     # ------------------------------------------------------------------
     # Internal helpers

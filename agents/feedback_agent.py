@@ -49,6 +49,7 @@ from pydantic_schemas import (  # noqa: E402
     BusinessRule,
     FeedbackInput,
     FeedbackOutput,
+    SemanticFailureLog,
 )
 from core.base_agent import BaseAgent  # noqa: E402
 
@@ -69,6 +70,7 @@ from core.thought_display import ThoughtDisplay  # noqa: E402
 _FUELIX_BASE = "https://api.fuelix.ai"
 _RULES_PATH = _ROOT_DIR / "business_rules.json"
 _GLOSSARY_PATH = _ROOT_DIR / "glossary.json"
+_FAILURE_LOG_PATH = _ROOT_DIR / "semantic_failure_log.json"
 _KNOWLEDGE_INDEX_PATH = _ROOT_DIR / "knowledge_base" / "artifacts" / "semantic_knowledge_index.json"
 _ADOBE_SCHEMA_PATH = _ROOT_DIR / "knowledge_base" / "artifacts" / "adobe_schema.json"
 
@@ -216,6 +218,10 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _run_pipeline(self, inp: FeedbackInput) -> FeedbackOutput:
+        # Write failure log for web/API mode. Terminal mode writes it in HITLAuditLoop._handle_no().
+        if self._non_interactive:
+            self._write_failure_log_entry(inp)
+
         # Stage 1 — acknowledge
         self._stage1_acknowledge(inp)
 
@@ -601,7 +607,7 @@ class FeedbackAgent(BaseAgent):
                 input("  Your answer: ").strip()
 
     # ------------------------------------------------------------------
-    # Stage 6: Scope classification
+    # Stage 6: Scope classification — AI-driven reasoning
     # ------------------------------------------------------------------
 
     def _stage6_classify_scope(
@@ -610,42 +616,102 @@ class FeedbackAgent(BaseAgent):
         updated = list(rules_raw)
         for i, rule in enumerate(updated):
             if rule.get("scope_detected", "unclear") != "unclear":
+                # Already classified by Stage 2 with sufficient confidence — keep it.
+                # Auto-fill pattern_description from scope_signals when missing.
+                if rule.get("scope_detected") == "pattern" and not rule.get("pattern_description"):
+                    updated[i] = {
+                        **rule,
+                        "pattern_description": rule.get("scope_signals") or rule.get("understood_as", ""),
+                    }
                 continue
             if rule.get("_skipped"):
                 continue
 
-            if self._non_interactive:
-                updated[i] = {**rule, "scope_detected": "universal"}
-                continue
+            # Ask the AI to reason about scope before asking the user.
+            ai_result = self._ai_classify_scope(rule, inp)
+            ai_scope = ai_result.get("scope", "universal")
+            ai_confidence = float(ai_result.get("confidence", 0.0))
+            ai_pattern_desc = ai_result.get("pattern_description", "")
 
-            raw_text = rule.get("raw_text", inp.raw_correction)
-            print(
-                f"\n  For this correction:\n    '{raw_text}'\n"
-                f"\n  Should this apply to:\n"
-                f"    1. This campaign only\n"
-                f"    2. All similar campaigns\n"
-                f"    3. Every campaign we run\n"
-                f"\n  Which best describes what you meant? (1/2/3)"
-            )
-            choice = input("\n  Your choice: ").strip()
-
-            if choice == "1":
-                updated[i] = {**rule, "scope_detected": "campaign"}
-            elif choice == "2":
-                print(
-                    "\n  Could you describe what makes a campaign 'similar'?\n"
-                    "  For example: 'all email campaigns' or 'all Koodo campaigns'\n"
-                )
-                pattern = input("  Pattern description: ").strip()
+            if ai_confidence >= 0.8 or self._non_interactive:
                 updated[i] = {
                     **rule,
-                    "scope_detected": "pattern",
-                    "pattern_description": pattern or rule.get("scope_signals", ""),
+                    "scope_detected": ai_scope,
+                    "pattern_description": ai_pattern_desc or rule.get("scope_signals", ""),
                 }
             else:
-                updated[i] = {**rule, "scope_detected": "universal"}
+                # Low confidence — ask the user only in interactive mode.
+                raw_text = rule.get("raw_text", inp.raw_correction)
+                hint = ai_result.get("reasoning", "")
+                print(
+                    f"\n  For this correction:\n    '{raw_text}'\n"
+                    + (f"\n  My best guess is '{ai_scope}' ({hint}), but I'm not certain.\n" if hint else "")
+                    + f"\n  Should this apply to:\n"
+                    f"    1. This specific context only\n"
+                    f"    2. All similar contexts\n"
+                    f"    3. Every query, always\n"
+                    f"\n  Which best describes what you meant? (1/2/3, or Enter to accept my guess)"
+                )
+                choice = input("\n  Your choice: ").strip()
+
+                if choice == "1":
+                    updated[i] = {**rule, "scope_detected": "campaign"}
+                elif choice == "2":
+                    print(
+                        "\n  Could you describe what makes a context 'similar'?\n"
+                        "  For example: 'mobility cross-sell campaigns' or 'Stream+ queries'\n"
+                    )
+                    pattern = input("  Pattern description: ").strip()
+                    updated[i] = {
+                        **rule,
+                        "scope_detected": "pattern",
+                        "pattern_description": pattern or ai_pattern_desc or rule.get("scope_signals", ""),
+                    }
+                elif choice == "3":
+                    updated[i] = {**rule, "scope_detected": "universal"}
+                else:
+                    # Accept AI guess
+                    updated[i] = {
+                        **rule,
+                        "scope_detected": ai_scope,
+                        "pattern_description": ai_pattern_desc or rule.get("scope_signals", ""),
+                    }
 
         return updated
+
+    def _ai_classify_scope(self, rule: dict, inp: FeedbackInput) -> dict:
+        """Ask the LLM to determine the scope of a rule from its text and context."""
+        prompt = (
+            "Determine the scope of this business rule based on its text and context.\n\n"
+            f"Rule text: \"{rule.get('raw_text', inp.raw_correction)}\"\n"
+            f"AI interpretation: \"{rule.get('understood_as', '')}\"\n"
+            f"Original query context: \"{inp.raw_input_prompt}\"\n"
+            f"Was the original query about a specific campaign: {inp.campaign_code not in ('', 'AD_HOC')}\n"
+            f"Campaign code (if any): {inp.campaign_code}\n\n"
+            "Scope definitions:\n"
+            "  campaign  — applies only to this specific campaign (signals: 'this campaign', 'this run', 'here')\n"
+            "  pattern   — applies to a type of campaign or context (signals: 'add mob campaigns', 'whenever', 'all X')\n"
+            "  universal — applies to every query always (signals: 'always', 'never', 'all campaigns', a definition)\n\n"
+            "Important: if the original query had no campaign context (campaign code is AD_HOC or empty), "
+            "the scope CANNOT be 'campaign' — choose 'pattern' or 'universal' instead.\n"
+            "If the rule is defining a term or establishing a business concept, default to 'universal'.\n\n"
+            'Output JSON only:\n'
+            '{"scope": "<campaign|pattern|universal>", "confidence": <0.0-1.0>, '
+            '"pattern_description": "<one phrase describing when this applies, or empty string>", '
+            '"reasoning": "<one sentence explaining the scope choice>"}'
+        )
+        try:
+            system = [{"type": "text", "text": _FEEDBACK_SYSTEM}]
+            user = [{"type": "text", "text": prompt}]
+            raw = self._call_with_caching(system, user)
+            result = self._extract_json(raw)
+            if result and "scope" in result:
+                return result
+        except Exception:
+            pass
+        # Fallback: if no campaign context, default universal; else use scope_signals
+        scope = "universal" if inp.campaign_code in ("", "AD_HOC") else "campaign"
+        return {"scope": scope, "confidence": 0.5, "pattern_description": "", "reasoning": "fallback"}
 
     # ------------------------------------------------------------------
     # Stage 7: Validate with user
@@ -734,17 +800,65 @@ class FeedbackAgent(BaseAgent):
             # the user explicitly confirms the interpretation via the browser UI.
             return []
 
+        saved = 0
+        reinforced = 0
+        conflicts_resolved = 0
         for rule in confirmed_rules:
-            self._registry.add_rule(rule)
+            outcome = self._dedup_and_save(rule)
+            if outcome == "saved":
+                saved += 1
+            elif outcome == "reinforced":
+                reinforced += 1
+            elif outcome == "conflict_resolved":
+                conflicts_resolved += 1
 
-        if confirmed_rules:
-            n = len(confirmed_rules)
+        total = saved + reinforced + conflicts_resolved
+        if total:
+            parts = []
+            if saved:
+                parts.append(f"{saved} new rule{'s' if saved > 1 else ''}")
+            if reinforced:
+                parts.append(f"{reinforced} existing rule{'s' if reinforced > 1 else ''} strengthened")
+            if conflicts_resolved:
+                parts.append(f"{conflicts_resolved} conflict{'s' if conflicts_resolved > 1 else ''} resolved")
+            summary = ", ".join(parts)
             print(
-                f"\n  Saved! I'll apply {n} rule(s) automatically from now on.\n"
+                f"\n  Saved! {summary}. I'll apply these automatically from now on.\n"
                 f"  You'll see them mentioned in my thought process whenever they're being used."
             )
 
         return []  # new_glossary_terms — terms are already written in stage 3
+
+    def _dedup_and_save(self, rule: BusinessRule) -> str:
+        """Check for duplicates/conflicts before saving. Returns outcome string."""
+        check = self._registry.find_similar_or_conflicting(
+            rule, self._api_key or "", self._model
+        )
+
+        if check.get("is_duplicate") and check.get("duplicate_of"):
+            # Reinforce the existing rule's confidence instead of creating a duplicate.
+            existing_id: str = check["duplicate_of"]
+            merged_conf = check.get("reinforced_confidence") or rule.confidence
+            self._registry.reinforce_rule(existing_id, merged_conf)
+            return "reinforced"
+
+        if check.get("conflicts_with"):
+            # Disable the old conflicting rule and note why, then save the new one.
+            conflict_id: str = check["conflicts_with"]
+            conflict_desc: str = check.get("conflict_description") or "Superseded by a newer correction."
+            self._registry.disable_rule(
+                conflict_id,
+                conflict_note=f"Disabled by rule {rule.rule_id}: {conflict_desc}",
+            )
+            rule = rule.model_copy(update={
+                "conflict_notes": f"Replaced rule {conflict_id}: {conflict_desc}"
+            })
+            conflicts_resolved = True
+        else:
+            conflicts_resolved = False
+
+        self._registry.add_rule(rule)
+        return "conflict_resolved" if conflicts_resolved else "saved"
 
     # ------------------------------------------------------------------
     # Helpers
@@ -959,6 +1073,60 @@ class FeedbackAgent(BaseAgent):
             os.replace(tmp_name, str(_GLOSSARY_PATH))
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Failure log (web mode only — terminal mode writes via HITLAuditLoop)
+    # ------------------------------------------------------------------
+
+    def _write_failure_log_entry(self, inp: FeedbackInput) -> None:
+        """Append a SemanticFailureLog record for analysis and pattern digests."""
+        try:
+            failure_type = self._infer_failure_type_from_text(inp.raw_correction)
+            entry = SemanticFailureLog(
+                timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                campaign_code=inp.campaign_code or "AD_HOC",
+                worker_id="feedback_agent",
+                raw_input=inp.raw_input_prompt or "",
+                generated_output=json.dumps(inp.execution_context, default=str),
+                correction_description=inp.raw_correction,
+                inferred_failure_type=failure_type,
+                glossary_gaps=[],
+                intent_type="general_question" if inp.campaign_code in ("", "AD_HOC") else "campaign_execution",
+            )
+            records: list[dict] = []
+            if _FAILURE_LOG_PATH.exists():
+                try:
+                    raw = json.loads(_FAILURE_LOG_PATH.read_text(encoding="utf-8"))
+                    if isinstance(raw, list):
+                        records = raw
+                except Exception:
+                    pass
+            records.append(entry.model_dump())
+            tmp_fd, tmp_name = tempfile.mkstemp(dir=str(_FAILURE_LOG_PATH.parent), suffix=".tmp")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                    json.dump(records, fh, indent=2, ensure_ascii=False, default=str)
+                os.replace(tmp_name, str(_FAILURE_LOG_PATH))
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+        except Exception:
+            pass  # failure log write must never break the correction pipeline
+
+    @staticmethod
+    def _infer_failure_type_from_text(correction: str) -> str:
+        lower = correction.lower()
+        if "missing" in lower and "exclusion" in lower:
+            return "missing_exclusion"
+        if "tier" in lower or "blueprint" in lower:
+            return "tier_mismatch"
+        if "wrong column" in lower or ("column" in lower and "filter" not in lower):
+            return "wrong_column"
+        if "filter" in lower or "sql" in lower or "query" in lower:
+            return "wrong_filter"
+        return "general_answer"
 
     # ------------------------------------------------------------------
     # Error output

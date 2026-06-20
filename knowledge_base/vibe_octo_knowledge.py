@@ -912,6 +912,107 @@ class VibeOctoKnowledge:
 
         print("\n=== FULL REFRESH COMPLETE ===\n")
 
+    def run_refresh_rules_only(self) -> None:
+        """Rebuild campaign embeddings augmented with business rules — no BQ access.
+
+        Use after adding new rules (from feedback or failure digest) so the TF-IDF
+        search index reflects the latest business knowledge without a full BQ refresh.
+        Runs in seconds because it only reads existing artifacts from disk.
+        """
+        print("\n=== VIBE OCTO KNOWLEDGE v4 — RULES-ONLY REFRESH ===")
+
+        # Load existing campaign records from the pre-built knowledge index.
+        index_path = self._artifacts_dir / "semantic_knowledge_index.json"
+        if not index_path.exists():
+            print("  ERROR: semantic_knowledge_index.json not found. Run --full-refresh first.")
+            return
+        try:
+            index_data = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"  ERROR: Could not read knowledge index: {exc}")
+            return
+
+        campaign_records: list[dict] = index_data.get("campaigns", [])
+        if not campaign_records:
+            print("  No campaigns found in the knowledge index. Nothing to do.")
+            return
+
+        # Load current business rules to augment campaign text.
+        rules_path = self._artifacts_dir.parent.parent / "business_rules.json"
+        rules: list[dict] = []
+        if rules_path.exists():
+            try:
+                rules_data = json.loads(rules_path.read_text(encoding="utf-8"))
+                rules = [r for r in rules_data.get("rules", []) if r.get("applies_to_future")]
+            except Exception:
+                pass
+
+        # Load glossary user-defined terms for additional enrichment.
+        glossary_path = self._artifacts_dir.parent.parent / "glossary.json"
+        glossary_terms: list[str] = []
+        if glossary_path.exists():
+            try:
+                glossary_data = json.loads(glossary_path.read_text(encoding="utf-8"))
+                user_terms = glossary_data.get("user_defined_terms", {})
+                for term, defn in user_terms.items():
+                    meaning = defn.get("definition", "")
+                    if meaning:
+                        glossary_terms.append(f"{term} {meaning}")
+            except Exception:
+                pass
+
+        # Build augmented campaign records: append applicable rule descriptions to text.
+        augmented: list[dict] = []
+        for rec in campaign_records:
+            camp_id = rec.get("camp_id", "").upper()
+            medium = rec.get("medium", "").lower()
+            cadence = rec.get("cadence", "").lower()
+            extra_text_parts: list[str] = []
+
+            for rule in rules:
+                scope = rule.get("scope", "").lower()
+                if scope == "universal":
+                    extra_text_parts.append(rule.get("rule_description", ""))
+                elif scope == "campaign" and rule.get("campaign_code", "").upper() == camp_id:
+                    extra_text_parts.append(rule.get("rule_description", ""))
+                elif scope == "pattern":
+                    pattern_desc = (rule.get("pattern_description") or "").lower()
+                    if pattern_desc and (
+                        medium in pattern_desc or cadence in pattern_desc
+                        or camp_id.lower() in pattern_desc
+                    ):
+                        extra_text_parts.append(rule.get("rule_description", ""))
+
+            if extra_text_parts:
+                augmented_rec = dict(rec)
+                acc = augmented_rec.get("acc_summaries") or {}
+                existing_ts = acc.get("targeting_summary", "")
+                acc_copy = dict(acc)
+                acc_copy["targeting_summary"] = (
+                    existing_ts + " " + " ".join(extra_text_parts)
+                ).strip()
+                augmented_rec["acc_summaries"] = acc_copy
+                augmented.append(augmented_rec)
+            else:
+                augmented.append(rec)
+
+        print(f"  Loaded {len(campaign_records)} campaigns, {len(rules)} active rules, "
+              f"{len(glossary_terms)} user-defined glossary terms.")
+
+        if self._dry_run:
+            print("  [DRY RUN] Would regenerate campaign_embeddings.db with rule-augmented text.")
+            print("\n=== RULES-ONLY REFRESH COMPLETE (DRY RUN) ===\n")
+            return
+
+        try:
+            self._generate_embeddings(augmented)
+        except Exception as exc:
+            print(f"  ERROR: Embedding generation failed: {exc}")
+            return
+
+        print("\n=== RULES-ONLY REFRESH COMPLETE ===\n")
+        print("  Run --full-refresh to also update campaign metadata from BigQuery.")
+
     def run_incremental(self) -> None:
         """Ingest only campaigns added or modified since last refresh.
 
@@ -2237,6 +2338,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     group.add_argument(
+        "--refresh-rules-only",
+        action="store_true",
+        help=(
+            "Rebuild campaign embeddings from existing knowledge index, augmented with "
+            "current business rules. No BQ access. Fast — use after adding new rules."
+        ),
+    )
+    group.add_argument(
         "--dry-run",
         action="store_true",
         help="Run all phases without writing any files.",
@@ -2303,6 +2412,8 @@ def main() -> None:
         agent.run_validate()
     elif args.refresh_schema_only:
         agent.run_refresh_schema_only()
+    elif args.refresh_rules_only:
+        agent.run_refresh_rules_only()
 
 
 if __name__ == "__main__":

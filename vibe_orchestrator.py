@@ -896,6 +896,7 @@ def route_by_intent(
                 rules_registry.get_display_summary(applicable_rules)
             )
             spec = rules_registry.apply_rules_to_spec(spec, applicable_rules)
+            rules_registry.record_rules_applied(applicable_rules)
 
     # Display which knowledge assets were consulted before any agent fires.
     # Brief intents are skipped here — their knowledge box is shown after the
@@ -1382,11 +1383,136 @@ def _run_adhoc_feedback(
         if non_interactive:
             agent.set_non_interactive()
         agent.subscribe(feedback_input)
-        return agent.execute()
+        result = agent.execute()
+
+        # After web-mode corrections, check if failure count crossed the digest threshold.
+        if non_interactive:
+            _maybe_run_failure_digest(knowledge_ctx)
+
+        return result
     except Exception as _exc:
         import logging as _logging
         _logging.getLogger(__name__).warning("_run_adhoc_feedback error: %s", _exc)
         return None
+
+
+_FAILURE_DIGEST_THRESHOLD = 10  # run digest every N new failure records
+
+
+def _maybe_run_failure_digest(knowledge_ctx: Optional[KnowledgeContext]) -> None:
+    """Run the failure digest when the failure log has grown past the threshold.
+
+    The digest asks Claude to identify recurring patterns across recent failures
+    and proposes universal rules (saved with applies_to_future=False for admin review).
+    Runs silently — any error is caught so the correction flow is never blocked.
+    """
+    try:
+        failure_log_path = _ROOT / "semantic_failure_log.json"
+        if not failure_log_path.exists():
+            return
+        records = json.loads(failure_log_path.read_text(encoding="utf-8"))
+        if not isinstance(records, list):
+            return
+
+        # Only run when a new batch of records has been added (multiple of threshold).
+        total = len(records)
+        if total == 0 or total % _FAILURE_DIGEST_THRESHOLD != 0:
+            return
+
+        api_key = os.getenv("FUELIX_API_KEY", "")
+        model = os.getenv("FUELIX_MODEL", "claude-sonnet-4")
+        if not api_key:
+            return
+
+        import requests as _requests  # noqa: PLC0415
+        recent = records[-_FAILURE_DIGEST_THRESHOLD:]
+        summaries = "\n".join(
+            f'{i+1}. [{r.get("intent_type","?")}] correction="{r.get("correction_description","")}" '
+            f'failure_type={r.get("inferred_failure_type","?")} '
+            f'campaign={r.get("campaign_code","?")}'
+            for i, r in enumerate(recent)
+        )
+
+        prompt = (
+            f"You are analyzing {len(recent)} recent user corrections from a telecom marketing AI tool.\n\n"
+            f"{summaries}\n\n"
+            "Answer two questions:\n"
+            "1. What patterns do you see? Are there recurring types of mistakes the tool is making?\n"
+            "2. If a pattern repeats 3+ times, propose it as a universal business rule in this JSON format:\n"
+            '{"proposed_rules": [{"rule_description": "...", "rule_type": "general|filter_add|population_note", '
+            '"structured_value": {"note": "..."}, "pattern_summary": "..."}]}\n\n'
+            "If no strong pattern: return {\"proposed_rules\": []}.\n"
+            "Output JSON only."
+        )
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1024,
+            "temperature": 0,
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        resp = _requests.post(
+            "https://api.fuelix.ai/v1/chat/completions",
+            headers=headers, json=payload, timeout=60,
+        )
+        resp.raise_for_status()
+
+        choices = resp.json().get("choices") or []
+        text = ""
+        if choices:
+            msg = choices[0].get("message") or {}
+            text = str(msg.get("content") or "")
+
+        import re as _re  # noqa: PLC0415
+        m = _re.search(r"\{.*\}", text, _re.DOTALL)
+        if not m:
+            return
+        digest_result = json.loads(m.group(0))
+
+        # Write digest report to logs/
+        import uuid as _uuid  # noqa: PLC0415
+        from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+        digest_report = {
+            "digest_at": _dt.now(tz=_tz.utc).isoformat(),
+            "records_analyzed": len(recent),
+            "total_failure_count": total,
+            "proposed_rules": digest_result.get("proposed_rules", []),
+        }
+        logs_dir = _ROOT / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        digest_path = logs_dir / f"failure_digest_{_dt.now(tz=_tz.utc).strftime('%Y-%m-%d')}.json"
+        digest_path.write_text(
+            json.dumps(digest_report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        # Save proposed rules as pending (applies_to_future=False) for admin review.
+        proposed = digest_result.get("proposed_rules") or []
+        if proposed:
+            from core.business_rules_registry import BusinessRulesRegistry as _BRR  # noqa: PLC0415
+            from pydantic_schemas import BusinessRule as _BR  # noqa: PLC0415
+            registry = _BRR(_ROOT / "business_rules.json")
+            for p in proposed:
+                rule = _BR(
+                    rule_id=str(_uuid.uuid4()),
+                    created_at=_dt.now(tz=_tz.utc).isoformat(),
+                    verified_by="failure_digest",
+                    raw_correction=p.get("pattern_summary", ""),
+                    rule_description=p.get("rule_description", ""),
+                    rule_type=p.get("rule_type", "general"),
+                    structured_value=p.get("structured_value", {"note": p.get("rule_description", "")}),
+                    scope="universal",
+                    confidence=0.7,
+                    source="failure_digest",
+                    clarification_rounds=0,
+                    applies_to_future=False,  # pending admin review
+                    overrides_acc_summary=False,
+                    priority=1,
+                )
+                registry.add_rule(rule)
+            if knowledge_ctx is not None:
+                knowledge_ctx.reload_rules()
+    except Exception:
+        pass  # digest must never break the correction pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -1585,6 +1711,8 @@ def _run_console(
             if spec is not None and log is not None:
                 should_continue = hitl.prompt(spec, log, brief_output, intent_type=intent.intent_type)
                 hitl_outcome = HITL_YES if should_continue else HITL_NO
+                if rules_registry is not None and should_continue and rules_registry.last_applied_ids:
+                    rules_registry.record_hitl_yes(rules_registry.last_applied_ids)
                 if rules_registry is not None:
                     rules_registry._load()
                 if knowledge_ctx is not None:

@@ -216,7 +216,7 @@ class BriefingOutput(BaseModel):
 
 
 class SemanticFailureLog(BaseModel):
-    """Structured failure record written by HITLAuditLoop on HITL NO responses."""
+    """Structured failure record written on HITL NO responses (terminal and web)."""
 
     timestamp: str
     campaign_code: str
@@ -230,8 +230,10 @@ class SemanticFailureLog(BaseModel):
         "missing_exclusion",
         "tier_mismatch",
         "schema_gap",
+        "general_answer",
     ]
     glossary_gaps: list[str]
+    intent_type: str = ""  # campaign_execution | general_question | brief_generation | etc.
 
 
 class BusinessRule(BaseModel):
@@ -264,6 +266,8 @@ class BusinessRule(BaseModel):
 
     applied_count: int = 0
     last_applied_at: Optional[str] = None
+    hitl_yes_after_rule_count: int = 0  # YES responses on queries where this rule was applied
+    conflict_notes: Optional[str] = None  # set when this rule resolved a conflict with a prior rule
 
 
 class FeedbackInput(BaseModel):

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-06-20T05:23:48.474852+00:00",
+  "updated_at": "2026-06-20T21:37:18.791726+00:00",
   "rules": [
     {
       "rule_id": "d0d5dc81-b6e6-4394-b975-e52e0c38bf56",
@@ -26,8 +26,10 @@
       "applies_to_future": true,
       "overrides_acc_summary": false,
       "priority": 1,
-      "applied_count": 0,
-      "last_applied_at": null
+      "applied_count": 1,
+      "last_applied_at": "2026-06-20T21:37:18.791726+00:00",
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "6d16010c-8d05-4e7b-9a18-862141bf50f6",
@@ -53,8 +55,10 @@
       "applies_to_future": true,
       "overrides_acc_summary": false,
       "priority": 1,
-      "applied_count": 0,
-      "last_applied_at": null
+      "applied_count": 1,
+      "last_applied_at": "2026-06-20T21:37:18.791726+00:00",
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "44be7102-8aeb-4723-bd96-515bee762214",
@@ -81,7 +85,9 @@
       "overrides_acc_summary": false,
       "priority": 2,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "b66deaa7-f001-4f7c-8a9e-7256fe14b7fd",
@@ -108,7 +114,9 @@
       "overrides_acc_summary": false,
       "priority": 2,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "835e73c9-c160-4729-a0f2-4ce1adc4bb1d",
@@ -135,7 +143,9 @@
       "overrides_acc_summary": false,
       "priority": 1,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "5dd382c6-9490-4552-8063-a70b0c0ed9e8",
@@ -162,7 +172,9 @@
       "overrides_acc_summary": false,
       "priority": 1,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "47cba891-d984-43d7-8353-b94c474a377b",
@@ -189,7 +201,9 @@
       "overrides_acc_summary": false,
       "priority": 1,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "d7638748-48ba-46c4-8601-44c14181b960",
@@ -216,7 +230,9 @@
       "overrides_acc_summary": false,
       "priority": 1,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "01c471b9-0c5f-49a3-9b72-0b48c88424f4",
@@ -243,7 +259,9 @@
       "overrides_acc_summary": false,
       "priority": 1,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "b15e7844-2007-4d9f-be1a-46dbe07a8b5d",
@@ -270,7 +288,9 @@
       "overrides_acc_summary": false,
       "priority": 1,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     },
     {
       "rule_id": "f051eaf1-372d-43f5-bf5e-d9e25f54a801",
@@ -298,7 +318,9 @@
       "overrides_acc_summary": false,
       "priority": 1,
       "applied_count": 0,
-      "last_applied_at": null
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
     }
   ]
 }
