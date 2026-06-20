@@ -170,6 +170,7 @@ class FeedbackAgent(BaseAgent):
         self._registry = BusinessRulesRegistry(_RULES_PATH)
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
         self._non_interactive: bool = False
+        self._pending_clarification: str = ""
 
     def set_non_interactive(self) -> None:
         """Skip all input() prompts — auto-confirms rules and silently drops clarifications."""
@@ -249,6 +250,20 @@ class FeedbackAgent(BaseAgent):
 
         # Stage 4 — clarification loop
         rules_raw = self._stage4_clarify(rules_raw, inp)
+
+        # Pillar 4: return a clarifying question to the caller when confidence is too low.
+        if self._non_interactive and self._pending_clarification:
+            question = self._pending_clarification
+            self._pending_clarification = ""
+            return FeedbackOutput(
+                rules_extracted=[],
+                rules_confirmed=[],
+                rules_pending=[],
+                new_glossary_terms=[],
+                interpretation_summary="",
+                success=False,
+                clarifying_question=question,
+            )
 
         # Stage 5 — compound corrections
         if len(rules_raw) > 1:
@@ -481,8 +496,14 @@ class FeedbackAgent(BaseAgent):
                 continue
 
             if self._non_interactive:
-                # Mark as no longer needing clarification so it flows through to save.
-                updated[i] = {**rule, "needs_clarification": False}
+                question = rule.get("clarifying_question", "")
+                confidence = rule.get("confidence", 1.0)
+                if question and confidence < 0.5 and not self._pending_clarification:
+                    # Surface the clarifying question to the web UI instead of guessing.
+                    self._pending_clarification = question
+                    updated[i] = {**rule, "_skipped": True}
+                else:
+                    updated[i] = {**rule, "needs_clarification": False}
                 continue
 
             question = rule.get("clarifying_question", "Could you clarify this correction?")
@@ -595,8 +616,9 @@ class FeedbackAgent(BaseAgent):
                 continue
 
             if self._non_interactive:
-                # Default to campaign scope when there is no user to ask.
-                updated[i] = {**rule, "scope_detected": "campaign"}
+                # Default to universal scope so the rule is retrievable by all future queries.
+                # "Campaign" scope would tag the rule to "AD_HOC", which is never matched.
+                updated[i] = {**rule, "scope_detected": "universal"}
                 continue
 
             raw_text = rule.get("raw_text", inp.raw_correction)

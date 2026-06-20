@@ -61,7 +61,7 @@ from agents.quant_agent import QuantAgent  # noqa: E402
 from agents.briefing_agent import BriefingAgent  # noqa: E402
 from agents.feedback_agent import FeedbackAgent  # noqa: E402
 from core.knowledge_context import KnowledgeContext  # noqa: E402
-from pydantic_schemas import AdHocSizingRequest, BriefingOutput, BusinessRule, FeedbackInput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
+from pydantic_schemas import AdHocSizingRequest, BriefingOutput, BusinessRule, FeedbackInput, FeedbackOutput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
 from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
 from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
@@ -852,6 +852,7 @@ def route_by_intent(
     rules_registry: Optional[BusinessRulesRegistry] = None,
     allow_interactive: bool = True,
     session_memory=None,
+    knowledge_ctx: Optional[KnowledgeContext] = None,
 ) -> tuple[Optional[UniversalJSONSpec], Optional[QuantAuditLog], Optional[BriefingOutput]]:
     """Unified intent-based pipeline dispatcher.
 
@@ -980,6 +981,11 @@ def route_by_intent(
                         )
                     if updates:
                         request = request.model_copy(update=updates)
+            # Semantic router: inject domain-filtered schemas so Quant only sees relevant tables.
+            if knowledge_ctx is not None and intent.data_domains:
+                filtered = knowledge_ctx.retrieve_schema_for_domains(intent.data_domains)
+                if filtered and filtered != "<execution_schemas/>":
+                    quant.set_domain_schemas(filtered)
             result = _direct_count_with_recovery(quant, request, rules_registry, allow_interactive=allow_interactive)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
@@ -1019,6 +1025,10 @@ def route_by_intent(
             request = nexus.build_sizing_request_from_nl(query)
             if request is None:
                 return None, None, None
+            if knowledge_ctx is not None and intent.data_domains:
+                filtered = knowledge_ctx.retrieve_schema_for_domains(intent.data_domains)
+                if filtered and filtered != "<execution_schemas/>":
+                    quant.set_domain_schemas(filtered)
             result = _direct_count_with_recovery(quant, request, rules_registry, allow_interactive=allow_interactive)
             if isinstance(result, QuantAuditLog):
                 return None, result, None
@@ -1332,12 +1342,14 @@ def _run_adhoc_feedback(
     correction: str,
     knowledge_ctx: Optional[KnowledgeContext] = None,
     non_interactive: bool = False,
-) -> None:
+) -> Optional[FeedbackOutput]:
     """Invoke FeedbackAgent for ad-hoc sizing, brief-only, and general-question corrections.
 
     Builds a minimal FeedbackInput from whatever context is available.  When no
     campaign spec exists the campaign_code defaults to 'AD_HOC' so FeedbackAgent
     can still extract and save universal rules that apply to future executions.
+    Returns FeedbackOutput so callers can surface the interpretation summary or
+    a clarifying question to the user.
     """
     try:
         feedback_input = FeedbackInput(
@@ -1366,10 +1378,11 @@ def _run_adhoc_feedback(
         if non_interactive:
             agent.set_non_interactive()
         agent.subscribe(feedback_input)
-        agent.execute()
+        return agent.execute()
     except Exception:
         # FeedbackAgent failures must never crash the console loop.
         print("\n  Your feedback has been noted. I'll use it to guide future responses.\n")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1748,6 +1761,7 @@ def process_core_request(
     session_id: Optional[str] = None,
     user: str = "unknown",
     session_memory=None,
+    session_corrections: Optional[list] = None,
 ) -> RequestResult:
     """Execute the full pipeline for a single query without any terminal I/O.
 
@@ -1760,6 +1774,14 @@ def process_core_request(
     _start = time.perf_counter()
     try:
         ctx = _build_dynamic_context(query, rt.gold_index)
+        # Inject session corrections so every agent in this request sees what the user
+        # already told us was wrong. get_dynamic_context() builds the correction block.
+        if rt.knowledge_ctx is not None and session_corrections:
+            corrections_ctx = rt.knowledge_ctx.get_dynamic_context(
+                query=query,
+                session_corrections=session_corrections,
+            )
+            ctx = ((ctx + "\n" + corrections_ctx).strip() if ctx else corrections_ctx)
         if ctx:
             rt.nexus.set_session_context(ctx)
             rt.quant.set_session_context(ctx)
@@ -1776,6 +1798,7 @@ def process_core_request(
             rt.rules_registry,
             allow_interactive=False,
             session_memory=session_memory,
+            knowledge_ctx=rt.knowledge_ctx,
         )
         result = RequestResult(intent=intent, spec=spec, log=log, brief_output=brief_output)
         if rt.audit_logger is not None:

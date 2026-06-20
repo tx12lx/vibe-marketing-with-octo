@@ -97,6 +97,7 @@ class SessionState:
         "hitl_pending",
         "awaiting_correction",
         "session_memory",
+        "active_corrections",
     )
 
     def __init__(self, space_id: str) -> None:
@@ -112,6 +113,8 @@ class SessionState:
         # as a free-text correction for FeedbackAgent.
         self.awaiting_correction: bool = False
         self.session_memory: SessionMemory = SessionMemory()
+        # Confirmed corrections from this session, injected into every subsequent query.
+        self.active_corrections: list = []
 
     def store_result(
         self,

@@ -107,6 +107,11 @@ class KnowledgeContext:
     # ------------------------------------------------------------------
 
     @property
+    def domain_catalog_xml(self) -> str:
+        """Compact XML listing of all available data domains, for injecting into AI prompts."""
+        return self._format_domain_catalog_xml()
+
+    @property
     def nexus_context(self) -> str:
         return self._nexus_context
 

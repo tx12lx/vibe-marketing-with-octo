@@ -171,6 +171,8 @@ class FeedbackAgent(BaseAgent):
         self._input: Optional[FeedbackInput] = None
         self._registry = BusinessRulesRegistry(_RULES_PATH)
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
+        self._non_interactive: bool = False
+        self._pending_clarification: str = ""
 
     # ------------------------------------------------------------------
     # Injection points
@@ -179,6 +181,10 @@ class FeedbackAgent(BaseAgent):
     def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
         """Bind the centralised KnowledgeContext built at startup."""
         self._knowledge_ctx = ctx
+
+    def set_non_interactive(self) -> None:
+        """Skip all input() prompts — used for web/API mode where there is no terminal."""
+        self._non_interactive = True
 
     def set_session_context(self, context: str) -> None:
         pass
@@ -246,6 +252,19 @@ class FeedbackAgent(BaseAgent):
 
         # Stage 4 — clarification loop
         rules_raw = self._stage4_clarify(rules_raw, inp)
+
+        if self._non_interactive and self._pending_clarification:
+            question = self._pending_clarification
+            self._pending_clarification = ""
+            return FeedbackOutput(
+                rules_extracted=[],
+                rules_confirmed=[],
+                rules_pending=[],
+                new_glossary_terms=[],
+                interpretation_summary="",
+                success=False,
+                clarifying_question=question,
+            )
 
         # Stage 5 — compound corrections
         if len(rules_raw) > 1:
@@ -430,6 +449,8 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _stage3_resolve_unknown_terms(self, unknown_terms: list[str]) -> None:
+        if self._non_interactive:
+            return
         glossary = self._load_json_safe(_GLOSSARY_PATH) or {}
         user_terms: dict = glossary.setdefault("user_defined_terms", {})
         existing_lower = {k.lower() for k in user_terms.keys()}
@@ -473,6 +494,16 @@ class FeedbackAgent(BaseAgent):
         updated = list(rules_raw)
         for i, rule in enumerate(updated):
             if not rule.get("needs_clarification"):
+                continue
+
+            if self._non_interactive:
+                question = rule.get("clarifying_question", "")
+                confidence = rule.get("confidence", 1.0)
+                if question and confidence < 0.5 and not self._pending_clarification:
+                    self._pending_clarification = question
+                    updated[i] = {**rule, "_skipped": True}
+                else:
+                    updated[i] = {**rule, "needs_clarification": False}
                 continue
 
             question = rule.get("clarifying_question", "Could you clarify this correction?")
@@ -547,6 +578,8 @@ class FeedbackAgent(BaseAgent):
     def _stage5_compound_summary(
         self, rules_raw: list[dict], conflicts: list[dict]
     ) -> None:
+        if self._non_interactive:
+            return
         n = len(rules_raw)
         print(
             f"\n  I found {n} separate corrections in your feedback.\n"
@@ -579,6 +612,10 @@ class FeedbackAgent(BaseAgent):
             if rule.get("scope_detected", "unclear") != "unclear":
                 continue
             if rule.get("_skipped"):
+                continue
+
+            if self._non_interactive:
+                updated[i] = {**rule, "scope_detected": "universal"}
                 continue
 
             raw_text = rule.get("raw_text", inp.raw_correction)
@@ -625,6 +662,10 @@ class FeedbackAgent(BaseAgent):
         for i, rule_dict in enumerate(rules_raw):
             if rule_dict.get("_skipped"):
                 pending.append(self._dict_to_rule(rule_dict, inp))
+                continue
+
+            if self._non_interactive:
+                confirmed.append(self._dict_to_rule(rule_dict, inp))
                 continue
 
             scope = rule_dict.get("scope_detected", "campaign")

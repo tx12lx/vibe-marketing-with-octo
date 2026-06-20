@@ -910,6 +910,42 @@ body {
       return;
     }
 
+    if (data.type === 'correction_saved') {
+      zone.innerHTML = `
+        <div class="flywheel">
+          <div class="flywheel-title">${esc(data.message || 'Feedback noted.')}</div>
+          ${data.detail ? `<div class="flywheel-detail">${esc(data.detail)}</div>` : ''}
+        </div>`;
+      return;
+    }
+
+    if (data.type === 'correction_interpreted') {
+      zone.innerHTML = `
+        <div class="flywheel">
+          <div class="flywheel-title">Here is what I understood from your feedback:</div>
+          <div class="flywheel-detail">${esc(data.interpretation || 'Your correction has been recorded.')}</div>
+          <div class="hitl-buttons" style="margin-top:12px;">
+            <button class="btn btn-conf" onclick="confirmCorrection()">Yes, that is right</button>
+            <button class="btn btn-no"   onclick="clarifyCorrection()">Not quite -- let me clarify</button>
+          </div>
+        </div>`;
+      return;
+    }
+
+    if (data.type === 'correction_clarifying') {
+      zone.innerHTML = `
+        <div class="hitl" style="border-top:none; padding-top:0;">
+          <div class="correction-wrap">
+            <p class="correction-label">${esc(data.question)}</p>
+            <textarea class="correction-input" id="correction-text" placeholder="Please clarify…" rows="3"></textarea>
+            <button class="btn btn-send" onclick="submitCorrection()">Submit</button>
+          </div>
+        </div>`;
+      const ta = document.getElementById('correction-text');
+      if (ta) ta.focus();
+      return;
+    }
+
     if (data.type === 'error') {
       zone.innerHTML = `
         <div class="error-card">
@@ -920,11 +956,14 @@ body {
   }
 
   // ── Correction submit ─────────────────────────────────
+  let lastCorrectionText = '';
+
   window.submitCorrection = async function () {
     const ta = document.getElementById('correction-text');
     if (!ta) return;
     const text = ta.value.trim();
     if (!text) { ta.focus(); return; }
+    lastCorrectionText = text;
 
     const zone = currentHitlEl;
     if (zone) {
@@ -941,15 +980,41 @@ body {
       const data = await res.json();
 
       if (zone) {
-        zone.innerHTML = `
-          <div class="flywheel">
-            <div class="flywheel-title">${esc(data.message || 'Feedback noted.')}</div>
-            ${data.detail ? `<div class="flywheel-detail">${esc(data.detail)}</div>` : ''}
-          </div>`;
+        renderHitlResponse(data, zone);
       }
     } catch (err) {
       if (zone) {
         zone.innerHTML = `<div class="error-card"><div class="error-title">Request failed</div><div class="error-detail">${esc(String(err))}</div></div>`;
+      }
+    }
+  };
+
+  // ── Correction confirmation ────────────────────────────
+  window.confirmCorrection = function () {
+    const zone = currentHitlEl;
+    if (zone) {
+      zone.innerHTML = `
+        <div class="flywheel">
+          <div class="flywheel-title">Correction confirmed. I'll remember this for the rest of this session and all future sessions.</div>
+        </div>`;
+    }
+  };
+
+  window.clarifyCorrection = function () {
+    const zone = currentHitlEl;
+    if (zone) {
+      zone.innerHTML = `
+        <div class="hitl" style="border-top:none; padding-top:0;">
+          <div class="correction-wrap">
+            <p class="correction-label">No problem -- please refine your correction below. I'll re-read it carefully.</p>
+            <textarea class="correction-input" id="correction-text" placeholder="Refine your correction…" rows="3">${esc(lastCorrectionText)}</textarea>
+            <button class="btn btn-send" onclick="submitCorrection()">Submit correction</button>
+          </div>
+        </div>`;
+      const ta = document.getElementById('correction-text');
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
       }
     }
   };

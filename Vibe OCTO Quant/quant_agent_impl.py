@@ -615,10 +615,20 @@ class QuantAgent(BaseAgent):
         self._session_context: str = ""
         self._runtime_schema: str = ""
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
+        self._domain_schemas: str = ""  # pre-filtered schema from semantic router; cleared after each use
 
     def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
         """Bind the centralised KnowledgeContext built at startup."""
         self._knowledge_ctx = ctx
+
+    def set_domain_schemas(self, schemas_xml: str) -> None:
+        """Receive domain-filtered schemas from the semantic router.
+
+        Called by the orchestrator after Nexus selects relevant data domains.
+        Replaces the full-schema fetch in direct_count() for this request only.
+        Cleared automatically after use so it never bleeds into the next request.
+        """
+        self._domain_schemas = schemas_xml
 
     # ------------------------------------------------------------------
     # BaseAgent contract
@@ -717,7 +727,13 @@ class QuantAgent(BaseAgent):
         """Path 2 — execute a request-aware waterfall count query for an ad-hoc sizing request."""
         ThoughtDisplay.progress("I'm calculating your audience now...")
         try:
-            schema = self._fetch_schema(request.bq_project, request.bq_dataset)
+            # Use domain-filtered schemas if the semantic router pre-selected them.
+            # Fall back to the full schema fetch when no routing decision was made.
+            if self._domain_schemas:
+                schema = self._domain_schemas
+                self._domain_schemas = ""  # consume once; never bleeds into the next request
+            else:
+                schema = self._fetch_schema(request.bq_project, request.bq_dataset)
             sql = self._generate_adhoc_waterfall_sql(request, schema)
 
             is_ffh = _is_ffh_request(request)

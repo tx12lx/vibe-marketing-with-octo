@@ -184,6 +184,7 @@ class IntentClassification(BaseModel):
     knowledge_sources_consulted: list[str] = []
     business_rules_applied: list[str] = []
     reasoning: str = ""
+    data_domains: list[str] = []  # AI-selected knowledge layer domains for this request
 
 
 class SegmentCriterion(BaseModel):
@@ -289,3 +290,4 @@ class FeedbackOutput(BaseModel):
     new_glossary_terms: list[dict]
     interpretation_summary: str
     success: bool
+    clarifying_question: str = ""  # Non-empty when AI needs more info before saving a rule

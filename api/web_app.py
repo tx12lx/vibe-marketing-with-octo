@@ -188,6 +188,14 @@ async def correction_endpoint(request: Request) -> JSONResponse:
         session.last_audit_log,
         session.last_query,
     )
+
+    # Store the correction in the session immediately so all subsequent queries apply it.
+    # The text + any interpretation summary are both stored as context.
+    if result.get("type") in ("correction_interpreted", "correction_saved"):
+        interpretation = result.get("interpretation", "")
+        record = f"{text}" + (f" [Understood: {interpretation}]" if interpretation else "")
+        session.active_corrections.append(record)
+
     session.clear_hitl()
     return JSONResponse(result)
 
@@ -197,8 +205,12 @@ async def correction_endpoint(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 def _process_query_sync(text: str, session_id: str) -> dict:
-    result: RequestResult = process_core_request(text, _runtime, session_id=session_id)
     session = _session_store.get(session_id)
+    result: RequestResult = process_core_request(
+        text, _runtime,
+        session_id=session_id,
+        session_corrections=session.active_corrections if session.active_corrections else None,
+    )
 
     if result.error:
         return {
@@ -376,22 +388,33 @@ def _process_correction_sync(
     with _write_lock:
         try:
             from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
-            _run_adhoc_feedback(
+            feedback_output = _run_adhoc_feedback(
                 spec, log, query, correction,
                 knowledge_ctx=_runtime.knowledge_ctx,
                 non_interactive=True,
             )
             # Reload both the registry and knowledge context so the new rule is
             # visible to the very next query without restarting the server.
-            # This mirrors what the console does at lines 1571-1596 in vibe_orchestrator.py.
             if _runtime.rules_registry is not None:
                 _runtime.rules_registry._load()
             if _runtime.knowledge_ctx is not None:
                 _runtime.knowledge_ctx.reload_rules()
+
+            if feedback_output is not None and feedback_output.clarifying_question:
+                # AI needs more context before it can extract a rule.
+                return {
+                    "type": "correction_clarifying",
+                    "question": feedback_output.clarifying_question,
+                }
+
+            interpretation = ""
+            if feedback_output is not None:
+                interpretation = feedback_output.interpretation_summary
+
             return {
-                "type": "correction_saved",
-                "message": "Thank you for the feedback! I've recorded your correction.",
-                "detail": "Targeting patterns and glossary have been updated. Your correction will be applied as an override on the next run.",
+                "type": "correction_interpreted",
+                "interpretation": interpretation,
+                "message": "Here is what I understood from your feedback:",
             }
         except Exception as exc:
             _log.warning("Correction sync failed: %s", exc)

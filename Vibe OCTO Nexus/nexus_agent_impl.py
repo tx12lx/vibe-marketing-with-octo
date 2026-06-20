@@ -268,6 +268,9 @@ Knowledge context loaded:
 Campaigns retrieved from the knowledge layer most relevant to this request:
 {retrieved_campaigns}
 
+Available data domains in the knowledge layer:
+{domain_catalog}
+
 Classify this request into exactly one intent type:
 
   "sizing_request"     -- User wants an audience count or headcount.
@@ -304,15 +307,28 @@ Priority routing rules:
   3. Count or how-many question without identified campaign -> "sizing_request".
   4. Question about what campaigns exist or how something works -> "general_question".
 
+Data domain selection:
+  Review the "Available data domains in the knowledge layer" section above.
+  Select every domain whose data would be needed to answer this request.
+  Use the domain descriptions to reason — do not guess or hardcode.
+  Examples of correct reasoning:
+    "how many naked mobility customers" -> ["mobility_spine"]
+    "how many home solutions customers" -> ["ffh_profile"]
+    "postpaid customers who haven't been contacted recently" -> ["mobility_spine", "gch_suppression"]
+    "customers eligible for HSIA" -> ["mobility_spine", "product_eligibility"]
+  For general_question intent, set data_domains to [].
+  For sizing or execution requests, always select at least one domain.
+
 Return exactly this JSON (no markdown, no explanation):
 {{
   "intent_type": "<one of the 5 types above>",
   "confidence": <0.0 to 1.0>,
   "campaign_identified": <true or false>,
   "campaign_code": "<camp_id from retrieved records if identified, else null>",
-  "knowledge_sources_consulted": ["glossary", "campaign_index"],
+  "knowledge_sources_consulted": ["glossary", "campaign_index", "domain_catalog"],
   "business_rules_applied": [],
-  "reasoning": "<one sentence explaining the classification>"
+  "reasoning": "<one sentence explaining the classification>",
+  "data_domains": ["<domain names from the catalog above>"]
 }}"""
 
 
@@ -534,10 +550,16 @@ class NexusAgent:
         # This gives the AI real campaign intelligence to reason over rather than
         # bare code labels, enabling natural-language campaign identification.
         retrieved_campaigns_xml = "(knowledge layer not available — using code list only)"
+        domain_catalog = "(domain catalog not available)"
         if self._knowledge_ctx is not None:
             try:
                 retrieved_campaigns_xml = self._knowledge_ctx.retrieve_campaigns_xml(query, top_k=5)
                 sources_consulted.append("knowledge_layer")
+            except Exception:
+                pass
+            try:
+                domain_catalog = self._knowledge_ctx.domain_catalog_xml
+                sources_consulted.append("domain_catalog")
             except Exception:
                 pass
 
@@ -546,6 +568,7 @@ class NexusAgent:
             glossary_summary=glossary_summary,
             campaign_codes=campaign_codes,
             retrieved_campaigns=retrieved_campaigns_xml,
+            domain_catalog=domain_catalog,
         )
         try:
             raw = self._call_simple(
