@@ -98,6 +98,7 @@ class SessionState:
         "awaiting_correction",
         "session_memory",
         "active_corrections",
+        "pending_correction",
     )
 
     def __init__(self, space_id: str) -> None:
@@ -115,6 +116,10 @@ class SessionState:
         self.session_memory: SessionMemory = SessionMemory()
         # Confirmed corrections from this session, injected into every subsequent query.
         self.active_corrections: list = []
+        # Correction awaiting explicit user confirmation. Stored here between the
+        # interpretation display and the "Yes, exactly right" click. Dict with keys:
+        #   "text": str, "interpretation": str, "rules": list[BusinessRule]
+        self.pending_correction: dict = {}
 
     def store_result(
         self,

@@ -1379,9 +1379,9 @@ def _run_adhoc_feedback(
             agent.set_non_interactive()
         agent.subscribe(feedback_input)
         return agent.execute()
-    except Exception:
-        # FeedbackAgent failures must never crash the console loop.
-        print("\n  Your feedback has been noted. I'll use it to guide future responses.\n")
+    except Exception as _exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("_run_adhoc_feedback error: %s", _exc)
         return None
 
 

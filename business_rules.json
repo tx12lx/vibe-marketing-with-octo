@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-06-20T02:27:30.142552+00:00",
+  "updated_at": "2026-06-20T02:45:16.384982+00:00",
   "rules": [
     {
       "rule_id": "d0d5dc81-b6e6-4394-b975-e52e0c38bf56",
@@ -21,6 +21,33 @@
       "pattern_description": null,
       "pattern_match_logic": "The correction uses no campaign-specific language ('this campaign', 'this run'). The phrasing 'the prompt didn't specify' implies a general inference rule about how prompts should be interpreted — applicable every time a query is run without an explicit LOB mention.",
       "confidence": 0.95,
+      "source": "hitl_feedback",
+      "clarification_rounds": 0,
+      "applies_to_future": true,
+      "overrides_acc_summary": false,
+      "priority": 1,
+      "applied_count": 0,
+      "last_applied_at": null
+    },
+    {
+      "rule_id": "6d16010c-8d05-4e7b-9a18-862141bf50f6",
+      "created_at": "2026-06-20T02:45:16.384982+00:00",
+      "verified_by": "hitl_no_response",
+      "raw_correction": "FFH stands for TELUS Future Friendly Home, it is TELUS' Home Solutions (wireline) line of business.",
+      "rule_description": "The acronym FFH should be understood as 'TELUS Future Friendly Home', which refers to TELUS' Home Solutions wireline line of business. This is a definitional correction to the glossary term FFH — the existing knowledge base defines FFH as 'Fixed and Home (also called Home Solutions)' but does not include the full brand name 'TELUS Future Friendly Home'. Going forward, FFH should be recognised and expanded as TELUS Future Friendly Home when interpreting user prompts or generating audience logic.",
+      "rule_type": "general",
+      "structured_value": {
+        "note": "FFH = TELUS Future Friendly Home. This is TELUS' Home Solutions (wireline) line of business, covering residential customers on internet, TV, home phone, or SHS products. The acronym FFH and the phrase 'TELUS Future Friendly Home' are interchangeable and both refer to the same line of business.",
+        "description": "Glossary correction establishing that FFH stands for TELUS Future Friendly Home, the brand name for TELUS' Home Solutions wireline line of business."
+      },
+      "scope": "universal",
+      "campaign_code": null,
+      "campaign_name": null,
+      "medium": null,
+      "cadence": null,
+      "pattern_description": null,
+      "pattern_match_logic": "The correction is purely definitional — it redefines what the acronym FFH means with no campaign-specific or conditional language. No limiting phrases such as 'this campaign', 'this run', or 'whenever X' are present, indicating the definition should apply universally across all campaigns and queries.",
+      "confidence": 0.97,
       "source": "hitl_feedback",
       "clarification_rounds": 0,
       "applies_to_future": true,

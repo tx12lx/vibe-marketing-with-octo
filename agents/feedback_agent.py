@@ -222,21 +222,19 @@ class FeedbackAgent(BaseAgent):
         # Stage 2 — LLM interpretation
         interpretation = self._stage2_interpret(inp)
         if interpretation is None:
-            # LLM interpretation failed — save the raw correction verbatim so feedback
-            # is never silently lost.  The rule goes in as a general/universal rule so
-            # it surfaces in optimization_context on future ad-hoc queries.
             fallback_rule = self._make_verbatim_rule(inp)
-            self._registry.add_rule(fallback_rule)
-            print(
-                "\n  Your feedback has been saved and will be applied to future queries.\n"
-                "  (Automated interpretation was unavailable; the full text has been stored.)"
-            )
+            if not self._non_interactive:
+                self._registry.add_rule(fallback_rule)
+                print(
+                    "\n  Your feedback has been saved and will be applied to future queries.\n"
+                    "  (Automated interpretation was unavailable; the full text has been stored.)"
+                )
             return FeedbackOutput(
                 rules_extracted=[fallback_rule],
                 rules_confirmed=[fallback_rule],
                 rules_pending=[],
                 new_glossary_terms=[],
-                interpretation_summary="Feedback saved verbatim (LLM interpretation unavailable).",
+                interpretation_summary="I wasn't able to fully interpret this correction automatically. I've recorded it exactly as you wrote it and will use it going forward.",
                 success=True,
             )
 
@@ -295,6 +293,8 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _stage1_acknowledge(self, inp: FeedbackInput) -> None:
+        if self._non_interactive:
+            return
         ThoughtDisplay.feedback_acknowledging(inp.campaign_name, inp.raw_correction)
 
     # ------------------------------------------------------------------
@@ -729,6 +729,11 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _stage8_save(self, confirmed_rules: list[BusinessRule]) -> list[dict]:
+        if self._non_interactive:
+            # In web mode, rules are returned in rules_confirmed and saved only after
+            # the user explicitly confirms the interpretation via the browser UI.
+            return []
+
         for rule in confirmed_rules:
             self._registry.add_rule(rule)
 

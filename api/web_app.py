@@ -187,16 +187,39 @@ async def correction_endpoint(request: Request) -> JSONResponse:
         session.last_spec,
         session.last_audit_log,
         session.last_query,
+        session,
     )
 
-    # Store the correction in the session immediately so all subsequent queries apply it.
-    # The text + any interpretation summary are both stored as context.
-    if result.get("type") in ("correction_interpreted", "correction_saved"):
-        interpretation = result.get("interpretation", "")
-        record = f"{text}" + (f" [Understood: {interpretation}]" if interpretation else "")
-        session.active_corrections.append(record)
-
     session.clear_hitl()
+    return JSONResponse(result)
+
+
+@app.post("/confirm-correction")
+async def confirm_correction_endpoint(request: Request) -> JSONResponse:
+    body = await request.json()
+    session_id: str = body.get("session_id", "")
+
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    if _runtime is None:
+        return JSONResponse({"type": "error", "message": "Runtime not available."})
+
+    session = _session_store.get(session_id)
+    pending = session.pending_correction
+
+    if not pending:
+        return JSONResponse({
+            "type": "correction_confirmed",
+            "message": "Got it! Your feedback has been noted.",
+        })
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        _executor,
+        _save_confirmed_correction_sync,
+        session,
+        pending,
+    )
     return JSONResponse(result)
 
 
@@ -384,42 +407,74 @@ def _process_correction_sync(
     spec: Optional[UniversalJSONSpec],
     log: Optional[QuantAuditLog],
     query: str,
+    session=None,
 ) -> dict:
+    try:
+        from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
+        feedback_output = _run_adhoc_feedback(
+            spec, log, query, correction,
+            knowledge_ctx=_runtime.knowledge_ctx,
+            non_interactive=True,
+        )
+
+        if feedback_output is not None and feedback_output.clarifying_question:
+            return {
+                "type": "correction_clarifying",
+                "question": feedback_output.clarifying_question,
+            }
+
+        interpretation = feedback_output.interpretation_summary if feedback_output else ""
+        rules = feedback_output.rules_confirmed if feedback_output else []
+
+        # Store as pending -- rules are NOT saved until the user confirms understanding.
+        if session is not None:
+            session.pending_correction = {
+                "text": correction,
+                "interpretation": interpretation,
+                "rules": rules,
+            }
+
+        return {
+            "type": "correction_interpreted",
+            "interpretation": interpretation,
+            "message": "Here is what I understood from your feedback:",
+        }
+    except Exception as exc:
+        _log.warning("Correction sync failed: %s", exc)
+        return {
+            "type": "correction_error",
+            "message": "I had trouble processing that feedback. Could you rephrase it and try again?",
+        }
+
+
+def _save_confirmed_correction_sync(session, pending: dict) -> dict:
     with _write_lock:
         try:
-            from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
-            feedback_output = _run_adhoc_feedback(
-                spec, log, query, correction,
-                knowledge_ctx=_runtime.knowledge_ctx,
-                non_interactive=True,
-            )
-            # Reload both the registry and knowledge context so the new rule is
-            # visible to the very next query without restarting the server.
+            from core.business_rules_registry import BusinessRulesRegistry  # noqa: PLC0415
+            rules = pending.get("rules", [])
+            interpretation = pending.get("interpretation", "")
+            text = pending.get("text", "")
+
+            if rules and _runtime.rules_registry is not None:
+                for rule in rules:
+                    _runtime.rules_registry.add_rule(rule)
+
             if _runtime.rules_registry is not None:
                 _runtime.rules_registry._load()
             if _runtime.knowledge_ctx is not None:
                 _runtime.knowledge_ctx.reload_rules()
 
-            if feedback_output is not None and feedback_output.clarifying_question:
-                # AI needs more context before it can extract a rule.
-                return {
-                    "type": "correction_clarifying",
-                    "question": feedback_output.clarifying_question,
-                }
-
-            interpretation = ""
-            if feedback_output is not None:
-                interpretation = feedback_output.interpretation_summary
+            record = text + (f" [Understood: {interpretation}]" if interpretation else "")
+            session.active_corrections.append(record)
+            session.pending_correction = {}
 
             return {
-                "type": "correction_interpreted",
-                "interpretation": interpretation,
-                "message": "Here is what I understood from your feedback:",
+                "type": "correction_confirmed",
+                "message": "Perfect, I've got it! I'll apply this from now on -- for the rest of this session and every future session.",
             }
         except Exception as exc:
-            _log.warning("Correction sync failed: %s", exc)
+            _log.warning("Correction save failed: %s", exc)
             return {
-                "type": "correction_saved",
-                "message": "Your feedback has been noted.",
-                "detail": "I'll use it to improve future responses.",
+                "type": "correction_confirmed",
+                "message": "Your feedback has been saved.",
             }

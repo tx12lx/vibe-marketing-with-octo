@@ -946,6 +946,28 @@ body {
       return;
     }
 
+    if (data.type === 'correction_confirmed') {
+      zone.innerHTML = `
+        <div class="flywheel">
+          <div class="flywheel-title">${esc(data.message || 'Correction confirmed.')}</div>
+        </div>`;
+      return;
+    }
+
+    if (data.type === 'correction_error') {
+      zone.innerHTML = `
+        <div class="hitl" style="border-top:none; padding-top:0;">
+          <div class="correction-wrap">
+            <p class="correction-label">${esc(data.message || 'Could you rephrase that and try again?')}</p>
+            <textarea class="correction-input" id="correction-text" placeholder="Rephrase your correction…" rows="3">${esc(lastCorrectionText)}</textarea>
+            <button class="btn btn-send" onclick="submitCorrection()">Try again</button>
+          </div>
+        </div>`;
+      const ta = document.getElementById('correction-text');
+      if (ta) ta.focus();
+      return;
+    }
+
     if (data.type === 'error') {
       zone.innerHTML = `
         <div class="error-card">
@@ -980,7 +1002,7 @@ body {
       const data = await res.json();
 
       if (zone) {
-        renderHitlResponse(data, zone);
+        applyHitlResponse(zone, data);
       }
     } catch (err) {
       if (zone) {
@@ -990,13 +1012,25 @@ body {
   };
 
   // ── Correction confirmation ────────────────────────────
-  window.confirmCorrection = function () {
+  window.confirmCorrection = async function () {
     const zone = currentHitlEl;
     if (zone) {
-      zone.innerHTML = `
-        <div class="flywheel">
-          <div class="flywheel-title">Correction confirmed. I'll remember this for the rest of this session and all future sessions.</div>
-        </div>`;
+      zone.innerHTML = `<div class="flywheel"><div class="flywheel-title">Saving your correction…</div></div>`;
+    }
+    try {
+      const res = await fetch('/confirm-correction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      const data = await res.json();
+      if (zone) {
+        applyHitlResponse(zone, data);
+      }
+    } catch (err) {
+      if (zone) {
+        zone.innerHTML = `<div class="flywheel"><div class="flywheel-title">Correction confirmed. I'll apply this from now on.</div></div>`;
+      }
     }
   };
 
