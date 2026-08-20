@@ -69,6 +69,11 @@ def main() -> None:
         "type": "authorized_user",
         "universe_domain": existing.get("universe_domain", "googleapis.com"),
     }
+    # Preserve the quota project (set via `gcloud auth application-default
+    # set-quota-project`) -- without this, refreshing scopes silently wipes
+    # it and brings back the "no quota project" warning.
+    if existing.get("quota_project_id"):
+        new_adc["quota_project_id"] = existing["quota_project_id"]
     ADC_PATH.write_text(json.dumps(new_adc, indent=2), encoding="utf-8")
 
     print(f"\nADC updated: {ADC_PATH}")

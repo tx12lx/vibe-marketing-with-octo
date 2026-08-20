@@ -6,12 +6,10 @@ from typing import Optional
 
 from google.cloud import bigquery
 
+from ..config import CAMPAIGN_PROJECT as _CAMPAIGN_PROJECT, CAMPAIGN_TABLE as _CAMPAIGN_TABLE
 from .base_connector import KnowledgeSourceConnector
 
 _log = logging.getLogger(__name__)
-
-_CAMPAIGN_TABLE = "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments"
-_CAMPAIGN_PROJECT = "wb-tian-pr-d0dbe6"
 
 
 class BigQueryCampaignSource(KnowledgeSourceConnector):

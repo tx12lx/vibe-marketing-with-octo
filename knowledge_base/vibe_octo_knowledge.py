@@ -61,15 +61,12 @@ for _p in (str(_ROOT_DIR), str(_NEXUS_DIR)):
         sys.path.insert(0, _p)
 
 from core.brief_fetcher import BriefFetcher, BriefFetchError  # noqa: E402
+from knowledge_base.config import ADOBE_PROJECT, CAMPAIGN_PROJECT, CAMPAIGN_TABLE  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-CAMPAIGN_PROJECT = "wb-tian-pr-d0dbe6"
-CAMPAIGN_TABLE = "wb-tian-pr-d0dbe6.wb_tian_pr_dataset.campaign_deployments"
-
-ADOBE_PROJECT = "bi-srv-hsmdet-pr-7b9def"
 ADOBE_DATASET = "adobe"
 CAMPAIGN_DATA_DATASET = "campaign_data"
 GCH_DATASET = "gch_current"
