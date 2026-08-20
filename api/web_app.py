@@ -26,6 +26,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs
 
 _API_DIR = Path(__file__).resolve().parent
 _ROOT = _API_DIR.parent
@@ -121,8 +122,11 @@ async def login_form(error: str = "") -> HTMLResponse:
 
 @app.post("/login")
 async def login_submit(request: Request) -> RedirectResponse:
-    form = await request.form()
-    submitted = str(form.get("password", ""))
+    # Parsed manually (rather than via request.form()) so this doesn't need
+    # the python-multipart package installed -- the login form is a plain
+    # application/x-www-form-urlencoded POST with a single field.
+    body = (await request.body()).decode("utf-8", errors="ignore")
+    submitted = parse_qs(body).get("password", [""])[0]
 
     if _auth_enabled() and hmac.compare_digest(submitted, _WEB_APP_PASSWORD):
         response = RedirectResponse(url="/", status_code=303)
