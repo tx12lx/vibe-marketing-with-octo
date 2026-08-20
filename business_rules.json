@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-08-20T15:24:18.540157+00:00",
+  "updated_at": "2026-08-20T19:48:42.311492+00:00",
   "rules": [
     {
       "rule_id": "d0d5dc81-b6e6-4394-b975-e52e0c38bf56",
@@ -399,6 +399,35 @@
       "pattern_description": "No explicit scope signal was provided. The correction is phrased as a targeting intent for this query but could represent a reusable pattern for SHS-related campaigns.",
       "pattern_match_logic": "No explicit scope signal was provided. The correction is phrased as a targeting intent for this query but could represent a reusable pattern for SHS-related campaigns.",
       "confidence": 0.65,
+      "source": "hitl_feedback",
+      "clarification_rounds": 0,
+      "applies_to_future": true,
+      "overrides_acc_summary": false,
+      "priority": 1,
+      "applied_count": 0,
+      "last_applied_at": null,
+      "hitl_yes_after_rule_count": 0,
+      "conflict_notes": null
+    },
+    {
+      "rule_id": "8e3f090d-9565-4b5b-9dc1-84f7c8fd5842",
+      "created_at": "2026-08-20T19:48:25.881273+00:00",
+      "verified_by": "hitl_no_response",
+      "raw_correction": "The prompt didn't specifically ask for customers who are eligible for SHS or Stream+, however, the query is looking at SHS and Stream+ eligibility.",
+      "rule_description": "SHS eligibility filters (e.g., shs_ind = 0) and Stream+ eligibility filters (e.g., stream_ind = 0) must not be applied to a query unless the user's prompt explicitly mentions SHS or Stream+ eligibility. When the prompt is silent on either product, no related filter should be included in the audience logic.",
+      "rule_type": "general",
+      "structured_value": {
+        "note": "SHS and Stream+ eligibility filters are being applied even when the user's prompt makes no mention of SHS or Stream+. The correct behaviour is to omit both shs_ind and stream_ind (and any related eligibility fields) from the query unless the user explicitly requests them. This mirrors the existing universal rule for Stream+ and extends the same principle to SHS.",
+        "description": "Neither SHS nor Stream+ eligibility filters should be injected into audience logic unless the user's prompt explicitly references those products or their eligibility criteria."
+      },
+      "scope": "universal",
+      "campaign_code": null,
+      "campaign_name": null,
+      "medium": null,
+      "cadence": null,
+      "pattern_description": null,
+      "pattern_match_logic": "The correction references no specific campaign, pattern type, or run — it states a general principle about what the prompt 'didn't specifically ask for', implying this should apply broadly across all queries regardless of campaign type.",
+      "confidence": 0.95,
       "source": "hitl_feedback",
       "clarification_rounds": 0,
       "applies_to_future": true,
