@@ -38,7 +38,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(_ROOT / ".env")
 
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response  # noqa: E402
 
 from vibe_orchestrator import (  # noqa: E402
     RequestResult,
@@ -81,7 +81,14 @@ app = FastAPI(title="Vibe Marketing with OCTO — Web Interface", version="4.0.0
 _WEB_APP_PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
 _AUTH_COOKIE_NAME = "octo_auth"
 _AUTH_SECRET = os.getenv("WEB_APP_SECRET") or secrets.token_hex(32)
-_PUBLIC_PATHS = {"/health", "/login"}
+_PUBLIC_PATHS = {"/health", "/login", "/favicon.ico", "/favicon.svg"}
+
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">'
+    '<rect width="20" height="20" rx="4" fill="#4B2E8C"/>'
+    '<path fill="#fff" d="M10 4a6 6 0 100 12A6 6 0 0010 4zm0 1.5a4.5 4.5 0 110 9 4.5 4.5 0 010-9zm0 2a1 1 0 100 2 1 1 0 000-2zm-.75 3v3h1.5v-3H9.25z"/>'
+    "</svg>"
+)
 
 
 def _auth_enabled() -> bool:
@@ -140,6 +147,18 @@ async def login_submit(request: Request) -> RedirectResponse:
         return response
 
     return RedirectResponse(url="/login?error=1", status_code=303)
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg() -> Response:
+    return Response(content=_FAVICON_SVG, media_type="image/svg+xml")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico() -> Response:
+    # Browsers request this by default even when a <link rel="icon"> is set
+    # in the page; respond quietly instead of letting it 404 in the logs.
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
