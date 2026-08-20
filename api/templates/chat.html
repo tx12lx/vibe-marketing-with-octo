@@ -680,6 +680,16 @@ body {
 .send-btn svg { fill: #fff; width: 16px; height: 16px; }
 
 .input-hint { font-size: 10px; color: var(--txt-3); margin-top: 4px; padding: 0 2px; }
+
+.pilot-banner {
+  flex-shrink: 0;
+  padding: 7px 20px;
+  background: var(--gold-bg);
+  border-bottom: 1px solid var(--gold-border);
+  font-size: 11px;
+  color: var(--gold-txt);
+  line-height: 1.5;
+}
 </style>
 </head>
 <body>
@@ -698,6 +708,11 @@ body {
     <span id="status-text">{{CAMPAIGN_COUNT}} campaigns ready</span>
   </div>
 </header>
+
+<!-- Pilot disclaimer -->
+<div class="pilot-banner">
+  This is an early pilot, currently shared under one person's data access. Please don't paste in sensitive customer information.
+</div>
 
 <!-- Messages -->
 <main class="messages" id="messages" role="log" aria-live="polite" aria-label="Conversation">

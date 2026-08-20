@@ -17,8 +17,10 @@ Then open http://localhost:3000 in any browser on the same network.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
+import secrets
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +37,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(_ROOT / ".env")
 
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
 
 from vibe_orchestrator import (  # noqa: E402
     RequestResult,
@@ -67,6 +69,76 @@ app = FastAPI(title="Vibe Marketing with OCTO — Web Interface", version="4.0.0
 
 
 # ---------------------------------------------------------------------------
+# Shared-password gate
+#
+# This is a lightweight pilot-stage lock, not real per-user authentication --
+# everyone who is given the password shares one "door." It only activates if
+# WEB_APP_PASSWORD is set in .env, so it's opt-in and doesn't change behavior
+# for anyone already running this locally without it.
+# ---------------------------------------------------------------------------
+
+_WEB_APP_PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
+_AUTH_COOKIE_NAME = "octo_auth"
+_AUTH_SECRET = os.getenv("WEB_APP_SECRET") or secrets.token_hex(32)
+_PUBLIC_PATHS = {"/health", "/login"}
+
+
+def _auth_enabled() -> bool:
+    return bool(_WEB_APP_PASSWORD)
+
+
+def _expected_auth_cookie_value() -> str:
+    return hmac.new(_AUTH_SECRET.encode(), b"vibe-octo-authenticated", "sha256").hexdigest()
+
+
+def _is_authenticated(request: Request) -> bool:
+    if not _auth_enabled():
+        return True
+    cookie_value = request.cookies.get(_AUTH_COOKIE_NAME, "")
+    return hmac.compare_digest(cookie_value, _expected_auth_cookie_value())
+
+
+@app.middleware("http")
+async def _require_shared_password(request: Request, call_next):
+    if not _auth_enabled() or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+
+    if not _is_authenticated(request):
+        if request.url.path == "/" or request.method == "GET":
+            return RedirectResponse(url="/login")
+        return JSONResponse({"type": "error", "message": "Session expired. Please refresh the page and sign in again."}, status_code=401)
+
+    return await call_next(request)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_form(error: str = "") -> HTMLResponse:
+    html = (_TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
+    error_html = '<div class="login-error">Incorrect password. Please try again.</div>' if error else ""
+    html = html.replace("{{ERROR}}", error_html)
+    return HTMLResponse(content=html)
+
+
+@app.post("/login")
+async def login_submit(request: Request) -> RedirectResponse:
+    form = await request.form()
+    submitted = str(form.get("password", ""))
+
+    if _auth_enabled() and hmac.compare_digest(submitted, _WEB_APP_PASSWORD):
+        response = RedirectResponse(url="/", status_code=303)
+        response.set_cookie(
+            _AUTH_COOKIE_NAME,
+            _expected_auth_cookie_value(),
+            httponly=True,
+            samesite="lax",
+            max_age=60 * 60 * 24 * 30,
+        )
+        return response
+
+    return RedirectResponse(url="/login?error=1", status_code=303)
+
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
@@ -84,6 +156,10 @@ async def _startup() -> None:
         bq_project=bq_project,
         artifacts_dir=_ARTIFACTS_DIR,
     )
+    if _auth_enabled():
+        _log.info("Shared-password gate is ON (WEB_APP_PASSWORD is set).")
+    else:
+        _log.warning("Shared-password gate is OFF -- anyone who can reach this address can use the tool. Set WEB_APP_PASSWORD in .env before sharing this beyond your own machine.")
     _log.info("Vibe OCTO web server ready.")
 
 
