@@ -23,7 +23,8 @@ from typing import Optional, Union
 import requests
 from dotenv import load_dotenv
 from pydantic import ValidationError
-from core.resilience import resilient_post, resilient_bq_query
+from core.resilience import resilient_bq_query
+from core.ai_client import ask_ai
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -913,69 +914,19 @@ class QuantAgent(BaseAgent):
             else _QUANT_SYSTEM
         )
 
-        use_thinking = bool(os.getenv("FUELIX_EXTENDED_THINKING"))
-        thinking_payload: dict = (
-            {"thinking": {"type": "enabled", "budget_tokens": 10000}} if use_thinking else {}
-        )
-        temperature = 1 if use_thinking else 0
-        beta_headers = (
-            "prompt-caching-2024-07-31,interleaved-thinking-2025-05-14"
-            if use_thinking
-            else "prompt-caching-2024-07-31"
-        )
-
+        # Note: extended-thinking mode and Fuel iX/Anthropic prompt-caching
+        # have no Gemini equivalent wired up here -- this is a plain call.
         if self._knowledge_ctx is not None:
-            cached_block = {
-                "type": "text",
-                "text": (
-                    "VIBE OCTO PROVEN SQL PATTERNS\n"
-                    "(Column patterns and business rules from all GOLD campaigns)\n\n"
-                    + self._knowledge_ctx.quant_context
-                ),
-                "cache_control": {"type": "ephemeral"},
-            }
-            query_block = {"type": "text", "text": prompt}
-            resp = resilient_post(
-                f"{_FUELIX_BASE}/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                    "anthropic-beta": beta_headers,
-                },
-                json={
-                    "model": self._model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": [cached_block, query_block]},
-                    ],
-                    "max_tokens": 4096,
-                    "temperature": temperature,
-                    **thinking_payload,
-                },
-                timeout=180,
-            )
-        else:
-            resp = resilient_post(
-                f"{_FUELIX_BASE}/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                    **({"anthropic-beta": "interleaved-thinking-2025-05-14"} if use_thinking else {}),
-                },
-                json={
-                    "model": self._model,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "max_tokens": 4096,
-                    "temperature": temperature,
-                    **thinking_payload,
-                },
-                timeout=180,
+            prompt = (
+                "VIBE OCTO PROVEN SQL PATTERNS\n"
+                "(Column patterns and business rules from all GOLD campaigns)\n\n"
+                + self._knowledge_ctx.quant_context
+                + "\n\n"
+                + prompt
             )
 
-        return _clean_sql(resp.json()["choices"][0]["message"]["content"].strip())
+        text = ask_ai(prompt, system=system, temperature=0, max_tokens=4096)
+        return _clean_sql(text)
 
     def _execute_query(self, sql: str, project: str) -> list[dict]:
         with warnings.catch_warnings():

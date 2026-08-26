@@ -33,7 +33,7 @@ from typing import Optional, TYPE_CHECKING
 
 import requests
 from dotenv import load_dotenv
-from core.resilience import resilient_post
+from core.ai_client import ask_ai
 
 if TYPE_CHECKING:
     from core.knowledge_context import KnowledgeContext
@@ -614,68 +614,14 @@ class BriefingAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _call_with_caching(self, system_blocks: list[dict], user_content: list[dict]) -> str:
-        payload: dict = {
-            "model": self._model,
-            "system": system_blocks,
-            "messages": [{"role": "user", "content": user_content}],
-            "max_tokens": 4096,
-        }
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-            "anthropic-beta": "prompt-caching-2024-07-31",
-        }
-        resp = resilient_post(
-            f"{_FUELIX_BASE}/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=180,
-        )
-        return self._extract_text(resp.json())
+        # Note: Gemini has no equivalent to Fuel iX/Anthropic's ephemeral
+        # prompt-caching, so the blocks are just joined into plain text.
+        system = "\n\n".join(b.get("text", "") for b in system_blocks)
+        prompt = "\n\n".join(b.get("text", "") for b in user_content)
+        return ask_ai(prompt, system=system, temperature=0, max_tokens=4096)
 
     def _call_standard(self, system: str, user_prompt: str) -> str:
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt},
-            ],
-            "max_tokens": 4096,
-            "temperature": 0,
-        }
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        resp = resilient_post(
-            f"{_FUELIX_BASE}/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=180,
-        )
-        return self._extract_text(resp.json())
-
-    @staticmethod
-    def _extract_text(resp_json: dict) -> str:
-        choices = resp_json.get("choices") or []
-        if choices:
-            msg = choices[0].get("message") or {}
-            content = msg.get("content") or ""
-            if isinstance(content, list):
-                return "".join(
-                    block.get("text", "")
-                    for block in content
-                    if block.get("type") == "text"
-                ).strip()
-            return str(content).strip()
-        content = resp_json.get("content") or []
-        if isinstance(content, list):
-            return "".join(
-                block.get("text", "")
-                for block in content
-                if block.get("type") == "text"
-            ).strip()
-        return ""
+        return ask_ai(user_prompt, system=system, temperature=0, max_tokens=4096)
 
     # ------------------------------------------------------------------
     # Output assembly and parsing

@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import requests
 from dotenv import load_dotenv
 from pydantic import ValidationError
-from core.resilience import resilient_post
+from core.ai_client import ask_ai
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -1416,30 +1416,7 @@ class NexusAgent(BaseAgent):
             if self._session_context
             else _NEXUS_SYSTEM
         )
-        payload: dict = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt},
-            ],
-            "max_tokens": _MAX_TOKENS_BUILD,
-            "temperature": 0,
-        }
-        headers: dict = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        if thinking and os.getenv("FUELIX_EXTENDED_THINKING"):
-            payload["thinking"] = thinking
-            payload["temperature"] = 1  # required when thinking is enabled
-            headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
-        resp = resilient_post(
-            f"{_FUELIX_BASE}/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=180,
-        )
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        return ask_ai(user_prompt, system=system, temperature=0, max_tokens=_MAX_TOKENS_BUILD)
 
     def _call_with_cached_taxonomy(self, user_query: str) -> str:
         """Call Fuel iX with the full knowledge context pinned as an ephemeral cached block.
@@ -1467,37 +1444,18 @@ class NexusAgent(BaseAgent):
                 + json.dumps(self._taxonomy, indent=2, ensure_ascii=False)
             )
 
-        taxonomy_block = {
-            "type": "text",
-            "text": cached_text,
-            "cache_control": {"type": "ephemeral"},
-        }
-        query_block = {"type": "text", "text": user_query}
+        # Note: Gemini has no equivalent to Fuel iX/Anthropic's ephemeral
+        # prompt-caching, so the knowledge block and query are just
+        # concatenated into one prompt rather than sent as separate,
+        # cache-tagged content blocks.
+        prompt = cached_text + "\n\n" + user_query
 
         system = (
             _NEXUS_SYSTEM + "\n\n" + self._session_context
             if self._session_context
             else _NEXUS_SYSTEM
         )
-        resp = resilient_post(
-            f"{_FUELIX_BASE}/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-                "anthropic-beta": "prompt-caching-2024-07-31",
-            },
-            json={
-                "model": self._model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": [taxonomy_block, query_block]},
-                ],
-                "max_tokens": _MAX_TOKENS_QUERY,
-                "temperature": 0,
-            },
-            timeout=180,
-        )
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        return ask_ai(prompt, system=system, temperature=0, max_tokens=_MAX_TOKENS_QUERY)
 
     @staticmethod
     def _extract_json(text: str) -> dict:

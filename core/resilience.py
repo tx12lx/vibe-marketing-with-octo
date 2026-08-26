@@ -118,25 +118,14 @@ def resilient_bq_query(
 # ---------------------------------------------------------------------------
 
 def _check_fuelix(api_key: str, base_url: str = "https://api.fuelix.ai") -> tuple[str, str]:
-    """Check Fuel iX API reachability. Returns (status, plain-English message)."""
-    if not api_key:
-        return "FAIL", "The AI service key is missing. Contact your system administrator."
-    try:
-        resp = requests.get(
-            f"{base_url}/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10,
-        )
-        # 200 = success; 401/403 = reachable but key issue (still reachable)
-        if resp.status_code in (200, 401, 403):
-            return "OK", ""
-        return "WARN", "The AI service returned an unexpected response. Try again in a few minutes."
-    except requests.exceptions.ConnectionError:
-        return "FAIL", "We can't reach the AI service. Check your network or VPN connection, then restart."
-    except requests.exceptions.Timeout:
-        return "WARN", "The AI service is responding slowly. It should recover on its own — try again in a few minutes."
-    except Exception as exc:
-        return "WARN", f"The AI service check was inconclusive ({type(exc).__name__}). Try restarting."
+    """Check AI service reachability (Gemini via Vertex AI). Returns (status, plain-English message).
+
+    Name kept for compatibility with existing callers; `api_key`/`base_url`
+    are unused now that the AI call goes through core.ai_client (ADC-based
+    auth, no API key).
+    """
+    from core.ai_client import check_ai_reachable  # noqa: PLC0415
+    return check_ai_reachable()
 
 
 def _check_bq(project: str) -> tuple[str, str]:

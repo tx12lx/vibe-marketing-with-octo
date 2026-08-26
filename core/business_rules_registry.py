@@ -19,8 +19,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from pydantic_schemas import BusinessRule, UniversalJSONSpec  # noqa: E402
-
-_FUELIX_BASE = "https://api.fuelix.ai"
+from core.ai_client import ask_ai  # noqa: E402
 
 
 class BusinessRulesRegistry:
@@ -215,7 +214,7 @@ class BusinessRulesRegistry:
           conflict_description : Optional[str]
           reinforced_confidence : Optional[float]  — merged confidence if duplicate
         """
-        if not self._rules or not api_key:
+        if not self._rules:
             return {"is_duplicate": False, "conflicts_with": None}
 
         existing_summaries = "\n".join(
@@ -249,29 +248,7 @@ class BusinessRulesRegistry:
             '"reinforced_confidence": <float or null>}'
         )
         try:
-            import requests  # noqa: PLC0415
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 256,
-                "temperature": 0,
-            }
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-            resp = requests.post(
-                f"{_FUELIX_BASE}/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            choices = resp.json().get("choices") or []
-            text = ""
-            if choices:
-                msg = choices[0].get("message") or {}
-                text = str(msg.get("content") or "")
+            text = ask_ai(prompt, temperature=0, max_tokens=256)
             m = re.search(r"\{[^}]+\}", text, re.DOTALL)
             if m:
                 return json.loads(m.group(0))
@@ -359,14 +336,7 @@ class BusinessRulesRegistry:
         Falls back to including all pattern rules if the API key is unavailable
         or the call fails (conservative — better to over-apply than miss a rule).
         """
-        api_key = os.getenv("FUELIX_API_KEY")
-        model = os.getenv("FUELIX_MODEL", "claude-sonnet-4")
-        if not api_key:
-            return pattern_rules
-
         try:
-            import requests  # noqa: PLC0415
-
             rules_desc = "\n".join(
                 f'{i + 1}. rule_id={r.rule_id}  pattern="{r.pattern_description or r.rule_description}"'
                 for i, r in enumerate(pattern_rules)
@@ -382,29 +352,7 @@ class BusinessRulesRegistry:
                 f"Pattern rules to evaluate:\n{rules_desc}\n\n"
                 'Return JSON only: {"matching_rule_ids": ["<rule_id>", ...]}'
             )
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 256,
-                "temperature": 0,
-            }
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            }
-            resp = requests.post(
-                f"{_FUELIX_BASE}/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            resp_json = resp.json()
-            choices = resp_json.get("choices") or []
-            text = ""
-            if choices:
-                msg = choices[0].get("message") or {}
-                text = str(msg.get("content") or "")
+            text = ask_ai(prompt, temperature=0, max_tokens=256)
 
             m = re.search(r"\{[^}]+\}", text, re.DOTALL)
             if m:

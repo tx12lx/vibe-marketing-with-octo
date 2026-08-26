@@ -70,6 +70,7 @@ from core.brief_fetcher import BriefFetcher  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 from core.business_rules_registry import BusinessRulesRegistry  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
+from core.ai_client import ask_ai  # noqa: E402
 from core.audit_logger import AuditLogger, HITL_YES, HITL_NO, HITL_REVIEW_YES, HITL_REVIEW_NO  # noqa: E402
 
 
@@ -1419,12 +1420,6 @@ def _maybe_run_failure_digest(knowledge_ctx: Optional[KnowledgeContext]) -> None
         if total == 0 or total % _FAILURE_DIGEST_THRESHOLD != 0:
             return
 
-        api_key = os.getenv("FUELIX_API_KEY", "")
-        model = os.getenv("FUELIX_MODEL", "claude-sonnet-4")
-        if not api_key:
-            return
-
-        import requests as _requests  # noqa: PLC0415
         recent = records[-_FAILURE_DIGEST_THRESHOLD:]
         summaries = "\n".join(
             f'{i+1}. [{r.get("intent_type","?")}] correction="{r.get("correction_description","")}" '
@@ -1444,24 +1439,7 @@ def _maybe_run_failure_digest(knowledge_ctx: Optional[KnowledgeContext]) -> None
             "If no strong pattern: return {\"proposed_rules\": []}.\n"
             "Output JSON only."
         )
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1024,
-            "temperature": 0,
-        }
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        resp = _requests.post(
-            "https://api.fuelix.ai/v1/chat/completions",
-            headers=headers, json=payload, timeout=60,
-        )
-        resp.raise_for_status()
-
-        choices = resp.json().get("choices") or []
-        text = ""
-        if choices:
-            msg = choices[0].get("message") or {}
-            text = str(msg.get("content") or "")
+        text = ask_ai(prompt, temperature=0, max_tokens=1024)
 
         import re as _re  # noqa: PLC0415
         m = _re.search(r"\{.*\}", text, _re.DOTALL)

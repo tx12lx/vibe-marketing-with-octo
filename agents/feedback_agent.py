@@ -30,7 +30,7 @@ from typing import Optional, TYPE_CHECKING
 
 import requests
 from dotenv import load_dotenv
-from core.resilience import resilient_post
+from core.ai_client import ask_ai
 
 if TYPE_CHECKING:
     from core.knowledge_context import KnowledgeContext
@@ -969,61 +969,15 @@ class FeedbackAgent(BaseAgent):
         user_content: list[dict],
         thinking: Optional[dict] = None,
     ) -> str:
-        """Call Fuel iX with prompt-cached knowledge context.
+        """Ask the AI, with knowledge context folded into the prompt.
 
-        Pass thinking={"type": "enabled", "budget_tokens": N} to enable extended
-        thinking for ambiguous correction interpretation.  Requires
-        FUELIX_EXTENDED_THINKING=1 and Fuel iX support.  Temperature is forced to 1.
+        Note: `thinking` (Fuel iX/Anthropic extended-thinking mode) and
+        prompt-caching have no Gemini equivalent wired up here -- this is a
+        plain call regardless of what's passed for `thinking`.
         """
-        use_thinking = thinking is not None and bool(os.getenv("FUELIX_EXTENDED_THINKING"))
-        beta = (
-            "prompt-caching-2024-07-31,interleaved-thinking-2025-05-14"
-            if use_thinking
-            else "prompt-caching-2024-07-31"
-        )
-        payload: dict = {
-            "model": self._model,
-            "system": system_blocks,
-            "messages": [{"role": "user", "content": user_content}],
-            "max_tokens": 2048,
-            "temperature": 1 if use_thinking else 0,
-        }
-        if use_thinking:
-            payload["thinking"] = thinking
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-            "anthropic-beta": beta,
-        }
-        resp = resilient_post(
-            f"{_FUELIX_BASE}/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=120,
-        )
-        return self._extract_text(resp.json())
-
-    @staticmethod
-    def _extract_text(resp_json: dict) -> str:
-        choices = resp_json.get("choices") or []
-        if choices:
-            msg = choices[0].get("message") or {}
-            content = msg.get("content") or ""
-            if isinstance(content, list):
-                return "".join(
-                    block.get("text", "")
-                    for block in content
-                    if block.get("type") == "text"
-                ).strip()
-            return str(content).strip()
-        content = resp_json.get("content") or []
-        if isinstance(content, list):
-            return "".join(
-                block.get("text", "")
-                for block in content
-                if block.get("type") == "text"
-            ).strip()
-        return ""
+        system = "\n\n".join(b.get("text", "") for b in system_blocks)
+        prompt = "\n\n".join(b.get("text", "") for b in user_content)
+        return ask_ai(prompt, system=system, temperature=0, max_tokens=2048)
 
     @staticmethod
     def _extract_json(text: str) -> Optional[dict]:

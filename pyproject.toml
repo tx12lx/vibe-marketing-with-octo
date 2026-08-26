@@ -27,6 +27,8 @@ dependencies = [
     "slack-bolt>=1.18.0",
     # Phase 4: Google Chat interface (preserved, activate when GCP permissions resolved)
     "google-api-python-client>=2.118.0",
+    # AI reasoning -- Gemini via Vertex AI (replaces Fuel iX)
+    "google-genai>=1.0.0",
 ]
 
 [project.optional-dependencies]
