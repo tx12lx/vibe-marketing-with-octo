@@ -26,14 +26,11 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import requests
 from dotenv import load_dotenv
 from core.ai_client import ask_ai
-
-if TYPE_CHECKING:
-    from core.knowledge_context import KnowledgeContext
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -52,19 +49,6 @@ from pydantic_schemas import (  # noqa: E402
     SemanticFailureLog,
 )
 from core.base_agent import BaseAgent  # noqa: E402
-
-import importlib.util as _ilu  # noqa: E402
-if "core.business_rules_registry" not in sys.modules:
-    _spec = _ilu.spec_from_file_location(
-        "core.business_rules_registry",
-        _ROOT_DIR / "core" / "business_rules_registry.py",
-    )
-    _mod = _ilu.module_from_spec(_spec)
-    sys.modules["core.business_rules_registry"] = _mod
-    _spec.loader.exec_module(_mod)
-del _ilu
-
-from core.business_rules_registry import BusinessRulesRegistry  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 
 _FUELIX_BASE = "https://api.fuelix.ai"
@@ -171,7 +155,7 @@ class FeedbackAgent(BaseAgent):
         self._api_key: Optional[str] = os.getenv("FUELIX_API_KEY")
         self._model: str = os.getenv("FUELIX_MODEL", "claude-sonnet-4")
         self._input: Optional[FeedbackInput] = None
-        self._registry = BusinessRulesRegistry(_RULES_PATH)
+        self._registry = None  # knowledge layer removed; rebuilt in a later step
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
         self._non_interactive: bool = False
         self._pending_clarification: str = ""

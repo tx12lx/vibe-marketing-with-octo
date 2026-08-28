@@ -20,7 +20,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 _HITL_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _HITL_DIR.parent
@@ -40,10 +40,6 @@ from pydantic_schemas import (  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 
 _FEEDBACK_DIR = _ROOT_DIR / "Vibe OCTO Feedback"
-
-if TYPE_CHECKING:
-    from core.glossary import GlossaryManager
-    from knowledge_base.tier_index import GoldTierIndex
 
 # SQL noise tokens excluded from glossary gap detection.
 _SQL_NOISE: frozenset[str] = frozenset({

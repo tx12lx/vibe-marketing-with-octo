@@ -1,13 +1,10 @@
 """
 core/resilience.py -- Centralized retry logic and startup health checks.
 
-Retry policy for Fuel iX API calls: 1s -> 2s -> 4s, max 3 retries.
-  Retries on HTTP 429, 500, 502, 503, 504 and network errors.
-
-Retry policy for BigQuery calls: same backoff schedule.
+Retry policy for BigQuery calls: 1s -> 2s -> 4s, max 3 retries.
   Retries on ServiceUnavailable and ResourceExhausted (quota) errors.
 
-Phase 5B: run_startup_health_check() gates the session on Fuel iX reachability,
+run_startup_health_check() gates the session on Gemini reachability,
   BigQuery ADC validity, and knowledge index presence.
 """
 from __future__ import annotations
@@ -17,63 +14,10 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-import requests
-
 _log = logging.getLogger(__name__)
-
-# HTTP status codes that warrant a retry on Fuel iX calls
-_FUELIX_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 # BQ exception class names that warrant a retry
 _BQ_RETRYABLE_NAMES = frozenset({"ServiceUnavailable", "ResourceExhausted"})
-
-
-def resilient_post(
-    url: str,
-    *,
-    max_retries: int = 3,
-    backoff_base: float = 1.0,
-    **kwargs: Any,
-) -> requests.Response:
-    """POST with exponential backoff retry on transient Fuel iX errors.
-
-    Retries on:
-      - HTTP 429, 500, 502, 503, 504  (transient server errors)
-      - requests.ConnectionError       (network drop)
-      - requests.Timeout               (API unresponsive)
-
-    Backoff schedule: backoff_base * (2 ** attempt) seconds.
-    Defaults: 1s -> 2s -> 4s for max_retries=3.
-    On the final attempt all errors propagate to the caller unchanged.
-    """
-    last_exc: Optional[Exception] = None
-    for attempt in range(max_retries + 1):
-        try:
-            resp = requests.post(url, **kwargs)
-            if resp.status_code in _FUELIX_RETRYABLE_STATUS and attempt < max_retries:
-                delay = backoff_base * (2 ** attempt)
-                _log.warning(
-                    "Fuel iX HTTP %d on attempt %d/%d — retrying in %.0fs",
-                    resp.status_code, attempt + 1, max_retries, delay,
-                )
-                time.sleep(delay)
-                continue
-            resp.raise_for_status()
-            return resp
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            last_exc = exc
-            if attempt == max_retries:
-                raise
-            delay = backoff_base * (2 ** attempt)
-            _log.warning(
-                "Fuel iX connection error on attempt %d/%d: %s — retrying in %.0fs",
-                attempt + 1, max_retries, type(exc).__name__, delay,
-            )
-            time.sleep(delay)
-
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("resilient_post: exhausted all retries with no response")
 
 
 def resilient_bq_query(
@@ -148,28 +92,14 @@ def _check_bq(project: str) -> tuple[str, str]:
 
 
 def _check_knowledge(artifacts_dir: Path) -> tuple[str, str]:
-    """Verify the knowledge index exists and contains at least one campaign. Returns (status, plain-English message)."""
-    try:
-        import json
-        idx_path = Path(artifacts_dir) / "semantic_knowledge_index.json"
-        if not idx_path.exists():
-            return "FAIL", (
-                "No campaign data was found. To load it, run:\n"
-                "    python -m knowledge_base.vibe_octo_knowledge --full-refresh"
-            )
-        data = json.loads(idx_path.read_text(encoding="utf-8"))
-        campaigns = data.get("campaigns", [])
-        if not campaigns:
-            return "FAIL", (
-                "Campaign data is empty. To reload it, run:\n"
-                "    python -m knowledge_base.vibe_octo_knowledge --full-refresh"
-            )
-        return "OK", ""
-    except Exception as exc:
-        return "FAIL", (
-            f"Campaign data could not be read ({type(exc).__name__}). Try running:\n"
-            "    python -m knowledge_base.vibe_octo_knowledge --full-refresh"
-        )
+    """Report the knowledge layer's status. Returns (status, plain-English message).
+
+    The old knowledge layer was removed and is being rebuilt from the ground
+    up (see the project plan) -- this always reports a WARN for now rather
+    than a broken FAIL pointing at a deleted ingestion command. Sizing still
+    works during this gap, just without glossary hints or business rules.
+    """
+    return "WARN", "The knowledge layer is being rebuilt -- sizing works, but without glossary or business-rule context yet."
 
 
 def run_startup_health_check(

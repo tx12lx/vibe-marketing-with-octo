@@ -1,3 +1,10 @@
+"""core/pii_masking.py -- PII-aware schema fetch and result masking for BigQuery.
+
+Ported as-is from the legacy `Vibe OCTO Quant/bq_reporter/bq_client.py`, which
+was only reachable through a Python editable-install link pointing at a
+project folder that no longer exists (the project was renamed). This is a
+relocation, not a redesign -- the masking rules are unchanged.
+"""
 import json
 import time
 import warnings
@@ -179,7 +186,7 @@ def get_schema(
     forces a fresh fetch. The cache key includes project + datasets + tables,
     so changing scope invalidates automatically.
 
-    If ``table_names`` is provided, only those specific tables are fetched —
+    If ``table_names`` is provided, only those specific tables are fetched --
     no full dataset listing. Otherwise all VIEWs/MATERIALIZED_VIEWs are
     included (or all objects when ``views_only=False``).
     """
@@ -207,60 +214,3 @@ def get_schema(
         except Exception:
             pass  # cache write failures are non-fatal
     return schema
-
-
-def dry_run_query(sql: str, project: str) -> tuple[bool, str | None, int]:
-    """Validate SQL with BigQuery without executing it.
-
-    Returns:
-        (is_valid, error_message, bytes_processed)
-        - is_valid: True if BigQuery accepts the SQL
-        - error_message: None on success, or the exception text on failure
-        - bytes_processed: BigQuery's cost estimate in bytes (0 on failure)
-    """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        client = bigquery.Client(project=project)
-    job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
-    try:
-        job = client.query(sql, job_config=job_config)
-        return True, None, int(job.total_bytes_processed or 0)
-    except Exception as exc:
-        return False, str(exc), 0
-
-
-def format_bytes(n: int) -> str:
-    """Human-readable byte count for cost-estimate display."""
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
-
-
-def run_query(sql: str, project: str, max_results: int = 100) -> tuple[list[dict], list[str]]:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        client = bigquery.Client(project=project)
-    job = client.query(sql)
-    result = job.result()
-
-    columns = [field.name for field in result.schema]
-    masked = {c for c in columns if _is_filter_only_pii(c)}
-
-    rows: list[dict] = []
-    for row in result:
-        if len(rows) >= max_results:
-            break
-        out = {}
-        for col in columns:
-            val = row[col]
-            if val is None:
-                out[col] = ""
-            elif col in masked:
-                out[col] = "***"
-            else:
-                out[col] = str(val)
-        rows.append(out)
-
-    return rows, columns

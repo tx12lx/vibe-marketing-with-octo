@@ -712,7 +712,7 @@ body {
 
 <!-- Pilot disclaimer -->
 <div class="pilot-banner">
-  This is an early pilot, currently shared under one person's data access. Please don't paste in sensitive customer information.
+  This tool is in a limited pilot. Please avoid pasting sensitive personal information into your questions.
 </div>
 
 <!-- Messages -->
@@ -900,9 +900,9 @@ body {
       ? data.discrepancy_flags.map(f => `<div class="flag-box">Advisory: ${esc(f)}</div>`).join('')
       : '';
 
-    const headerTitle = hasAudience && hasBrief ? 'Audience + brief — Vibe OCTO'
-                      : hasAudience             ? 'Audience audit log — Vibe OCTO Quant'
-                      :                          'Campaign brief — Vibe OCTO Briefing';
+    const headerTitle = hasAudience && hasBrief ? 'Audience & campaign brief'
+                      : hasAudience             ? 'Audience breakdown'
+                      :                          'Campaign brief';
 
     return `
       <div class="card">

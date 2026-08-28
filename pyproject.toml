@@ -18,17 +18,12 @@ dependencies = [
     "google-auth>=2.23.0",
     # PDF extraction (brief fetcher)
     "pdfplumber>=0.10.0",
-    # Numpy for optional dense-embedding cosine similarity
-    "numpy>=1.26.0",
-    # Phase 4: HTTP API server (shared by Slack and Google Chat interfaces)
+    # HTTP API server (web front end)
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
-    # Phase 4: Slack interface (active)
-    "slack-bolt>=1.18.0",
-    # Phase 4: Google Chat interface (preserved, activate when GCP permissions resolved)
-    "google-api-python-client>=2.118.0",
-    # AI reasoning -- Gemini via Vertex AI (replaces Fuel iX)
+    # AI reasoning -- Gemini via Vertex AI
     "google-genai>=1.0.0",
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -39,8 +34,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "knowledge_base*", "schema_discovery*", "hitl*", "tools*", "agents*", "api*"]
+include = ["core*", "hitl*", "agents*", "api*"]
 
 [project.scripts]
 vibe-octo = "vibe_orchestrator:main"
-vibe-ingest = "knowledge_base.vibe_octo_knowledge:main"

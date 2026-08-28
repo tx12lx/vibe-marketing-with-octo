@@ -46,12 +46,6 @@ from pydantic_schemas import (
 )
 from core.base_agent import BaseAgent
 from core.thought_display import ThoughtDisplay  # noqa: E402
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from core.knowledge_context import KnowledgeContext
-
-_FUELIX_BASE = "https://api.fuelix.ai"
-_DEFAULT_MODEL = "claude-sonnet-4"
 
 _QUANT_SYSTEM = (
     "You are Vibe OCTO Quant, a BigQuery technical auditor for a Canadian telecom "
@@ -619,13 +613,9 @@ class QuantAgent(BaseAgent):
     OUTPUT_SCHEMA = QuantAuditLog
 
     def __init__(self) -> None:
-        self._api_key = os.getenv("FUELIX_API_KEY")
-        if not self._api_key:
-            raise RuntimeError("FUELIX_API_KEY not set in Vibe OCTO Quant/.env")
-        self._model = os.getenv("FUELIX_MODEL", _DEFAULT_MODEL)
         self._default_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
         self._default_dataset = os.getenv("BQ_DATASET", "adobe")
-        self._schema_cache = _QUANT_DIR / ".schema_cache.json"
+        self._schema_cache = _ROOT_DIR / ".quant_schema_cache.json"
         self._last_sql: str = ""
         self._session_context: str = ""
         self._runtime_schema: str = ""
@@ -820,7 +810,7 @@ class QuantAgent(BaseAgent):
 
     def _fetch_schema(self, project: str, dataset: str) -> str:
         try:
-            from bq_reporter.bq_client import get_schema  # type: ignore
+            from core.pii_masking import get_schema
 
             return get_schema(
                 project,
@@ -945,7 +935,7 @@ class QuantAgent(BaseAgent):
 def _mask_pii(rows: list[dict]) -> list[dict]:
     """Remove hidden PII columns and mask filter-only PII values in-place."""
     try:
-        from bq_reporter.bq_client import _is_pii, _is_filter_only_pii  # type: ignore
+        from core.pii_masking import _is_pii, _is_filter_only_pii
     except ImportError:
         return rows
 

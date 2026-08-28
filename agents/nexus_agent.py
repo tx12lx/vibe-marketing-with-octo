@@ -36,15 +36,15 @@ from core.ai_client import ask_ai
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
-# Original subdirectory — used only for .env loading (orchestrator already loads it;
-# this is a safety net for standalone execution).
+# Original subdirectory -- referenced by the (now-unreachable, briefing-only)
+# taxonomy-brief helpers below. Kept only so those methods don't hit a
+# NameError if something still calls them; slated for removal alongside the
+# rest of the briefing machinery.
 _NEXUS_DIR = _ROOT_DIR / "Vibe OCTO Nexus"
 
 for _p in [str(_ROOT_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
-load_dotenv(_NEXUS_DIR / ".env")
 
 from pydantic_schemas import (
     AdHocSizingRequest,
@@ -58,13 +58,8 @@ from core.base_agent import BaseAgent  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 
 if TYPE_CHECKING:
-    from knowledge_base.tier_index import GoldTierIndex
-    from knowledge_base.ingester import GoldCampaignRecord
     from quant_agent import QuantAgent
-    from core.knowledge_context import KnowledgeContext
 
-_FUELIX_BASE = "https://api.fuelix.ai"
-_DEFAULT_MODEL = "claude-sonnet-4"
 _MAX_TOKENS_BUILD = 4096
 _MAX_TOKENS_QUERY = 8192
 
@@ -469,10 +464,6 @@ class NexusAgent(BaseAgent):
         )
 
     def __init__(self) -> None:
-        self._api_key = os.getenv("FUELIX_API_KEY")
-        if not self._api_key:
-            raise RuntimeError("FUELIX_API_KEY not set in Vibe OCTO Nexus/.env")
-        self._model = os.getenv("FUELIX_MODEL", _DEFAULT_MODEL)
         self._bq_project = os.getenv("BQ_PROJECT", "bi-srv-hsmdet-pr-7b9def")
         self._bq_table = os.getenv(
             "BQ_TABLE",
@@ -650,10 +641,7 @@ class NexusAgent(BaseAgent):
             retrieved_campaigns=retrieved_campaigns_xml,
         )
         try:
-            raw = self._call_simple(
-                prompt,
-                thinking={"type": "enabled", "budget_tokens": 8000},
-            )
+            raw = self._call_simple(prompt)
             data = self._extract_json(raw)
             if not data.get("knowledge_sources_consulted"):
                 data["knowledge_sources_consulted"] = sources_consulted
@@ -675,24 +663,6 @@ class NexusAgent(BaseAgent):
             knowledge_sources=classification.knowledge_sources_consulted,
         )
         return classification
-
-    def classify_and_route(self, query: str) -> tuple[str, "dict | None"]:
-        """Backward-compatible wrapper. Routes via classify_intent() internally.
-
-        Returns ("WORKFLOW_A", None) or ("WORKFLOW_B", brief_dict).
-        New code should call classify_intent() directly.
-        """
-        intent = self.classify_intent(query)
-
-        execution_intents = {"campaign_execution", "brief_generation", "brief_qa"}
-        if intent.intent_type in execution_intents and intent.campaign_identified and intent.campaign_code:
-            brief = self._find_brief_for_campaign(intent.campaign_code)
-            if brief:
-                ThoughtDisplay.progress("Found it! Preparing your targeting blueprint...")
-                return "WORKFLOW_B", brief
-            ThoughtDisplay.progress("Couldn't locate that campaign. Switching to custom audience mode...")
-
-        return "WORKFLOW_A", None
 
     def answer_general_question(self, query: str) -> str:
         """Answer a knowledge-layer question without triggering SQL or brief generation.
@@ -1400,17 +1370,8 @@ class NexusAgent(BaseAgent):
     # API calls
     # ------------------------------------------------------------------
 
-    def _call_simple(
-        self,
-        user_prompt: str,
-        thinking: Optional[dict] = None,
-    ) -> str:
-        """Single call — no caching. Used for the one-time taxonomy build.
-
-        Pass thinking={"type": "enabled", "budget_tokens": N} to enable extended
-        thinking.  Requires FUELIX_EXTENDED_THINKING=1 and Fuel iX support.
-        When thinking is active temperature is forced to 1 (Anthropic requirement).
-        """
+    def _call_simple(self, user_prompt: str) -> str:
+        """Single call — no caching. Used for the one-time taxonomy build."""
         system = (
             _NEXUS_SYSTEM + "\n\n" + self._session_context
             if self._session_context
@@ -1419,15 +1380,11 @@ class NexusAgent(BaseAgent):
         return ask_ai(user_prompt, system=system, temperature=0, max_tokens=_MAX_TOKENS_BUILD)
 
     def _call_with_cached_taxonomy(self, user_query: str) -> str:
-        """Call Fuel iX with the full knowledge context pinned as an ephemeral cached block.
+        """Call Gemini with the full knowledge context prepended to the prompt.
 
         When a KnowledgeContext is available (startup injection via set_knowledge_context),
-        uses it as the cached block -- it contains all loaded GOLD campaigns, business rules,
-        glossary, and patterns.  Falls back to the sparse taxonomy for backward compat.
-
-        The first content block carries cache_control: ephemeral per the Anthropic
-        prompt-caching spec (beta header activates it). On a cache hit the input
-        tokens for the knowledge block are charged at ~10% of normal cost.
+        uses it as the knowledge block -- it contains all loaded GOLD campaigns, business
+        rules, glossary, and patterns. Falls back to the sparse taxonomy for backward compat.
         """
         if self._knowledge_ctx is not None:
             _campaign_count = getattr(self._knowledge_ctx, "campaign_count", "all")

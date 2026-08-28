@@ -587,7 +587,6 @@ def _process_correction_sync(
 def _save_confirmed_correction_sync(session, pending: dict) -> dict:
     with _write_lock:
         try:
-            from core.business_rules_registry import BusinessRulesRegistry  # noqa: PLC0415
             rules = pending.get("rules", [])
             interpretation = pending.get("interpretation", "")
             text = pending.get("text", "")

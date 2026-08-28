@@ -7,9 +7,7 @@ periodically):
   2. Run:  python update_personal_project.py
 
 This sets the new project as your ADC quota project (fixes the "no quota
-project" warning). Campaign-metadata queries pick up the same value
-automatically the next time the app starts, since knowledge_base/config.py
-reads PERSONAL_PROJECT_ID from the same .env file -- no other change needed.
+project" warning).
 
 Requires the gcloud CLI to already be installed and signed in
 (gcloud auth application-default login).
@@ -46,8 +44,6 @@ def main() -> None:
         sys.exit(result.returncode)
 
     print("\nDone. Restart the web app for this to take effect.")
-    print(f"Campaign-metadata queries will also use '{project_id}' automatically")
-    print("(same PERSONAL_PROJECT_ID, read by knowledge_base/config.py).")
 
 
 if __name__ == "__main__":

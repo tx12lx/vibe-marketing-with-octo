@@ -58,60 +58,13 @@ for _p in _SEARCH_DIRS:
 
 from agents.nexus_agent import NexusAgent  # noqa: E402
 from agents.quant_agent import QuantAgent  # noqa: E402
-from agents.briefing_agent import BriefingAgent  # noqa: E402
 from agents.feedback_agent import FeedbackAgent  # noqa: E402
-from core.knowledge_context import KnowledgeContext  # noqa: E402
 from pydantic_schemas import AdHocSizingRequest, BriefingOutput, BusinessRule, FeedbackInput, FeedbackOutput, IntentClassification, NexusErrorPayload, QuantAuditLog, UniversalJSONSpec  # noqa: E402
-from schema_discovery.discovery_layer import SchemaDiscoveryLayer, SchemaColumn, SchemaSnapshot  # noqa: E402
-from knowledge_base.tier_index import GoldTierIndex  # noqa: E402
 from hitl.audit_loop import HITLAuditLoop  # noqa: E402
-from core.glossary import GlossaryManager  # noqa: E402
-from core.brief_fetcher import BriefFetcher  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
-from core.business_rules_registry import BusinessRulesRegistry  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
 from core.ai_client import ask_ai  # noqa: E402
 from core.audit_logger import AuditLogger, HITL_YES, HITL_NO, HITL_REVIEW_YES, HITL_REVIEW_NO  # noqa: E402
-
-
-_ADC_REAUTH_CMD = (
-    "gcloud auth application-default login "
-    "--scopes=https://www.googleapis.com/auth/cloud-platform,"
-    "https://www.googleapis.com/auth/spreadsheets.readonly,"
-    "https://www.googleapis.com/auth/drive.readonly"
-)
-
-
-def _check_sheets_credentials() -> bool:
-    """Probe Sheets API at startup and print actionable guidance on failure.
-
-    Returns True if access is confirmed (or inconclusive due to a 403 on a
-    restricted sheet — scope is present). Returns False when a 401 confirms
-    the ADC token is missing the spreadsheets.readonly scope.
-    """
-    fetcher = BriefFetcher()
-    ok, reason = fetcher.probe_sheets_access()
-    if ok:
-        return True
-
-    sep = "!" * 68
-    print(f"\n{sep}")
-    print("  SHEETS ACCESS ERROR — Brief data will be EMPTY until fixed.")
-    print(sep)
-    print()
-    print(f"  {reason}")
-    print()
-    print("  Run this command in a terminal, then restart Vibe OCTO:")
-    print()
-    print(f"      python refresh_adc_scopes.py")
-    print()
-    print("  OR run gcloud directly:")
-    print()
-    print(f"      {_ADC_REAUTH_CMD}")
-    print()
-    print(sep)
-    print()
-    return False
 
 
 def _silence_google_noise() -> None:
@@ -131,96 +84,6 @@ def _silence_google_noise() -> None:
 # ---------------------------------------------------------------------------
 # Disk-based artifact loaders (used at startup instead of live BQ ingestion)
 # ---------------------------------------------------------------------------
-
-def _load_adobe_schema_from_disk(artifacts_path: Path) -> Optional[SchemaSnapshot]:
-    """Build a SchemaSnapshot from the pre-built adobe_schema.json artifact.
-
-    Returns None if the file is missing or malformed so callers can fall back
-    to a live SchemaDiscoveryLayer fetch.
-    """
-    adobe_path = artifacts_path / "adobe_schema.json"
-    if not adobe_path.exists():
-        return None
-    try:
-        data = json.loads(adobe_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-    project = data.get("project", "bi-srv-hsmdet-pr-7b9def")
-    dataset = data.get("dataset", "adobe")
-    snapshot_at = data.get("snapshot_at", "")
-
-    columns: list[SchemaColumn] = []
-    for view_name, view_data in data.get("views", {}).items():
-        is_view = view_data.get("type") == "VIEW"
-        for col in view_data.get("columns", []):
-            columns.append(SchemaColumn(
-                table_name=view_name,
-                column_name=col.get("name", ""),
-                data_type=col.get("type", ""),
-                is_nullable=col.get("nullable", True),
-                description="",
-                is_view=is_view,
-            ))
-
-    return SchemaSnapshot(
-        project=project,
-        datasets=[dataset],
-        columns=columns,
-        fetched_at=snapshot_at,
-        cache_hit=True,
-    )
-
-
-def _print_kb_status(
-    gold_index: GoldTierIndex,
-    snapshot: SchemaSnapshot,
-    rule_count: int,
-    knowledge_ctx: Optional["KnowledgeContext"] = None,
-) -> None:
-    """Print a plain-English startup summary."""
-    kb_meta: dict = {}
-    try:
-        kb_meta = json.loads((_ARTIFACTS_DIR / "semantic_knowledge_index.json").read_text(encoding="utf-8"))
-    except Exception:
-        pass
-
-    summary = kb_meta.get("ingestion_summary") or kb_meta
-    total = summary.get("total_campaigns") or (summary.get("gold_count") or 0) + (summary.get("bronze_count") or 0)
-    generated_at = kb_meta.get("generated_at") or ""
-
-    date_display = "unknown"
-    stale_count = 0
-    _STALE_DAYS = 7
-    now = datetime.now(tz=timezone.utc)
-    if generated_at:
-        try:
-            dt = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
-            date_display = dt.strftime(f"%B {dt.day}, %Y")
-        except Exception:
-            date_display = generated_at[:10]
-    for c in kb_meta.get("campaigns", []):
-        ts = c.get("last_ingested_at") or c.get("ingested_at", "")
-        if not ts:
-            continue
-        try:
-            ingested = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            if ingested.tzinfo is None:
-                ingested = ingested.replace(tzinfo=timezone.utc)
-            if (now - ingested).days > _STALE_DAYS:
-                stale_count += 1
-        except Exception:
-            pass
-
-    print()
-    print("Vibe Marketing with OCTO is ready.")
-    campaign_line = f"{total:,} campaigns loaded" if total else "Campaigns loaded"
-    print(f"{campaign_line}, data last updated {date_display}.")
-    if stale_count > 0:
-        print(f"Note: {stale_count} campaign(s) haven't been updated in over a week. To refresh, run:")
-        print("  python -m knowledge_base.vibe_octo_knowledge --incremental")
-    print()
-
 
 # ---------------------------------------------------------------------------
 # Dynamic knowledge config loaders
@@ -439,7 +302,7 @@ _AGENTS_DIR = _ROOT / "agents"
 _AGENT_REGISTRY, _INTENT_ROUTING = _discover_agents(_AGENTS_DIR)
 
 # Verify all required agents were discovered; fall back to explicit import if not.
-_REQUIRED = {"nexus": NexusAgent, "quant": QuantAgent, "briefing": BriefingAgent, "feedback": FeedbackAgent}
+_REQUIRED = {"nexus": NexusAgent, "quant": QuantAgent, "feedback": FeedbackAgent}
 for _k, _cls in _REQUIRED.items():
     if _k not in _AGENT_REGISTRY:
         logging.warning("_discover_agents: expected agent '%s' not found — using explicit import", _k)
@@ -1804,63 +1667,42 @@ class RequestResult:
 
 
 def build_runtime() -> VibeRuntime:
-    """Initialize all shared runtime objects. Called by both main() and the API server."""
+    """Initialize all shared runtime objects. Called by both main() and the API server.
+
+    The knowledge layer (glossary, business rules, campaign knowledge, schema
+    cache) was removed completely and is being rebuilt from the ground up --
+    see the project plan. Until the new one is wired in, every knowledge-layer
+    slot below is intentionally None/empty: the sizing pipeline still runs,
+    just without glossary hints, business rules, or campaign context.
+    """
     load_dotenv(_NEXUS_DIR / ".env")
     load_dotenv(_QUANT_DIR / ".env", override=False)
-    load_dotenv(_BRIEFING_DIR / ".env", override=False)
     load_dotenv(_FEEDBACK_DIR / ".env", override=False)
-
-    gold_index = GoldTierIndex()
-    gold_index.load_from_file(_ARTIFACTS_DIR / "semantic_knowledge_index.json")
-
-    schema_discovery = SchemaDiscoveryLayer(
-        project="bi-srv-hsmdet-pr-7b9def",
-        datasets=["adobe", "campaign_data", "gch_current"],
-        cache_path=_ROOT / ".sdl_schema_cache.json",
-    )
-    snapshot = _load_adobe_schema_from_disk(_ARTIFACTS_DIR)
-    if snapshot is None:
-        snapshot = schema_discovery.get_snapshot()
-    schema_str = schema_discovery.to_prompt_string(snapshot)
 
     nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
     quant: QuantAgent = _AGENT_REGISTRY["quant"]()
-    briefing: BriefingAgent = _AGENT_REGISTRY["briefing"]()
 
-    knowledge_ctx = KnowledgeContext(
-        artifacts_dir=_ARTIFACTS_DIR,
-        root_dir=_ROOT,
-    )
-
-    quant.set_runtime_schema(schema_str)
-    nexus.set_runtime_schema_snapshot(snapshot.to_dict())
-    briefing.set_runtime_schema(schema_str)
-    briefing.set_gold_index(gold_index)
-
-    nexus.set_knowledge_context(knowledge_ctx)
-    quant.set_knowledge_context(knowledge_ctx)
-    briefing.set_knowledge_context(knowledge_ctx)
+    nexus.set_runtime_schema_snapshot({})
+    quant.set_runtime_schema("")
 
     hitl = HITLAuditLoop(
-        gold_index=gold_index,
-        glossary_manager=GlossaryManager(str(_GLOSSARY_PATH)),
+        gold_index=None,
+        glossary_manager=None,
         failure_log_path=_ROOT / "semantic_failure_log.json",
         registry_path=_ROOT / "verified_app_registry.json",
     )
-    hitl.set_knowledge_context(knowledge_ctx)
 
-    rules_registry = BusinessRulesRegistry(_BUSINESS_RULES_PATH)
     audit_logger = AuditLogger(logs_dir=_ROOT / "logs")
 
     return VibeRuntime(
         nexus=nexus,
         quant=quant,
-        briefing=briefing,
-        gold_index=gold_index,
-        schema_snapshot=snapshot,
+        briefing=None,
+        gold_index=None,
+        schema_snapshot=None,
         hitl=hitl,
-        rules_registry=rules_registry,
-        knowledge_ctx=knowledge_ctx,
+        rules_registry=None,
+        knowledge_ctx=None,
         audit_logger=audit_logger,
     )
 
@@ -1935,7 +1777,7 @@ def process_core_request(
             intent,
             query,
             rt.gold_index,
-            rt.schema_snapshot.to_dict(),
+            rt.schema_snapshot.to_dict() if rt.schema_snapshot is not None else {},
             rt.rules_registry,
             allow_interactive=False,
             session_memory=session_memory,
@@ -1983,14 +1825,15 @@ def main() -> None:
 
     rt = build_runtime()
 
-    _print_kb_status(rt.gold_index, rt.schema_snapshot, len(rt.rules_registry._rules), rt.knowledge_ctx)
+    print("Vibe Marketing with OCTO is ready. (Knowledge layer is being rebuilt --")
+    print("sizing runs without glossary hints or business rules for now.)")
+    print()
 
-    # Phase 5B: startup health gate — checks Fuel iX, BigQuery ADC, and knowledge index.
-    # Session proceeds on OK/WARN; blocked only on FAIL.
-    _fuelix_api_key = os.getenv("FUELIX_API_KEY", "")
+    # Startup health gate — checks Gemini and BigQuery ADC. Session proceeds on
+    # OK/WARN; blocked only on FAIL.
     _bq_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
     run_startup_health_check(
-        api_key=_fuelix_api_key,
+        api_key="",
         bq_project=_bq_project,
         artifacts_dir=_ARTIFACTS_DIR,
     )
@@ -2000,7 +1843,7 @@ def main() -> None:
         rt.quant,
         rt.briefing,
         rt.gold_index,
-        rt.schema_snapshot.to_dict(),
+        {},
         rt.hitl,
         rt.rules_registry,
         rt.knowledge_ctx,

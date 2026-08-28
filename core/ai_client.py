@@ -1,25 +1,38 @@
 """core/ai_client.py -- shared AI-calling helper (Gemini via Vertex AI).
 
 Replaces the Fuel iX-specific request building and response parsing that
-used to be duplicated, with real variation, across ten call sites in
-agents/*.py, core/business_rules_registry.py, and vibe_orchestrator.py.
-Every caller now builds a prompt and gets plain text back through one
-function instead of hand-rolling headers, an OpenAI-style payload, and its
-own response-parsing logic.
+used to be duplicated, with real variation, across call sites in agents/*.py
+and vibe_orchestrator.py. Every caller now builds a prompt and gets plain
+text back through one function instead of hand-rolling headers, an
+OpenAI-style payload, and its own response-parsing logic.
 
 Auth: relies on Application Default Credentials -- the attached service
 account when running on a GCE VM, no separate API key needed.
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Optional
 
+import httpx
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
+_log = logging.getLogger(__name__)
+
+# Same retry policy as core/resilience.py's resilient_bq_query:
+# exponential backoff, 1s -> 2s -> 4s, max 3 retries. Retries on rate limits
+# (429) and server errors (5xx); anything else (including permission errors)
+# propagates immediately -- retrying a 403 just wastes three round trips.
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 1.0
+
+# GEMINI_LOCATION's fallback must stay a Canadian region -- data-residency
+# requirement (confirmed with Alex Everitt) -- even if the env var is unset.
 _PROJECT = os.getenv("GEMINI_PROJECT_ID", "cdo-hsm-adobe-fda-np-9fbb44")
-_LOCATION = os.getenv("GEMINI_LOCATION", "us-central1")
+_LOCATION = os.getenv("GEMINI_LOCATION", "northamerica-northeast1")
 _MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 _client: Optional[genai.Client] = None
@@ -51,12 +64,35 @@ def ask_ai(
         temperature=temperature,
         max_output_tokens=max_tokens,
     )
-    response = _get_client().models.generate_content(
-        model=_MODEL,
-        contents=prompt,
-        config=config,
-    )
-    return (response.text or "").strip()
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            response = _get_client().models.generate_content(
+                model=_MODEL,
+                contents=prompt,
+                config=config,
+            )
+            return (response.text or "").strip()
+        except errors.ServerError as exc:
+            last_exc = exc
+            retryable = True
+        except errors.ClientError as exc:
+            last_exc = exc
+            retryable = exc.code == 429  # rate limited -- worth retrying
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            retryable = True  # network drop / unresponsive -- worth retrying
+        if not retryable or attempt == _MAX_RETRIES:
+            raise last_exc
+        delay = _BACKOFF_BASE * (2 ** attempt)
+        _log.warning(
+            "Gemini call failed on attempt %d/%d (%s) -- retrying in %.0fs",
+            attempt + 1, _MAX_RETRIES, type(last_exc).__name__, delay,
+        )
+        time.sleep(delay)
+
+    raise last_exc  # pragma: no cover -- loop always returns or raises above
 
 
 def check_ai_reachable() -> tuple[str, str]:
