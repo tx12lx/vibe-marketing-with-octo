@@ -1,0 +1,16 @@
+# Explicit, not relying on gcloud's implicit .gitignore-based defaults --
+# this file exists specifically so real secrets in .env can never end up
+# baked into a Cloud Run container image by accident.
+.git/
+.gitignore
+.env
+.env.example
+__pycache__/
+*.pyc
+.venv/
+venv/
+knowledge/data/
+logs/
+*.md
+.claude/
+relay/
