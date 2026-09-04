@@ -69,10 +69,24 @@ def handle_mention(event: dict, client) -> None:
 
     if session.awaiting_correction:
         session.awaiting_correction = False
-        threading.Thread(target=_handle_correction_text, args=(text, channel, thread_ts, session), daemon=True).start()
+        threading.Thread(target=_safe_handle_correction_text, args=(text, channel, thread_ts, session), daemon=True).start()
         return
 
-    threading.Thread(target=_handle_query, args=(text, channel, thread_ts, session), daemon=True).start()
+    threading.Thread(target=_safe_handle_query, args=(text, channel, thread_ts, session), daemon=True).start()
+
+
+def _safe_handle_query(text: str, channel: str, thread_ts: str, session: SlackSessionState) -> None:
+    """Wraps _handle_query so a bug never leaves the user staring at 'Got it!'
+    forever with no further reply -- any unhandled exception is reported back,
+    not swallowed by a dying background thread."""
+    try:
+        _handle_query(text, channel, thread_ts, session)
+    except Exception as exc:  # noqa: BLE001 -- last-resort catch so the thread always reports back
+        _log.exception("Unhandled error while processing a query: %s", exc)
+        try:
+            _post(app.client, channel, thread_ts, "I ran into an unexpected problem.", blocks=fmt.format_error("I ran into an unexpected problem.", str(exc)[:300]))
+        except Exception:
+            pass  # if even posting the error fails, there's nothing more we can do
 
 
 def _handle_query(text: str, channel: str, thread_ts: str, session: SlackSessionState) -> None:
@@ -120,6 +134,17 @@ def _handle_query(text: str, channel: str, thread_ts: str, session: SlackSession
         blocks = fmt.format_sizing_result(result.log)
 
     _post(client, channel, thread_ts, f"Result for: {text}", blocks=blocks)
+
+
+def _safe_handle_correction_text(text: str, channel: str, thread_ts: str, session: SlackSessionState) -> None:
+    try:
+        _handle_correction_text(text, channel, thread_ts, session)
+    except Exception as exc:  # noqa: BLE001 -- last-resort catch so the thread always reports back
+        _log.exception("Unhandled error while processing a correction: %s", exc)
+        try:
+            _post(app.client, channel, thread_ts, "I ran into an unexpected problem.", blocks=fmt.format_error("I ran into an unexpected problem.", str(exc)[:300]))
+        except Exception:
+            pass
 
 
 def _handle_correction_text(text: str, channel: str, thread_ts: str, session: SlackSessionState) -> None:
