@@ -25,7 +25,7 @@ import logging
 from typing import Optional
 
 from knowledge import retrieve
-from knowledge.store import add_business_rule, connect
+from knowledge.store import add_business_rule, connect, record_feedback_event
 
 _log = logging.getLogger(__name__)
 
@@ -90,12 +90,32 @@ class KnowledgeContext:
 
     def add_rule(self, rule) -> None:
         with connect() as conn:
-            add_business_rule(
+            rule_id = add_business_rule(
                 conn,
                 rule_text=rule.rule_description,
                 scope=rule.scope,
                 campaign_code=rule.campaign_code,
                 added_by=rule.verified_by,
+            )
+            record_feedback_event(
+                conn,
+                event_type="correction",
+                campaign_code=rule.campaign_code,
+                raw_text=rule.raw_correction,
+                structured_rule_id=rule_id,
+                user_identity=rule.verified_by,
+            )
+
+    def record_confirmation(self, campaign_code: Optional[str], user_identity: str = "unknown") -> None:
+        """Permanently record a 'looks good' confirmation -- called from
+        api/web_app.py's _handle_hitl_yes_sync, shared by the web and Slack
+        front ends."""
+        with connect() as conn:
+            record_feedback_event(
+                conn,
+                event_type="confirm",
+                campaign_code=campaign_code,
+                user_identity=user_identity,
             )
 
     def _load(self) -> None:

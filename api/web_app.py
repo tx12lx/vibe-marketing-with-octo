@@ -496,6 +496,15 @@ def _handle_hitl_yes_sync(session, session_id: str) -> dict:
         except Exception as exc:
             _log.warning("HITL yes write failed: %s", exc)
 
+        if _runtime.knowledge_ctx is not None:
+            try:
+                _runtime.knowledge_ctx.record_confirmation(
+                    campaign_code=spec.campaign_code,
+                    user_identity=getattr(session, "last_sender", "web"),
+                )
+            except Exception as exc:
+                _log.warning("Knowledge-layer confirmation write failed: %s", exc)
+
         if _runtime.audit_logger is not None:
             try:
                 _runtime.audit_logger.log_hitl_resolution(
