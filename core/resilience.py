@@ -10,6 +10,7 @@ run_startup_health_check() gates the session on Gemini reachability,
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -18,6 +19,32 @@ _log = logging.getLogger(__name__)
 
 # BQ exception class names that warrant a retry
 _BQ_RETRYABLE_NAMES = frozenset({"ServiceUnavailable", "ResourceExhausted"})
+
+# This tool must only ever read from campaign data -- never write to it. This
+# is enforced twice: the service account itself has no data-write role on
+# that project (the real backstop), and this check, so a bug in AI-generated
+# SQL is caught here too, not just relied on to never happen.
+_WRITE_KEYWORDS = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CALL)\b",
+    re.IGNORECASE,
+)
+
+
+class ReadOnlyViolation(RuntimeError):
+    """Raised when generated SQL isn't a plain read query -- refused before it ever reaches BigQuery."""
+
+
+def assert_read_only_sql(sql: str) -> None:
+    stripped = sql.strip().lstrip("(")
+    if not re.match(r"^(SELECT|WITH)\b", stripped, re.IGNORECASE):
+        raise ReadOnlyViolation(
+            "Generated SQL must start with SELECT or WITH -- refusing to run anything else."
+        )
+    match = _WRITE_KEYWORDS.search(sql)
+    if match:
+        raise ReadOnlyViolation(
+            f"Generated SQL contains a write/DDL keyword ('{match.group(0)}') -- refusing to run it."
+        )
 
 
 def resilient_bq_query(
@@ -35,6 +62,7 @@ def resilient_bq_query(
     Returns a list of row dicts on success.
     All other exceptions propagate immediately.
     """
+    assert_read_only_sql(sql)
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries + 1):
         try:

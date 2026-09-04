@@ -1176,6 +1176,8 @@ class NexusAgent(BaseAgent):
 
             client = bigquery.Client(project=self._bq_project)
             query = _TAXONOMY_BQ_QUERY.format(table=self._bq_table)
+            from core.resilience import assert_read_only_sql
+            assert_read_only_sql(query)
             rows = [dict(r) for r in client.query(query).result()]
             if rows:
                 return rows
@@ -1250,6 +1252,8 @@ class NexusAgent(BaseAgent):
             ORDER BY list_pull_date DESC
             LIMIT 100
             """
+            from core.resilience import assert_read_only_sql
+            assert_read_only_sql(query_str)
             rows = [dict(r) for r in client.query(query_str).result()]
             if rows:
                 return {"deployments": rows}

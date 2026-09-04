@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS columns (
     mode         TEXT NOT NULL DEFAULT '',
     sensitivity  TEXT NOT NULL DEFAULT 'none',  -- 'hidden' | 'filter_only' | 'none'
     description  TEXT NOT NULL DEFAULT '',
+    description_source TEXT NOT NULL DEFAULT '',  -- 'bigquery' | 'ai_generated' | 'human' | ''
+    value_notes  TEXT NOT NULL DEFAULT '',  -- human-confirmed notes on what values this column actually holds
     synced_at    TEXT NOT NULL,
     PRIMARY KEY (project, dataset, table_name, column_name)
 );
@@ -144,6 +146,20 @@ def get_column_count(conn: sqlite3.Connection, project: str, dataset: str, table
     return row["n"] if row else 0
 
 
+def get_human_confirmed_columns(conn: sqlite3.Connection, project: str, dataset: str, table_name: str) -> dict:
+    """Every column in this table a human has personally confirmed, keyed by column name.
+
+    A schema re-sync must never silently overwrite these -- same principle as
+    business rules being append-only rather than blindly replaced.
+    """
+    rows = conn.execute(
+        "SELECT column_name, description, description_source, value_notes FROM columns "
+        "WHERE project=? AND dataset=? AND table_name=? AND description_source='human'",
+        (project, dataset, table_name),
+    ).fetchall()
+    return {r["column_name"]: dict(r) for r in rows}
+
+
 def replace_table_columns(
     conn: sqlite3.Connection,
     project: str,
@@ -155,9 +171,13 @@ def replace_table_columns(
     """Atomically replace one table's stored columns, refusing a suspicious drop.
 
     ``columns`` is a list of dicts with keys: name, data_type, mode,
-    sensitivity, description. Raises IntegrityError instead of writing when the
-    new column count looks like silent data loss compared to what was already
-    stored -- this is the concrete fix for the old system's silent-overwrite bug.
+    sensitivity, description, description_source, value_notes. Raises
+    IntegrityError instead of writing when the new column count looks like
+    silent data loss compared to what was already stored -- this is the
+    concrete fix for the old system's silent-overwrite bug. Any column a human
+    has personally confirmed (description_source='human') keeps that
+    human-provided description and value_notes across the re-sync, even if
+    this fresh fetch would otherwise overwrite it.
     """
     previous_count = get_column_count(conn, project, dataset, table_name)
     new_count = len(columns)
@@ -173,6 +193,7 @@ def replace_table_columns(
             f"Refusing to sync {project}.{dataset}.{table_name}: no columns were found at all."
         )
 
+    human_confirmed = get_human_confirmed_columns(conn, project, dataset, table_name)
     now = _now()
     with conn:
         conn.execute(
@@ -186,18 +207,47 @@ def replace_table_columns(
             "DELETE FROM columns WHERE project=? AND dataset=? AND table_name=?",
             (project, dataset, table_name),
         )
+        rows = []
+        for c in columns:
+            confirmed = human_confirmed.get(c["name"])
+            if confirmed is not None:
+                description = confirmed["description"]
+                description_source = "human"
+                value_notes = confirmed["value_notes"]
+            else:
+                description = c.get("description", "")
+                description_source = c.get("description_source", "")
+                value_notes = c.get("value_notes", "")
+            rows.append((
+                project, dataset, table_name,
+                c["name"], c["data_type"], c.get("mode", ""),
+                c.get("sensitivity", "none"), description, description_source, value_notes, now,
+            ))
         conn.executemany(
             "INSERT INTO columns "
-            "(project, dataset, table_name, column_name, data_type, mode, sensitivity, description, synced_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    project, dataset, table_name,
-                    c["name"], c["data_type"], c.get("mode", ""),
-                    c.get("sensitivity", "none"), c.get("description", ""), now,
-                )
-                for c in columns
-            ],
+            "(project, dataset, table_name, column_name, data_type, mode, sensitivity, "
+            "description, description_source, value_notes, synced_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+
+
+def confirm_column(
+    conn: sqlite3.Connection,
+    project: str,
+    dataset: str,
+    table_name: str,
+    column_name: str,
+    description: str,
+    value_notes: str = "",
+) -> None:
+    """Record a human-confirmed answer for one column. Marked description_source='human'
+    so a future schema re-sync (replace_table_columns) never overwrites it."""
+    with conn:
+        conn.execute(
+            "UPDATE columns SET description=?, description_source='human', value_notes=?, synced_at=? "
+            "WHERE project=? AND dataset=? AND table_name=? AND column_name=?",
+            (description, value_notes, _now(), project, dataset, table_name, column_name),
         )
 
 

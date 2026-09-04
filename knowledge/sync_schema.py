@@ -116,12 +116,15 @@ def sync_table(fully_qualified_name: str) -> None:
             "mode": field.mode or "",
             "sensitivity": _sensitivity_for(field.name),
             "description": field.description or "",
+            "description_source": "bigquery" if field.description else "",
+            "value_notes": "",
         })
 
     generated = _describe_missing_columns(table_id, columns)
     for c in columns:
         if not c["description"] and c["name"] in generated:
             c["description"] = generated[c["name"]]
+            c["description_source"] = "ai_generated"
 
     table_description = _describe_table(table_id, table.description or "", columns)
 
