@@ -87,7 +87,10 @@ def get_table_schema_text(table_names: Optional[list[str]] = None) -> str:
         if row["sensitivity"] == "filter_only":
             tokens.append("-- filter/count only, values masked")
         if row["column_description"]:
-            tokens.append(f"-- {row['column_description']}")
+            marker = " (confirmed)" if row["description_source"] == "human" else " (unconfirmed guess)"
+            tokens.append(f"-- {row['column_description']}{marker}")
+        if row["value_notes"]:
+            tokens.append(f"-- actual values: {row['value_notes']}")
         lines.append("  " + " ".join(tokens))
     if current_table is not None:
         parts.append(f"TABLE `{'.'.join(current_table)}` (\n" + ",\n".join(lines) + "\n)")

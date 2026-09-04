@@ -257,7 +257,8 @@ def get_table_schema_rows(conn: sqlite3.Connection, table_names: Optional[list[s
         placeholders = ",".join("?" for _ in table_names)
         query = (
             "SELECT t.project, t.dataset, t.table_name, t.description AS table_description, "
-            "c.column_name, c.data_type, c.mode, c.sensitivity, c.description AS column_description "
+            "c.column_name, c.data_type, c.mode, c.sensitivity, c.description AS column_description, "
+            "c.description_source, c.value_notes "
             "FROM tables t JOIN columns c "
             "ON t.project=c.project AND t.dataset=c.dataset AND t.table_name=c.table_name "
             f"WHERE t.table_name IN ({placeholders}) "
@@ -266,7 +267,8 @@ def get_table_schema_rows(conn: sqlite3.Connection, table_names: Optional[list[s
         return conn.execute(query, table_names).fetchall()
     return conn.execute(
         "SELECT t.project, t.dataset, t.table_name, t.description AS table_description, "
-        "c.column_name, c.data_type, c.mode, c.sensitivity, c.description AS column_description "
+        "c.column_name, c.data_type, c.mode, c.sensitivity, c.description AS column_description, "
+        "c.description_source, c.value_notes "
         "FROM tables t JOIN columns c "
         "ON t.project=c.project AND t.dataset=c.dataset AND t.table_name=c.table_name "
         "ORDER BY t.table_name, c.column_name"
