@@ -24,6 +24,8 @@ dependencies = [
     # AI reasoning -- Gemini via Vertex AI
     "google-genai>=1.0.0",
     "httpx>=0.27.0",
+    # Slack front end (temporary, laptop-only proof-of-concept)
+    "slack-bolt>=1.18.0",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +36,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "hitl*", "agents*", "api*"]
+include = ["core*", "hitl*", "agents*", "api*", "knowledge*"]
 
 [project.scripts]
 vibe-octo = "vibe_orchestrator:main"

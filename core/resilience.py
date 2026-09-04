@@ -92,14 +92,14 @@ def _check_bq(project: str) -> tuple[str, str]:
 
 
 def _check_knowledge(artifacts_dir: Path) -> tuple[str, str]:
-    """Report the knowledge layer's status. Returns (status, plain-English message).
+    """Report the knowledge layer's real, live status. Returns (status, plain-English message).
 
-    The old knowledge layer was removed and is being rebuilt from the ground
-    up (see the project plan) -- this always reports a WARN for now rather
-    than a broken FAIL pointing at a deleted ingestion command. Sizing still
-    works during this gap, just without glossary hints or business rules.
+    `artifacts_dir` is unused -- kept for call-site compatibility with the old
+    signature. The real check is knowledge.store.check_health(): can the
+    database be opened, and does it have synced tables in it.
     """
-    return "WARN", "The knowledge layer is being rebuilt -- sizing works, but without glossary or business-rule context yet."
+    from knowledge.store import check_health  # noqa: PLC0415
+    return check_health()
 
 
 def run_startup_health_check(

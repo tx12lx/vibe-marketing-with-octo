@@ -51,6 +51,7 @@ def ask_ai(
     system: Optional[str] = None,
     temperature: float = 0.0,
     max_tokens: int = 1024,
+    thinking_budget: Optional[int] = None,
 ) -> str:
     """Ask the AI a question and get plain text back.
 
@@ -58,11 +59,19 @@ def ask_ai(
     by hand (headers, OpenAI-style payload) and then parsing
     choices[0].message.content out of the JSON response -- Gemini's own
     response.text already gives back clean, assembled text.
+
+    thinking_budget: Gemini 2.5 models spend part of max_tokens on hidden
+    "thinking" tokens before writing the visible response -- for straightforward
+    formatting tasks (e.g. "reply with only this JSON shape") that hidden spend
+    can silently truncate the real output. Pass thinking_budget=0 to disable it
+    for calls that don't need deliberation; leave unset (default) for anything
+    that benefits from it, like SQL generation or intent classification.
     """
     config = types.GenerateContentConfig(
         system_instruction=system,
         temperature=temperature,
         max_output_tokens=max_tokens,
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget) if thinking_budget is not None else None,
     )
 
     last_exc: Optional[Exception] = None
@@ -88,6 +97,53 @@ def ask_ai(
         delay = _BACKOFF_BASE * (2 ** attempt)
         _log.warning(
             "Gemini call failed on attempt %d/%d (%s) -- retrying in %.0fs",
+            attempt + 1, _MAX_RETRIES, type(last_exc).__name__, delay,
+        )
+        time.sleep(delay)
+
+    raise last_exc  # pragma: no cover -- loop always returns or raises above
+
+
+_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+_EMBEDDING_DIMENSIONALITY = 768
+
+
+def embed_text(text: str) -> list[float]:
+    """Turn a sentence into a set of numbers that captures its meaning.
+
+    Used by the knowledge layer to find similar past campaigns, rules, or
+    glossary terms by what they mean rather than by matching stray words.
+    Same Gemini/Vertex AI client, project, and region as ask_ai() -- this is
+    purely the "find related things" piece working alongside it, not a
+    separate AI system. Truncated to 768 dimensions (Matryoshka-style output
+    truncation, confirmed supported by this model) -- plenty for a corpus of
+    this size, at a fraction of the storage/compute of the full 3072.
+    """
+    config = types.EmbedContentConfig(output_dimensionality=_EMBEDDING_DIMENSIONALITY)
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            response = _get_client().models.embed_content(
+                model=_EMBEDDING_MODEL,
+                contents=[text],
+                config=config,
+            )
+            return list(response.embeddings[0].values)
+        except errors.ServerError as exc:
+            last_exc = exc
+            retryable = True
+        except errors.ClientError as exc:
+            last_exc = exc
+            retryable = exc.code == 429
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            last_exc = exc
+            retryable = True
+        if not retryable or attempt == _MAX_RETRIES:
+            raise last_exc
+        delay = _BACKOFF_BASE * (2 ** attempt)
+        _log.warning(
+            "Gemini embedding call failed on attempt %d/%d (%s) -- retrying in %.0fs",
             attempt + 1, _MAX_RETRIES, type(last_exc).__name__, delay,
         )
         time.sleep(delay)

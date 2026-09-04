@@ -1669,21 +1669,29 @@ class RequestResult:
 def build_runtime() -> VibeRuntime:
     """Initialize all shared runtime objects. Called by both main() and the API server.
 
-    The knowledge layer (glossary, business rules, campaign knowledge, schema
-    cache) was removed completely and is being rebuilt from the ground up --
-    see the project plan. Until the new one is wired in, every knowledge-layer
-    slot below is intentionally None/empty: the sizing pipeline still runs,
-    just without glossary hints, business rules, or campaign context.
+    The new knowledge layer (knowledge/) is wired in here: one KnowledgeContext
+    instance fills both the knowledge_ctx and rules_registry slots (one clear
+    front door for both reading knowledge and persisting confirmed feedback),
+    bound into Nexus and Quant via their existing set_knowledge_context()
+    setters. gold_index/schema_snapshot/briefing remain None -- brief and
+    campaign-lookup intents are unaffected by this change and stay out of
+    scope until the full Step 4 cutover.
     """
     load_dotenv(_NEXUS_DIR / ".env")
     load_dotenv(_QUANT_DIR / ".env", override=False)
     load_dotenv(_FEEDBACK_DIR / ".env", override=False)
+
+    from knowledge.context import KnowledgeContext  # noqa: PLC0415
 
     nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
     quant: QuantAgent = _AGENT_REGISTRY["quant"]()
 
     nexus.set_runtime_schema_snapshot({})
     quant.set_runtime_schema("")
+
+    knowledge_ctx = KnowledgeContext()
+    nexus.set_knowledge_context(knowledge_ctx)
+    quant.set_knowledge_context(knowledge_ctx)
 
     hitl = HITLAuditLoop(
         gold_index=None,
@@ -1701,8 +1709,8 @@ def build_runtime() -> VibeRuntime:
         gold_index=None,
         schema_snapshot=None,
         hitl=hitl,
-        rules_registry=None,
-        knowledge_ctx=None,
+        rules_registry=knowledge_ctx,
+        knowledge_ctx=knowledge_ctx,
         audit_logger=audit_logger,
     )
 

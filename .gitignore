@@ -20,6 +20,10 @@ application_default_credentials.json
 *.cache.json
 .sdl_schema_cache.json
 *.schema_cache.json
+.quant_schema_cache.json
+
+# The knowledge layer's own database -- generated, machine-specific data, not code
+knowledge/data/
 
 # Runtime-generated knowledge base artifacts
 knowledge_base/artifacts/
