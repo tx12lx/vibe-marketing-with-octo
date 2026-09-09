@@ -53,9 +53,13 @@ def get_glossary_summary() -> str:
     return "\n".join(f"- {t['term']}: {t['definition']}" for t in terms)
 
 
-def get_active_rules_text(scope: Optional[str] = None, campaign_code: Optional[str] = None) -> str:
+def get_active_rules_text(
+    scope: Optional[str] = None,
+    campaign_code: Optional[str] = None,
+    table_name: Optional[str] = None,
+) -> str:
     with connect() as conn:
-        rules = get_active_rules(conn, scope=scope, campaign_code=campaign_code)
+        rules = get_active_rules(conn, scope=scope, campaign_code=campaign_code, table_name=table_name)
     if not rules:
         return "(no confirmed business rules yet)"
     return "\n".join(f"- [{r['scope']}] {r['rule_text']}" for r in rules)

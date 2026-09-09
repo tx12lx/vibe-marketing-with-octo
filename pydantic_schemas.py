@@ -55,7 +55,7 @@ class AudienceSizingRequest(BaseModel):
     exclusion_layers: Optional[list[str]] = None
     optimization_context: Optional[str] = None
     bq_project: str = "bi-srv-hsmdet-pr-7b9def"
-    bq_dataset: str = "adobe"
+    bq_dataset: str = "campaign_data"
 
     @field_validator("filters")
     @classmethod
@@ -135,7 +135,7 @@ class UniversalJSONSpec(BaseModel):
 
     # BQ routing
     bq_project: str = "bi-srv-hsmdet-pr-7b9def"
-    bq_dataset: str = "adobe"
+    bq_dataset: str = "campaign_data"
 
     # Runtime audit output
     discrepancy_flags: list[str] = []

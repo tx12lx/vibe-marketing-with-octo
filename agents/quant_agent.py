@@ -317,7 +317,7 @@ class QuantAgent(BaseAgent):
 
     def __init__(self) -> None:
         self._default_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
-        self._default_dataset = os.getenv("BQ_DATASET", "adobe")
+        self._default_dataset = os.getenv("BQ_DATASET", "campaign_data")
         self._last_sql: str = ""
         self._session_context: str = ""
         self._runtime_schema: str = ""

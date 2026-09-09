@@ -77,7 +77,10 @@ CREATE TABLE IF NOT EXISTS glossary_terms (
 CREATE TABLE IF NOT EXISTS business_rules (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     rule_text      TEXT NOT NULL,
-    scope          TEXT NOT NULL DEFAULT 'universal',  -- 'campaign' | 'pattern' | 'universal'
+    scope          TEXT NOT NULL DEFAULT 'universal',  -- 'table' | 'campaign' | 'pattern' | 'universal'
+    project        TEXT,  -- set when scope='table': which table this rule applies to
+    dataset        TEXT,
+    table_name     TEXT,
     campaign_code  TEXT,
     added_by       TEXT NOT NULL DEFAULT 'unknown',
     added_at       TEXT NOT NULL,
@@ -113,6 +116,20 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+_BUSINESS_RULES_MIGRATION_COLUMNS = ("project", "dataset", "table_name")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns to an already-existing database created before this shape
+    existed. ALTER TABLE ... ADD COLUMN is safe to run repeatedly -- each one
+    is skipped once it's already present."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(business_rules)")}
+    for column in _BUSINESS_RULES_MIGRATION_COLUMNS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE business_rules ADD COLUMN {column} TEXT")
+    conn.commit()
+
+
 def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     path = db_path or _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +139,7 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
     conn.commit()
+    _migrate(conn)
     return conn
 
 
@@ -299,15 +317,22 @@ def add_business_rule(
     conn: sqlite3.Connection,
     rule_text: str,
     scope: str = "universal",
+    project: Optional[str] = None,
+    dataset: Optional[str] = None,
+    table_name: Optional[str] = None,
     campaign_code: Optional[str] = None,
     added_by: str = "unknown",
     supersedes_id: Optional[int] = None,
 ) -> int:
+    """scope='table' rules are contained to one table (project/dataset/table_name) so a
+    rule written for one table's conventions (e.g. its default sizing filters) can never
+    leak into a different table's query just because both rules are 'active'."""
     with conn:
         cur = conn.execute(
-            "INSERT INTO business_rules (rule_text, scope, campaign_code, added_by, added_at, status) "
-            "VALUES (?, ?, ?, ?, ?, 'active')",
-            (rule_text, scope, campaign_code, added_by, _now()),
+            "INSERT INTO business_rules "
+            "(rule_text, scope, project, dataset, table_name, campaign_code, added_by, added_at, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+            (rule_text, scope, project, dataset, table_name, campaign_code, added_by, _now()),
         )
         new_id = cur.lastrowid
         if supersedes_id is not None:
@@ -318,7 +343,15 @@ def add_business_rule(
         return new_id
 
 
-def get_active_rules(conn: sqlite3.Connection, scope: Optional[str] = None, campaign_code: Optional[str] = None) -> list[sqlite3.Row]:
+def get_active_rules(
+    conn: sqlite3.Connection,
+    scope: Optional[str] = None,
+    campaign_code: Optional[str] = None,
+    table_name: Optional[str] = None,
+) -> list[sqlite3.Row]:
+    """table_name filters to that table's own scope='table' rules, plus every rule that
+    isn't table-scoped at all (universal/campaign/pattern) -- a table-scoped rule for a
+    different table is never returned."""
     query = "SELECT * FROM business_rules WHERE status='active'"
     params: list = []
     if scope is not None:
@@ -327,6 +360,9 @@ def get_active_rules(conn: sqlite3.Connection, scope: Optional[str] = None, camp
     if campaign_code is not None:
         query += " AND (campaign_code=? OR campaign_code IS NULL)"
         params.append(campaign_code)
+    if table_name is not None:
+        query += " AND (table_name=? OR table_name IS NULL)"
+        params.append(table_name)
     query += " ORDER BY added_at"
     return conn.execute(query, params).fetchall()
 

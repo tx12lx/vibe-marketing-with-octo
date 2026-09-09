@@ -61,6 +61,7 @@ class KnowledgeContext:
     @property
     def nexus_context(self) -> str:
         return (
+            "TABLE SCHEMA (use only these real column names)\n" + retrieve.get_table_schema_text() + "\n\n"
             "GLOSSARY\n" + retrieve.get_glossary_summary() + "\n\n"
             "CONFIRMED BUSINESS RULES\n" + retrieve.get_active_rules_text()
         )

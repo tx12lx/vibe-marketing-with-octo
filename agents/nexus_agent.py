@@ -166,7 +166,7 @@ Return exactly this JSON (no markdown):
   "exclusion_layers": ["<standard exclusion 1>", "<exclusion 2>"],
   "optimization_context": "<one sentence: strategic context for the Quant audit>",
   "bq_project": "bi-srv-hsmdet-pr-7b9def",
-  "bq_dataset": "adobe"
+  "bq_dataset": "campaign_data"
 }}"""
 
 _NL_PARSE_PROMPT = """A consultant has submitted an ad-hoc audience sizing request:
@@ -203,7 +203,7 @@ Return exactly this JSON (no markdown):
   "exclusion_layers": [],
   "optimization_context": "<3 sentences on cadence or channel safety — no historical references>",
   "bq_project": "bi-srv-hsmdet-pr-7b9def",
-  "bq_dataset": "adobe"
+  "bq_dataset": "campaign_data"
 }}"""
 
 _RETRY_PROMPT = """Using the taxonomy matrix above as your authoritative reference:
@@ -998,7 +998,7 @@ class NexusAgent(BaseAgent):
                 exclusion_layers=compiled.get("exclusion_layers") or None,
                 optimization_context=compiled.get("optimization_context") or None,
                 bq_project="bi-srv-hsmdet-pr-7b9def",
-                bq_dataset="adobe",
+                bq_dataset="campaign_data",
             )
         except ValidationError as exc:
             print(
