@@ -14,6 +14,13 @@ Run's own ingress, so nothing here needs to enforce that itself.
 up or restore the knowledge database by hand, since this container's local
 disk isn't persistent. It's exposed on the same app IAP already protects.
 
+/admin is a small page for the same purpose, reachable from a browser -- IAP
+only accepts an actual signed-in person, never a script, so this is the one
+way left to push an updated knowledge database to this specific service
+without a custom OAuth client and the GCP permissions that would take to set
+up. Protected by nothing here directly -- IAP in front of the whole service
+is what gates it, same as everything else this app serves.
+
 Run locally for testing:  python web_cloud_run.py
 Deployed via:              gcloud run deploy (see deploy notes in the repo)
 """
@@ -24,14 +31,91 @@ import os
 
 import uvicorn
 from fastapi import Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from knowledge.store import _db_path
+from knowledge.store import _db_path, connect
 from knowledge.sync_schema import main as sync_schema_main
 from api.web_app import app
 
 _log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def _status_summary() -> str:
+    try:
+        with connect() as conn:
+            tables = conn.execute("SELECT COUNT(*) AS n FROM tables").fetchone()["n"]
+            columns = conn.execute("SELECT COUNT(*) AS n FROM columns").fetchone()["n"]
+            confirmed = conn.execute(
+                "SELECT COUNT(*) AS n FROM columns WHERE description_source='human'"
+            ).fetchone()["n"]
+            rules = conn.execute("SELECT COUNT(*) AS n FROM business_rules WHERE status='active'").fetchone()["n"]
+            glossary = conn.execute("SELECT COUNT(*) AS n FROM glossary_terms").fetchone()["n"]
+        return (
+            f"{tables} table(s), {columns} column(s) synced ({confirmed} human-confirmed), "
+            f"{rules} active business rule(s), {glossary} glossary term(s)."
+        )
+    except Exception as exc:  # noqa: BLE001 -- shown to a human on an admin page, not swallowed silently
+        return f"Could not read the knowledge database: {exc}"
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page() -> HTMLResponse:
+    html = f"""<!doctype html>
+<title>Vibe OCTO -- knowledge database admin</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #222; }}
+  h1 {{ font-size: 1.3rem; }}
+  .status {{ background: #f4f4f4; border-radius: 6px; padding: 12px 16px; margin: 16px 0; }}
+  .box {{ border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin: 16px 0; }}
+  button {{ padding: 8px 16px; cursor: pointer; }}
+  #result {{ margin-top: 12px; font-weight: 600; }}
+</style>
+<h1>Knowledge database admin</h1>
+<p>This instance's own copy of the knowledge database, currently:</p>
+<div class="status">{_status_summary()}</div>
+
+<div class="box">
+  <h3>Download a backup</h3>
+  <p>Save this instance's current database to your computer before replacing it.</p>
+  <a href="/admin/knowledge-db"><button type="button">Download backup</button></a>
+</div>
+
+<div class="box">
+  <h3>Replace with an updated copy</h3>
+  <p>Choose a <code>vibe_octo_knowledge.db</code> file (e.g. from your laptop) to replace this
+     instance's database with it.</p>
+  <input type="file" id="dbfile" accept=".db">
+  <button type="button" onclick="uploadDb()">Upload and replace</button>
+  <div id="result"></div>
+</div>
+
+<script>
+async function uploadDb() {{
+  const input = document.getElementById('dbfile');
+  const result = document.getElementById('result');
+  if (!input.files.length) {{
+    result.textContent = 'Choose a file first.';
+    return;
+  }}
+  if (!confirm('This replaces this instance\\'s knowledge database right now. Continue?')) return;
+  result.textContent = 'Uploading...';
+  try {{
+    const resp = await fetch('/admin/knowledge-db', {{ method: 'POST', body: input.files[0] }});
+    const data = await resp.json();
+    if (resp.ok) {{
+      result.textContent = 'Done -- ' + data.bytes_written + ' bytes written. Reloading status...';
+      setTimeout(() => location.reload(), 1200);
+    }} else {{
+      result.textContent = 'Failed: ' + (data.error || resp.status);
+    }}
+  }} catch (err) {{
+    result.textContent = 'Failed: ' + err;
+  }}
+}}
+</script>
+"""
+    return HTMLResponse(content=html)
 
 
 @app.get("/admin/knowledge-db")
