@@ -1211,6 +1211,7 @@ def _run_adhoc_feedback(
     correction: str,
     knowledge_ctx: Optional[KnowledgeContext] = None,
     non_interactive: bool = False,
+    user_identity: str = "unknown",
 ) -> Optional[FeedbackOutput]:
     """Invoke FeedbackAgent for ad-hoc sizing, brief-only, and general-question corrections.
 
@@ -1219,6 +1220,12 @@ def _run_adhoc_feedback(
     can still extract and save universal rules that apply to future executions.
     Returns FeedbackOutput so callers can surface the interpretation summary or
     a clarifying question to the user.
+
+    user_identity is whoever is actually submitting this correction (a real
+    Slack user id, or the IAP-authenticated email for the web chat) -- it is
+    carried through to the saved BusinessRule.verified_by so a rule that will
+    govern every future user's results is never attributed to a placeholder
+    string instead of the person who actually approved it.
     """
     try:
         feedback_input = FeedbackInput(
@@ -1240,6 +1247,7 @@ def _run_adhoc_feedback(
             existing_rules=[],
             knowledge_tier=spec.campaign_tier if spec is not None else "BRONZE",
             raw_input_prompt=query,
+            user_identity=user_identity,
         )
         agent = FeedbackAgent()
         if knowledge_ctx is not None:

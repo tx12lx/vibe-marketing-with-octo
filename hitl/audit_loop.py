@@ -149,14 +149,19 @@ class HITLAuditLoop:
             spec.campaign_code, spec.campaign_sub_code, registry_entry
         )
 
-        self._gold_index.promote_in_memory(
-            camp_id=spec.campaign_code,
-            sub_camp_id=spec.campaign_sub_code,
-            targeting_summary=targeting_summary,
-            segment_summary=segment_summary,
-            medium=spec.medium,
-            cadence=spec.cadence,
-        )
+        # gold_index is None in the current architecture (the GOLD-tier index
+        # this promoted into was removed in the knowledge-layer rebuild; see
+        # knowledge/context.py). Skip rather than crash so a caller that still
+        # reaches this path degrades gracefully instead of silently failing.
+        if self._gold_index is not None:
+            self._gold_index.promote_in_memory(
+                camp_id=spec.campaign_code,
+                sub_camp_id=spec.campaign_sub_code,
+                targeting_summary=targeting_summary,
+                segment_summary=segment_summary,
+                medium=spec.medium,
+                cadence=spec.cadence,
+            )
 
         ThoughtDisplay.campaign_approved(spec.campaign_name)
 
@@ -195,9 +200,10 @@ class HITLAuditLoop:
         )
 
         self._append_failure_log(log_entry)
-        self._glossary_manager.patch_from_failure(log_entry)
+        if self._glossary_manager is not None:
+            self._glossary_manager.patch_from_failure(log_entry)
 
-        if spec.gold_blueprint_id:
+        if spec.gold_blueprint_id and self._gold_index is not None:
             self._gold_index.deprioritize(spec.campaign_code)
 
         # Write the correction as an absolute blueprint override in the registry.
@@ -480,6 +486,8 @@ class HITLAuditLoop:
         self, filters: list[str], exclusion_layers: list[str]
     ) -> list[str]:
         """Return filter/exclusion tokens not found in the loaded glossary terms."""
+        if self._glossary_manager is None:
+            return []
         known_terms: set[str] = set(self._glossary_manager.terms.keys())
         blob = " ".join(list(filters) + list(exclusion_layers)).lower()
         tokens = re.findall(r"\b([a-z][a-z0-9_]{2,})\b", blob)

@@ -15,13 +15,13 @@ from api.session_store import SessionState, SessionStore
 
 
 class SlackSessionState(SessionState):
-    """SessionState for a single Slack channel. Adds sender tracking."""
+    """SessionState for a single Slack channel.
 
-    __slots__ = ("last_sender",)
+    last_sender (and reviewed_this_result) now live on the base SessionState
+    itself -- this subclass no longer needs to redeclare them.
+    """
 
-    def __init__(self, channel_id: str) -> None:
-        super().__init__(channel_id)
-        self.last_sender: str = "unknown"
+    __slots__ = ()
 
 
 class SlackSessionStore(SessionStore):

@@ -25,7 +25,21 @@ import logging
 from typing import Optional
 
 from knowledge import retrieve
-from knowledge.store import add_business_rule, connect, record_feedback_event
+from knowledge.store import (
+    add_business_rule,
+    approve_rule,
+    connect,
+    get_pending_rules,
+    record_feedback_event,
+    reject_rule,
+)
+
+# Rules scoped this way govern every future user's results, not just the one
+# campaign the submitter is already working on -- they are staged for a
+# second person's approval rather than taking effect immediately. A
+# 'campaign'-scoped rule stays immediate: its blast radius is the same
+# campaign the submitter is already working on right now.
+_SCOPES_REQUIRING_REVIEW = frozenset({"universal", "pattern"})
 
 _log = logging.getLogger(__name__)
 
@@ -89,7 +103,17 @@ class KnowledgeContext:
 
     # -- write side, used by api/web_app.py's HITL/correction persistence ----
 
-    def add_rule(self, rule) -> None:
+    def add_rule(self, rule) -> dict:
+        """Save a rule extracted from a HITL correction.
+
+        Returns {"rule_id": int, "status": "active" | "pending_review"} so the
+        caller can tell the submitter which happened -- a 'campaign'-scoped
+        rule (contained to the one campaign they're already working on) goes
+        live immediately; a 'pattern' or 'universal' rule (governs every
+        future user's results) is staged as pending_review until a different
+        person calls approve_rule() on it.
+        """
+        status = "pending_review" if rule.scope in _SCOPES_REQUIRING_REVIEW else "active"
         with connect() as conn:
             rule_id = add_business_rule(
                 conn,
@@ -97,6 +121,7 @@ class KnowledgeContext:
                 scope=rule.scope,
                 campaign_code=rule.campaign_code,
                 added_by=rule.verified_by,
+                status=status,
             )
             record_feedback_event(
                 conn,
@@ -106,6 +131,23 @@ class KnowledgeContext:
                 structured_rule_id=rule_id,
                 user_identity=rule.verified_by,
             )
+        return {"rule_id": rule_id, "status": status}
+
+    def get_pending_rules(self) -> list[dict]:
+        """Every rule awaiting a second reviewer's approval, as plain dicts."""
+        with connect() as conn:
+            return [dict(r) for r in get_pending_rules(conn)]
+
+    def approve_rule(self, rule_id: int, approver_identity: str, note: str = "") -> None:
+        """Move a pending rule to active. Raises knowledge.store.MakerCheckerViolation
+        if approver_identity is the same person who submitted it -- this is the
+        maker-checker gate, enforced here in code rather than left to convention."""
+        with connect() as conn:
+            approve_rule(conn, rule_id, approved_by=approver_identity, note=note)
+
+    def reject_rule(self, rule_id: int, approver_identity: str, note: str = "") -> None:
+        with connect() as conn:
+            reject_rule(conn, rule_id, approved_by=approver_identity, note=note)
 
     def record_confirmation(self, campaign_code: Optional[str], user_identity: str = "unknown") -> None:
         """Permanently record a 'looks good' confirmation -- called from

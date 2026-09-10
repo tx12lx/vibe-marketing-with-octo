@@ -860,7 +860,7 @@ class FeedbackAgent(BaseAgent):
         return BusinessRule(
             rule_id=str(uuid.uuid4()),
             created_at=datetime.now(tz=timezone.utc).isoformat(),
-            verified_by="hitl_no_response",
+            verified_by=inp.user_identity or "unknown",
             raw_correction=inp.raw_correction,
             rule_description=inp.raw_correction,
             rule_type="general",
@@ -875,6 +875,8 @@ class FeedbackAgent(BaseAgent):
             cadence=inp.cadence if scope in ("campaign", "pattern") else None,
             priority=priority_map.get(scope, 1),
             applies_to_future=True,
+            overrides_acc_summary=False,
+            clarification_rounds=0,
             source="hitl_feedback_verbatim",
             confidence=0.7,
         )
@@ -885,7 +887,7 @@ class FeedbackAgent(BaseAgent):
         return BusinessRule(
             rule_id=str(uuid.uuid4()),
             created_at=datetime.now(tz=timezone.utc).isoformat(),
-            verified_by="hitl_no_response",
+            verified_by=inp.user_identity or "unknown",
             raw_correction=rule_dict.get("raw_text", inp.raw_correction),
             rule_description=rule_dict.get("understood_as", inp.raw_correction),
             rule_type=rule_dict.get("rule_type", "general"),

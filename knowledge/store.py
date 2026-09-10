@@ -84,8 +84,11 @@ CREATE TABLE IF NOT EXISTS business_rules (
     campaign_code  TEXT,
     added_by       TEXT NOT NULL DEFAULT 'unknown',
     added_at       TEXT NOT NULL,
-    status         TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'retired'
-    superseded_by  INTEGER
+    status         TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'pending_review' | 'rejected' | 'retired'
+    superseded_by  INTEGER,
+    approved_by    TEXT,  -- who moved this out of pending_review (must differ from added_by -- enforced in code)
+    approved_at    TEXT,
+    review_note    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS campaign_summaries (
@@ -116,7 +119,9 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-_BUSINESS_RULES_MIGRATION_COLUMNS = ("project", "dataset", "table_name")
+_BUSINESS_RULES_MIGRATION_COLUMNS = (
+    "project", "dataset", "table_name", "approved_by", "approved_at", "review_note",
+)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -323,16 +328,24 @@ def add_business_rule(
     campaign_code: Optional[str] = None,
     added_by: str = "unknown",
     supersedes_id: Optional[int] = None,
+    status: str = "active",
 ) -> int:
     """scope='table' rules are contained to one table (project/dataset/table_name) so a
     rule written for one table's conventions (e.g. its default sizing filters) can never
-    leak into a different table's query just because both rules are 'active'."""
+    leak into a different table's query just because both rules are 'active'.
+
+    status defaults to 'active' for a rule contained to the one campaign the
+    submitter is already working on. Callers pass status='pending_review' for
+    a rule whose scope is 'pattern' or 'universal' -- one that would govern
+    every future user's results -- so it sits inert (get_active_rules() only
+    ever returns status='active') until a second person calls approve_rule().
+    """
     with conn:
         cur = conn.execute(
             "INSERT INTO business_rules "
             "(rule_text, scope, project, dataset, table_name, campaign_code, added_by, added_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')",
-            (rule_text, scope, project, dataset, table_name, campaign_code, added_by, _now()),
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (rule_text, scope, project, dataset, table_name, campaign_code, added_by, _now(), status),
         )
         new_id = cur.lastrowid
         if supersedes_id is not None:
@@ -341,6 +354,68 @@ def add_business_rule(
                 (new_id, supersedes_id),
             )
         return new_id
+
+
+class MakerCheckerViolation(RuntimeError):
+    """Raised when the same identity that submitted a rule tries to approve it."""
+
+
+def get_pending_rules(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every rule staged for a second reviewer's approval, oldest first."""
+    return conn.execute(
+        "SELECT * FROM business_rules WHERE status='pending_review' ORDER BY added_at"
+    ).fetchall()
+
+
+def get_rule(conn: sqlite3.Connection, rule_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM business_rules WHERE id=?", (rule_id,)).fetchone()
+
+
+def approve_rule(
+    conn: sqlite3.Connection,
+    rule_id: int,
+    approved_by: str,
+    note: str = "",
+) -> None:
+    """Move a pending_review rule to active. Refuses (raises) when the approver
+    is the same identity that submitted it -- maker-checker enforced in code,
+    not just left as a convention someone could forget to follow."""
+    row = get_rule(conn, rule_id)
+    if row is None:
+        raise ValueError(f"No business rule with id {rule_id}.")
+    if row["status"] != "pending_review":
+        raise ValueError(f"Rule {rule_id} is not pending review (status={row['status']!r}).")
+    if (row["added_by"] or "").strip().lower() == (approved_by or "").strip().lower():
+        raise MakerCheckerViolation(
+            f"Rule {rule_id} was submitted by {row['added_by']!r} -- it must be approved "
+            "by someone else, not the same person who submitted it."
+        )
+    with conn:
+        conn.execute(
+            "UPDATE business_rules SET status='active', approved_by=?, approved_at=?, review_note=? "
+            "WHERE id=?",
+            (approved_by, _now(), note, rule_id),
+        )
+
+
+def reject_rule(
+    conn: sqlite3.Connection,
+    rule_id: int,
+    approved_by: str,
+    note: str = "",
+) -> None:
+    """Move a pending_review rule to rejected -- it never becomes active."""
+    row = get_rule(conn, rule_id)
+    if row is None:
+        raise ValueError(f"No business rule with id {rule_id}.")
+    if row["status"] != "pending_review":
+        raise ValueError(f"Rule {rule_id} is not pending review (status={row['status']!r}).")
+    with conn:
+        conn.execute(
+            "UPDATE business_rules SET status='rejected', approved_by=?, approved_at=?, review_note=? "
+            "WHERE id=?",
+            (approved_by, _now(), note, rule_id),
+        )
 
 
 def get_active_rules(

@@ -904,6 +904,22 @@ body {
                       : hasAudience             ? 'Audience breakdown'
                       :                          'Campaign brief';
 
+    // Sizing/campaign-execution results drive real customer targeting -- for
+    // these, looking at the SQL/waterfall is required before confirming, so
+    // "Looks good" isn't offered until "Show me how it was built" has been
+    // used at least once (the server enforces this too; see /hitl's
+    // review_required response -- this isn't just a UI-level nicety).
+    const highImpact = data.intent_type === 'sizing_request' || data.intent_type === 'campaign_execution';
+    const hitlPrompt = highImpact
+      ? 'This affects real customer targeting -- please review how it was built before confirming.'
+      : 'Does this look right to you?';
+    const hitlButtons = highImpact
+      ? `<button class="btn btn-rev"  onclick="handleHitl('review')">Show me how it was built</button>
+         <button class="btn btn-no"   onclick="handleHitl('no')">Something looks wrong</button>`
+      : `<button class="btn btn-yes"  onclick="handleHitl('yes')">Looks good</button>
+         <button class="btn btn-rev"  onclick="handleHitl('review')">Show me how it was built</button>
+         <button class="btn btn-no"   onclick="handleHitl('no')">Something looks wrong</button>`;
+
     return `
       <div class="card">
         <div class="card-header">
@@ -913,12 +929,8 @@ body {
           ${metaHtml}${audienceHtml}${tierHtml}${briefHtml}${noteHtml}${flagsHtml}
         </div>
         <div class="hitl" id="hitl-zone">
-          <p class="hitl-prompt">Does this look right to you?</p>
-          <div class="hitl-buttons">
-            <button class="btn btn-yes"  onclick="handleHitl('yes')">Looks good</button>
-            <button class="btn btn-rev"  onclick="handleHitl('review')">Show me how it was built</button>
-            <button class="btn btn-no"   onclick="handleHitl('no')">Something looks wrong</button>
-          </div>
+          <p class="hitl-prompt">${hitlPrompt}</p>
+          <div class="hitl-buttons">${hitlButtons}</div>
         </div>
       </div>`;
   }
@@ -990,6 +1002,19 @@ body {
   };
 
   function applyHitlResponse(zone, data) {
+    if (data.type === 'review_required') {
+      // Server refused a "yes" because this result hasn't been reviewed yet --
+      // re-show only the review/no buttons so the next click is forced through
+      // the evidence rather than straight to another blind "yes".
+      zone.innerHTML = `
+        <p class="hitl-prompt">${esc(data.message)}</p>
+        <div class="hitl-buttons">
+          <button class="btn btn-rev" onclick="handleHitl('review')">Show me how it was built</button>
+          <button class="btn btn-no"  onclick="handleHitl('no')">Something looks wrong</button>
+        </div>`;
+      return;
+    }
+
     if (data.type === 'hitl_confirmed') {
       zone.innerHTML = `
         <div class="flywheel">

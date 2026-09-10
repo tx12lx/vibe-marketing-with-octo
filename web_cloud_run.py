@@ -70,6 +70,12 @@ async def admin_page() -> HTMLResponse:
   .box {{ border: 1px solid #ddd; border-radius: 6px; padding: 16px; margin: 16px 0; }}
   button {{ padding: 8px 16px; cursor: pointer; }}
   #result {{ margin-top: 12px; font-weight: 600; }}
+  table.rules {{ width: 100%; border-collapse: collapse; margin-top: 8px; }}
+  table.rules td, table.rules th {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; font-size: 0.9rem; vertical-align: top; }}
+  table.rules button {{ padding: 4px 10px; font-size: 0.85rem; margin-right: 4px; }}
+  .btn-approve {{ background: #dff6dd; border: 1px solid #8bc48b; }}
+  .btn-reject {{ background: #fde2e2; border: 1px solid #d98a8a; }}
+  .muted {{ color: #777; font-size: 0.9rem; }}
 </style>
 <h1>Knowledge database admin</h1>
 <p>This instance's own copy of the knowledge database, currently:</p>
@@ -88,6 +94,14 @@ async def admin_page() -> HTMLResponse:
   <input type="file" id="dbfile" accept=".db">
   <button type="button" onclick="uploadDb()">Upload and replace</button>
   <div id="result"></div>
+</div>
+
+<div class="box">
+  <h3>Rules awaiting a second reviewer</h3>
+  <p class="muted">A rule scoped to "pattern" or "universal" governs every future user's results, so it
+     sits here inactive until someone other than whoever submitted it approves it. A rule scoped to one
+     campaign isn't listed here -- it already applies immediately, contained to that campaign.</p>
+  <div id="pending-rules">Loading...</div>
 </div>
 
 <script>
@@ -113,6 +127,64 @@ async function uploadDb() {{
     result.textContent = 'Failed: ' + err;
   }}
 }}
+
+function escapeHtml(s) {{
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({{
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }})[c]);
+}}
+
+async function loadPendingRules() {{
+  const box = document.getElementById('pending-rules');
+  try {{
+    const resp = await fetch('/admin/pending-rules');
+    const data = await resp.json();
+    const rules = data.rules || [];
+    if (!rules.length) {{
+      box.innerHTML = '<p class="muted">Nothing waiting on review right now.</p>';
+      return;
+    }}
+    const rows = rules.map(r => `
+      <tr id="rule-row-${{r.id}}">
+        <td>${{escapeHtml(r.rule_text)}}<br><span class="muted">scope: ${{escapeHtml(r.scope)}}</span></td>
+        <td>${{escapeHtml(r.added_by)}}</td>
+        <td>${{escapeHtml(r.added_at)}}</td>
+        <td>
+          <button class="btn-approve" onclick="reviewRule(${{r.id}}, 'approve')">Approve</button>
+          <button class="btn-reject" onclick="reviewRule(${{r.id}}, 'reject')">Reject</button>
+        </td>
+      </tr>`).join('');
+    box.innerHTML = `<table class="rules">
+      <thead><tr><th>Rule</th><th>Submitted by</th><th>Submitted at</th><th></th></tr></thead>
+      <tbody>${{rows}}</tbody>
+    </table>`;
+  }} catch (err) {{
+    box.innerHTML = '<p class="muted">Could not load pending rules: ' + escapeHtml(String(err)) + '</p>';
+  }}
+}}
+
+async function reviewRule(ruleId, action) {{
+  const row = document.getElementById('rule-row-' + ruleId);
+  try {{
+    const resp = await fetch('/admin/pending-rules/' + action, {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ rule_id: ruleId }}),
+    }});
+    const data = await resp.json();
+    if (resp.ok) {{
+      if (row) row.remove();
+    }} else {{
+      // Most commonly a maker-checker rejection -- the signed-in reviewer is the
+      // same person who submitted the rule, so it can't be approved from here.
+      alert(data.message || ('Could not ' + action + ' this rule.'));
+    }}
+  }} catch (err) {{
+    alert('Request failed: ' + err);
+  }}
+}}
+
+loadPendingRules();
 </script>
 """
     return HTMLResponse(content=html)

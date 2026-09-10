@@ -283,6 +283,7 @@ class FeedbackInput(BaseModel):
     existing_rules: list[dict]
     knowledge_tier: str       # GOLD | SILVER | BRONZE
     raw_input_prompt: str     # What user originally asked
+    user_identity: str = "unknown"  # who is actually submitting this correction -- carried through to BusinessRule.verified_by
 
 
 class FeedbackOutput(BaseModel):

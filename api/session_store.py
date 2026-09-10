@@ -94,7 +94,9 @@ class SessionState:
         "last_brief",
         "last_intent",
         "last_query",
+        "last_sender",
         "hitl_pending",
+        "reviewed_this_result",
         "awaiting_correction",
         "session_memory",
         "active_corrections",
@@ -103,6 +105,12 @@ class SessionState:
 
     def __init__(self, space_id: str) -> None:
         self.space_id: str = space_id
+        # Real identity of whoever is behind this session -- set from the
+        # IAP-authenticated header on every request (see api/web_app.py's
+        # _caller_identity()). Defaults to "unknown" rather than a placeholder
+        # like "web" so a HITL confirmation or correction is never silently
+        # attributed to the same fake identity for every different person.
+        self.last_sender: str = "unknown"
         self.last_spec: Optional["UniversalJSONSpec"] = None
         self.last_audit_log: Optional["QuantAuditLog"] = None
         self.last_brief: Optional["BriefingOutput"] = None
@@ -110,6 +118,13 @@ class SessionState:
         self.last_query: str = ""
         # True after a result card is posted, waiting for a HITL button click.
         self.hitl_pending: bool = False
+        # True once the person has actually looked at the SQL/sources behind
+        # the current pending result (clicked "review"). For high-impact
+        # intents (sizing_request/campaign_execution) the server refuses a
+        # "yes" until this is true, so approving without ever looking at the
+        # evidence isn't possible via the API either, not just discouraged by
+        # the UI -- see api/web_app.py's /hitl endpoint.
+        self.reviewed_this_result: bool = False
         # True after the user clicked "Something's wrong"; next message is treated
         # as a free-text correction for FeedbackAgent.
         self.awaiting_correction: bool = False
@@ -135,10 +150,12 @@ class SessionState:
         self.last_audit_log = log
         self.last_brief = brief
         self.hitl_pending = True
+        self.reviewed_this_result = False
         self.awaiting_correction = False
 
     def clear_hitl(self) -> None:
         self.hitl_pending = False
+        self.reviewed_this_result = False
         self.awaiting_correction = False
 
 
