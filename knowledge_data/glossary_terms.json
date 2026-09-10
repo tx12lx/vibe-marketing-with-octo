@@ -1,0 +1,138 @@
+[
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Billing Account Number -- the account a subscriber's billing is grouped under. One BAN can have multiple subscriber lines.",
+    "id": 1,
+    "source": "seed",
+    "term": "BAN"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Forward Sortation Area -- the first 3 characters of a Canadian postal code, sometimes used to target a specific region.",
+    "id": 2,
+    "source": "seed",
+    "term": "FSA"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Service Order Code -- the alphanumeric identifier used in billing and CRM systems to define, price, and provision an individual cellular plan feature.",
+    "id": 3,
+    "source": "seed",
+    "term": "SOC"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "A third-party (Environics Analytics) lifestyle/demographic segmentation system applied to subscribers.",
+    "id": 4,
+    "source": "seed",
+    "term": "PRIZM"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Future Friendly Home -- TELUS's home solutions business line (internet, TV, security, etc.).",
+    "id": 5,
+    "source": "seed",
+    "term": "FFH"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Mobile and Home -- a customer who has both a mobility line and an FFH (home solutions) account.",
+    "id": 6,
+    "source": "seed",
+    "term": "MNH / M&H"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Exclusive Partner Program -- a postpaid mobility service for the TELUS brand.",
+    "id": 7,
+    "source": "seed",
+    "term": "EPP"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Smart Home Security",
+    "id": 8,
+    "source": "seed",
+    "term": "SHS"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "High Speed Internet Access",
+    "id": 9,
+    "source": "seed",
+    "term": "HSIA"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "TELUS Online Security",
+    "id": 10,
+    "source": "seed",
+    "term": "TOS"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Living Well Companion",
+    "id": 11,
+    "source": "seed",
+    "term": "LWC"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Bring Your Own Device -- a subscriber with no device financing contract.",
+    "id": 12,
+    "source": "seed",
+    "term": "BYOD"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Month to Month -- a subscriber whose contract end date is in the past.",
+    "id": 13,
+    "source": "seed",
+    "term": "MTM"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Do Not Contact -- an opt-out from a specific communication channel (email, outbound call, SMS/MMS, direct mail).",
+    "id": 14,
+    "source": "seed",
+    "term": "DNC"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Average Revenue Per User",
+    "id": 15,
+    "source": "seed",
+    "term": "ARPU"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Monthly Service Fee",
+    "id": 16,
+    "source": "seed",
+    "term": "MSF"
+  },
+  {
+    "added_at": "2026-09-09T20:53:52Z",
+    "added_by": "tian.xia@telus.com",
+    "definition": "Monthly Recurring Charge",
+    "id": 17,
+    "source": "seed",
+    "term": "MRC"
+  }
+]
