@@ -1,7 +1,6 @@
 """core/base_agent.py — Abstract base class for all Agent Mesh workers.
 
-This module is the only file in the project-root core/ package (distinct from
-Vibe OCTO Nexus/core/).  Every registered worker must implement this contract.
+Every registered worker (see agents/*.py) must implement this contract.
 """
 from __future__ import annotations
 
@@ -16,7 +15,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from pydantic import BaseModel  # noqa: E402
-from pydantic_schemas import UniversalJSONSpec  # noqa: E402
 
 
 class BaseAgent(ABC):
@@ -26,11 +24,16 @@ class BaseAgent(ABC):
       WORKER_ID:        str                — unique versioned ID, e.g. "quant_v1"
       HANDLED_INTENTS:  frozenset[str]     — intent types this agent handles;
                                              used by _discover_agents() to build
-                                             the intent routing table automatically.
-      INPUT_SCHEMA:     type[BaseModel]    — Pydantic model accepted by subscribe()
-      OUTPUT_SCHEMA:    type[BaseModel]    — Pydantic model returned by execute()
+                                             the agent registry automatically.
+      INPUT_SCHEMA:     type[BaseModel]    — Pydantic model this agent's real
+                                             entrypoint accepts
+      OUTPUT_SCHEMA:    type[BaseModel]    — Pydantic model this agent's real
+                                             entrypoint returns
 
-    Orchestrator lifecycle: subscribe() -> set_session_context() -> execute()
+    subscribe()/execute() exist to satisfy this contract uniformly, but an
+    agent whose real entrypoint takes a different shape of input (NexusAgent's
+    classify_intent(), QuantAgent's direct_count()) documents that in its own
+    subscribe()/execute() docstrings rather than being forced through them.
 
     Workers must never raise raw exceptions to the orchestrator.
     Wrap all failures in NexusErrorPayload or a worker-specific error model.
@@ -42,8 +45,8 @@ class BaseAgent(ABC):
     OUTPUT_SCHEMA: type[BaseModel]
 
     @abstractmethod
-    def subscribe(self, spec: UniversalJSONSpec) -> None:
-        """Accept the UniversalJSONSpec for this execution cycle."""
+    def subscribe(self, spec) -> None:
+        """Accept input for this execution cycle."""
 
     @abstractmethod
     def execute(self) -> BaseModel:
@@ -54,14 +57,9 @@ class BaseAgent(ABC):
 
         Default implementation delegates to the synchronous execute().
         Override in agents that have true async I/O (e.g. aiohttp BQ queries).
-        Used by the orchestrator when two independent agents run in parallel,
-        e.g. QuantAgent + BriefingAgent for campaign_execution intent.
         """
         import asyncio
         return await asyncio.get_event_loop().run_in_executor(None, self.execute)
 
     def set_session_context(self, context: str) -> None:
         """Receive glossary/catalog context injected by the orchestrator."""
-
-    def set_runtime_schema(self, schema_str: str) -> None:
-        """Receive live schema context injected by the orchestrator (Pillar 2)."""

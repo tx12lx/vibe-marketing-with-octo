@@ -2,25 +2,30 @@
 Vibe OCTO Feedback — FeedbackAgent Worker
 Worker ID: feedback_v1
 
-Interprets natural language corrections from users after HITL NO,
-extracts verified business rules via multi-stage interactive pipeline,
-and saves them as GOLD-tier context that guides all future executions.
+Interprets natural language corrections submitted from the web/Slack HITL flow
+and extracts them as structured business rules, grounded in the knowledge
+layer (real schema, glossary, and existing confirmed rules) rather than any
+hardcoded taxonomy.
+
+A rule is never saved by this agent directly -- it returns rules_confirmed /
+rules_pending in FeedbackOutput, and the caller (api/web_app.py) persists a
+rule to the knowledge layer only after the submitter has explicitly confirmed
+the interpretation shown to them. That confirm-before-save step, plus the
+maker-checker gate on 'pattern'/'universal'-scoped rules (see
+knowledge/context.py's add_rule()), is what keeps a correction from silently
+governing every future user's results on one person's word alone.
 
 Pipeline stages:
-  1. Acknowledge     — display warm transition message
-  2. Interpret       — LLM analysis with prompt-cached knowledge base context
-  3. Unknown terms   — interactively resolve any unrecognised business terms
-  4. Clarify         — ask targeted questions for ambiguous rules
-  5. Compound        — surface multi-rule summary and resolve conflicts
-  6. Scope           — classify as campaign | pattern | universal
-  7. Validate        — confirm each rule with the user before saving
-  8. Save            — persist confirmed rules to business_rules.json
+  1. Interpret        — LLM analysis grounded in the knowledge base
+  2. Clarify           — ask one targeted question when a rule is too
+                         ambiguous to save as stated
+  3. Scope             — classify each rule as campaign | pattern | universal
+  4. Structure         — package each rule as a BusinessRule for the caller
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import tempfile
 import uuid
@@ -28,19 +33,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import requests
 from dotenv import load_dotenv
 from core.ai_client import ask_ai
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
-_FEEDBACK_DIR = _ROOT_DIR / "Vibe OCTO Feedback"  # original subdirectory for .env loading
 
 for _p in [str(_ROOT_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-load_dotenv(_FEEDBACK_DIR / ".env")
+load_dotenv(_ROOT_DIR / ".env")
 
 from pydantic_schemas import (  # noqa: E402
     BusinessRule,
@@ -49,17 +52,11 @@ from pydantic_schemas import (  # noqa: E402
     SemanticFailureLog,
 )
 from core.base_agent import BaseAgent  # noqa: E402
-from core.thought_display import ThoughtDisplay  # noqa: E402
 
-_FUELIX_BASE = "https://api.fuelix.ai"
-_RULES_PATH = _ROOT_DIR / "business_rules.json"
-_GLOSSARY_PATH = _ROOT_DIR / "glossary.json"
 _FAILURE_LOG_PATH = _ROOT_DIR / "semantic_failure_log.json"
-_KNOWLEDGE_INDEX_PATH = _ROOT_DIR / "knowledge_base" / "artifacts" / "semantic_knowledge_index.json"
-_ADOBE_SCHEMA_PATH = _ROOT_DIR / "knowledge_base" / "artifacts" / "adobe_schema.json"
 
 # ---------------------------------------------------------------------------
-# System prompt — identity anchor (cached)
+# System prompt — identity anchor
 # ---------------------------------------------------------------------------
 
 _FEEDBACK_SYSTEM = (
@@ -139,11 +136,11 @@ scope_detected guide:
 
 
 class FeedbackAgent(BaseAgent):
-    """Pillar 6 Worker — correction interpretation and business rule extraction.
+    """Correction interpretation and business rule extraction.
 
-    Overrides subscribe() to accept FeedbackInput instead of UniversalJSONSpec.
-    Interactive pipeline: drives console dialog for clarifications and validation.
-    Never raises to the orchestrator; wraps all failures in FeedbackOutput(success=False).
+    Overrides subscribe() to accept FeedbackInput instead of the usual agent
+    input. Never raises to the orchestrator; wraps all failures in
+    FeedbackOutput(success=False).
     """
 
     WORKER_ID = "feedback_v1"
@@ -152,12 +149,8 @@ class FeedbackAgent(BaseAgent):
     OUTPUT_SCHEMA = FeedbackOutput
 
     def __init__(self) -> None:
-        self._api_key: Optional[str] = os.getenv("FUELIX_API_KEY")
-        self._model: str = os.getenv("FUELIX_MODEL", "claude-sonnet-4")
         self._input: Optional[FeedbackInput] = None
-        self._registry = None  # knowledge layer removed; rebuilt in a later step
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
-        self._non_interactive: bool = False
         self._pending_clarification: str = ""
 
     # ------------------------------------------------------------------
@@ -168,14 +161,7 @@ class FeedbackAgent(BaseAgent):
         """Bind the centralised KnowledgeContext built at startup."""
         self._knowledge_ctx = ctx
 
-    def set_non_interactive(self) -> None:
-        """Skip all input() prompts — used for web/API mode where there is no terminal."""
-        self._non_interactive = True
-
     def set_session_context(self, context: str) -> None:
-        pass
-
-    def set_runtime_schema(self, schema_str: str) -> None:
         pass
 
     # ------------------------------------------------------------------
@@ -192,8 +178,6 @@ class FeedbackAgent(BaseAgent):
             return self._error_output("subscribe() must be called before execute()")
         try:
             return self._run_pipeline(self._input)
-        except KeyboardInterrupt:
-            return self._error_output("Session interrupted by user.")
         except Exception as exc:
             return self._error_output(str(exc)[:400])
 
@@ -202,23 +186,12 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _run_pipeline(self, inp: FeedbackInput) -> FeedbackOutput:
-        # Write failure log for web/API mode. Terminal mode writes it in HITLAuditLoop._handle_no().
-        if self._non_interactive:
-            self._write_failure_log_entry(inp)
+        self._write_failure_log_entry(inp)
 
-        # Stage 1 — acknowledge
-        self._stage1_acknowledge(inp)
-
-        # Stage 2 — LLM interpretation
-        interpretation = self._stage2_interpret(inp)
+        # Stage 1 — LLM interpretation
+        interpretation = self._stage1_interpret(inp)
         if interpretation is None:
             fallback_rule = self._make_verbatim_rule(inp)
-            if not self._non_interactive:
-                self._registry.add_rule(fallback_rule)
-                print(
-                    "\n  Your feedback has been saved and will be applied to future queries.\n"
-                    "  (Automated interpretation was unavailable; the full text has been stored.)"
-                )
             return FeedbackOutput(
                 rules_extracted=[fallback_rule],
                 rules_confirmed=[fallback_rule],
@@ -229,19 +202,14 @@ class FeedbackAgent(BaseAgent):
             )
 
         rules_raw: list[dict] = interpretation.get("rules", [])
-        unknown_terms: list[str] = interpretation.get("unknown_terms_found", [])
-
         if not rules_raw:
             return self._error_output("No rules could be extracted from the correction.")
 
-        # Stage 3 — resolve unknown terms
-        if unknown_terms:
-            self._stage3_resolve_unknown_terms(unknown_terms)
+        # Stage 2 — clarification: ask one targeted question when a rule is
+        # too ambiguous to save as stated (skips straight through otherwise).
+        rules_raw = self._stage2_clarify(rules_raw)
 
-        # Stage 4 — clarification loop
-        rules_raw = self._stage4_clarify(rules_raw, inp)
-
-        if self._non_interactive and self._pending_clarification:
+        if self._pending_clarification:
             question = self._pending_clarification
             self._pending_clarification = ""
             return FeedbackOutput(
@@ -254,159 +222,53 @@ class FeedbackAgent(BaseAgent):
                 clarifying_question=question,
             )
 
-        # Stage 5 — compound corrections
-        if len(rules_raw) > 1:
-            self._stage5_compound_summary(
-                rules_raw, interpretation.get("conflicting_rules", [])
+        # Stage 3 — scope classification
+        rules_raw = self._stage3_classify_scope(rules_raw, inp)
+
+        # Stage 4 — package into BusinessRule objects. Rules are NOT saved here --
+        # the caller persists rules_confirmed only after the submitter explicitly
+        # confirms the interpretation shown to them (see api/web_app.py).
+        confirmed: list[BusinessRule] = []
+        pending: list[BusinessRule] = []
+        for rule_dict in rules_raw:
+            (pending if rule_dict.get("_skipped") else confirmed).append(
+                self._dict_to_rule(rule_dict, inp)
             )
-
-        # Stage 6 — scope classification
-        rules_raw = self._stage6_classify_scope(rules_raw, inp)
-
-        # Stage 7 — user validation
-        confirmed_rules, pending_rules = self._stage7_validate(rules_raw, inp)
-
-        # Stage 8 — save confirmed rules
-        new_terms = self._stage8_save(confirmed_rules)
 
         return FeedbackOutput(
             rules_extracted=[self._dict_to_rule(r, inp) for r in rules_raw],
-            rules_confirmed=confirmed_rules,
-            rules_pending=pending_rules,
-            new_glossary_terms=new_terms,
-            interpretation_summary=self._build_summary(confirmed_rules, pending_rules),
+            rules_confirmed=confirmed,
+            rules_pending=pending,
+            new_glossary_terms=[],
+            interpretation_summary=self._build_summary(confirmed, pending),
             success=True,
         )
 
     # ------------------------------------------------------------------
-    # Stage 1: Acknowledge
+    # Stage 1: LLM interpretation
     # ------------------------------------------------------------------
 
-    def _stage1_acknowledge(self, inp: FeedbackInput) -> None:
-        if self._non_interactive:
-            return
-        ThoughtDisplay.feedback_acknowledging(inp.campaign_name, inp.raw_correction)
-
-    # ------------------------------------------------------------------
-    # Stage 2: LLM interpretation
-    # ------------------------------------------------------------------
-
-    def _stage2_interpret(self, inp: FeedbackInput) -> Optional[dict]:
-        cached_ctx = self._build_cached_context(inp)
+    def _stage1_interpret(self, inp: FeedbackInput) -> Optional[dict]:
+        cached_ctx = self._build_cached_context()
         dynamic_ctx = self._build_dynamic_context(inp)
-
-        system_blocks = [
-            {
-                "type": "text",
-                "text": _FEEDBACK_SYSTEM,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-        user_content = [
-            {
-                "type": "text",
-                "text": cached_ctx,
-                "cache_control": {"type": "ephemeral"},
-            },
-            {
-                "type": "text",
-                "text": dynamic_ctx + "\n\n" + _INTERPRETATION_INSTRUCTIONS,
-            },
-        ]
-
+        prompt = cached_ctx + "\n\n" + dynamic_ctx + "\n\n" + _INTERPRETATION_INSTRUCTIONS
         try:
-            raw = self._call_with_caching(
-                system_blocks,
-                user_content,
-                thinking={"type": "enabled", "budget_tokens": 6000},
-            )
+            raw = self._call_with_caching(prompt)
             return self._extract_json(raw)
         except Exception:
             return None
 
-    def _build_cached_context(self, inp: FeedbackInput) -> str:
-        """Build the stable knowledge context cached with each correction call.
+    def _build_cached_context(self) -> str:
+        """Build the knowledge context passed with each correction call.
 
-        When KnowledgeContext is available (injected at startup), uses its
-        pre-built feedback_context string directly.  Falls back to reading the
-        individual files for backward compatibility.
+        Uses KnowledgeContext.feedback_context (real schema/glossary/business
+        rules from the knowledge layer) so interpretation is grounded rather
+        than a guess -- there is no local-file fallback because the knowledge
+        layer is always available in production (bound at startup).
         """
-        if self._knowledge_ctx is not None:
-            return (
-                "=== KNOWLEDGE BASE CONTEXT ===\n\n"
-                + self._knowledge_ctx.feedback_context
-            )
-
-        # Fallback: build from individual files (no KnowledgeContext available)
-        parts: list[str] = ["=== KNOWLEDGE BASE CONTEXT ===\n\n"]
-
-        # Glossary
-        glossary = self._load_json_safe(_GLOSSARY_PATH)
-        if glossary:
-            parts.append("--- Glossary (team-defined terms) ---\n")
-            parts.append(json.dumps(glossary, indent=2, ensure_ascii=False)[:4000])
-            parts.append("\n\n")
-
-        # GOLD tier insights + relevant campaign summaries
-        knowledge = self._load_json_safe(_KNOWLEDGE_INDEX_PATH)
-        if knowledge:
-            gold_insights = knowledge.get("gold_insights", {})
-            if gold_insights:
-                parts.append("--- GOLD Tier Insights ---\n")
-                parts.append(json.dumps(gold_insights, indent=2, ensure_ascii=False)[:3000])
-                parts.append("\n\n")
-
-            campaigns = knowledge.get("campaigns", [])
-            relevant = [
-                c for c in campaigns
-                if c.get("tier") == "GOLD"
-                and (
-                    c.get("camp_id", "").upper() == inp.campaign_code.upper()
-                    or c.get("medium", "").upper() == inp.medium.upper()
-                )
-            ][:5]
-            if relevant:
-                parts.append("--- ACC Summaries for Relevant Campaigns ---\n")
-                for camp in relevant:
-                    acc = camp.get("acc_summaries") or {}
-                    ts = (acc.get("targeting_summary") or "")[:400]
-                    ss = (acc.get("segment_summary") or "")[:200]
-                    parts.append(
-                        f"Campaign: {camp.get('campaign_name')}\n"
-                        f"  Targeting: {ts}\n"
-                        f"  Segments:  {ss}\n\n"
-                    )
-
-        # Existing business rules
-        existing = self._load_json_safe(_RULES_PATH)
-        if existing and existing.get("rules"):
-            parts.append("--- Existing Verified Business Rules ---\n")
-            for rule in existing["rules"][:20]:
-                parts.append(
-                    f"- [{rule.get('scope', '?').upper()}] "
-                    f"{rule.get('rule_description', '')} "
-                    f"(type: {rule.get('rule_type', '?')})\n"
-                )
-            parts.append("\n")
-
-        # Adobe schema (compact: key table names only)
-        adobe = self._load_json_safe(_ADOBE_SCHEMA_PATH)
-        if adobe:
-            views = adobe.get("views", {})
-            if isinstance(views, dict) and views:
-                parts.append("--- Adobe Schema Views (key tables) ---\n")
-                key_tables = [
-                    k for k in views
-                    if any(t in k for t in ("mob_mobility", "customer_profl", "model_score"))
-                ]
-                for name in key_tables[:6]:
-                    view_data = views[name]
-                    cols = [c.get("name", "") for c in (view_data.get("columns") or [])[:20]]
-                    if cols:
-                        parts.append(f"  {name}: {', '.join(cols)}\n")
-                parts.append("\n")
-
-        return "".join(parts)
+        if self._knowledge_ctx is None:
+            return "=== KNOWLEDGE BASE CONTEXT ===\n\n(knowledge layer not available for this call)"
+        return "=== KNOWLEDGE BASE CONTEXT ===\n\n" + self._knowledge_ctx.feedback_context
 
     def _build_dynamic_context(self, inp: FeedbackInput) -> str:
         parts: list[str] = ["=== CURRENT EXECUTION CONTEXT ===\n\n"]
@@ -435,173 +297,38 @@ class FeedbackAgent(BaseAgent):
         return "".join(parts)
 
     # ------------------------------------------------------------------
-    # Stage 3: Resolve unknown terms
+    # Stage 2: Clarification
+    #
+    # Only asks the user something when the model itself flagged low
+    # confidence -- otherwise the rule is accepted as interpreted, since there
+    # is no terminal session to run a multi-turn clarification dialog in.
     # ------------------------------------------------------------------
 
-    def _stage3_resolve_unknown_terms(self, unknown_terms: list[str]) -> None:
-        if self._non_interactive:
-            return
-        glossary = self._load_json_safe(_GLOSSARY_PATH) or {}
-        user_terms: dict = glossary.setdefault("user_defined_terms", {})
-        existing_lower = {k.lower() for k in user_terms.keys()}
-        updated = False
-
-        for term in unknown_terms:
-            if term.lower() in existing_lower:
-                continue
-
-            print(
-                f"\n  I want to make sure I understand your feedback correctly.\n"
-                f"\n  You used the term '{term}' and I don't have a definition\n"
-                f"  for this in my knowledge base yet.\n"
-                f"\n  Could you help me understand what it means in this context?\n"
-                f"  Once you tell me, I'll remember it for future use.\n"
-                f"\n  (Press Enter to skip)\n"
-            )
-            definition = input("  Definition: ").strip()
-            if not definition:
-                continue
-
-            user_terms[term] = {
-                "definition": definition,
-                "source": "user_feedback",
-                "added_at": datetime.now(tz=timezone.utc).isoformat(),
-            }
-            existing_lower.add(term.lower())
-            updated = True
-            print(f"\n  Got it. I've added '{term}' to the knowledge base.")
-
-        if updated:
-            self._write_glossary_safe(glossary)
-
-    # ------------------------------------------------------------------
-    # Stage 4: Clarification loop
-    # ------------------------------------------------------------------
-
-    def _stage4_clarify(
-        self, rules_raw: list[dict], inp: FeedbackInput
-    ) -> list[dict]:
+    def _stage2_clarify(self, rules_raw: list[dict]) -> list[dict]:
         updated = list(rules_raw)
         for i, rule in enumerate(updated):
             if not rule.get("needs_clarification"):
                 continue
-
-            if self._non_interactive:
-                question = rule.get("clarifying_question", "")
-                confidence = rule.get("confidence", 1.0)
-                if question and confidence < 0.5 and not self._pending_clarification:
-                    self._pending_clarification = question
-                    updated[i] = {**rule, "_skipped": True}
-                else:
-                    updated[i] = {**rule, "needs_clarification": False}
-                continue
-
-            question = rule.get("clarifying_question", "Could you clarify this correction?")
-            raw_text = rule.get("raw_text", inp.raw_correction)
-
-            for attempt in range(3):
-                print(
-                    f"\n  I want to make sure I get this right.\n"
-                    f"\n  You mentioned: '{raw_text}'\n"
-                    f"\n  {question}\n"
-                    f"\n  (Type 'skip' to come back to this later)\n"
-                )
-                answer = input("  Your answer: ").strip()
-
-                if answer.lower() == "skip":
-                    updated[i] = {**rule, "_skipped": True}
-                    print("\n  No problem. I've flagged this for later.")
-                    break
-
-                if answer:
-                    clarified = self._reclarify_rule(rule, answer, inp)
-                    if clarified:
-                        updated[i] = {
-                            **clarified,
-                            "needs_clarification": False,
-                            "clarification_rounds": attempt + 1,
-                        }
-                    else:
-                        updated[i] = {
-                            **rule,
-                            "needs_clarification": False,
-                            "clarification_rounds": attempt + 1,
-                            "understood_as": (
-                                f"{rule.get('understood_as', '')} "
-                                f"(clarified: {answer})"
-                            ).strip(),
-                        }
-                    break
-
+            question = rule.get("clarifying_question", "")
+            confidence = rule.get("confidence", 1.0)
+            if question and confidence < 0.5 and not self._pending_clarification:
+                self._pending_clarification = question
+                updated[i] = {**rule, "_skipped": True}
+            else:
+                updated[i] = {**rule, "needs_clarification": False}
         return updated
 
-    def _reclarify_rule(
-        self, rule: dict, clarification: str, inp: FeedbackInput
-    ) -> Optional[dict]:
-        prompt = (
-            f"Re-interpret this business rule with the additional clarification.\n\n"
-            f"Original text: \"{rule.get('raw_text', '')}\"\n"
-            f"Original interpretation: \"{rule.get('understood_as', '')}\"\n"
-            f"User clarification: \"{clarification}\"\n"
-            f"Campaign: {inp.campaign_name} | Medium: {inp.medium} | Cadence: {inp.cadence}\n\n"
-            "Output a single rule object JSON (same structure as in the rules array). "
-            "Output JSON only."
-        )
-        try:
-            system = [{"type": "text", "text": _FEEDBACK_SYSTEM}]
-            user = [{"type": "text", "text": prompt}]
-            raw = self._call_with_caching(system, user)
-            extracted = self._extract_json(raw)
-            if extracted:
-                if "raw_text" in extracted:
-                    return extracted
-                if "rules" in extracted and extracted["rules"]:
-                    return extracted["rules"][0]
-        except Exception:
-            pass
-        return None
-
     # ------------------------------------------------------------------
-    # Stage 5: Compound corrections
+    # Stage 3: Scope classification — AI-driven reasoning
     # ------------------------------------------------------------------
 
-    def _stage5_compound_summary(
-        self, rules_raw: list[dict], conflicts: list[dict]
-    ) -> None:
-        if self._non_interactive:
-            return
-        n = len(rules_raw)
-        print(
-            f"\n  I found {n} separate corrections in your feedback.\n"
-            f"  Let me confirm each one with you."
-        )
-
-        for conflict in conflicts:
-            indices = conflict.get("rule_indices", [])
-            desc = conflict.get("conflict_description", "")
-            if len(indices) >= 2 and indices[0] < len(rules_raw) and indices[1] < len(rules_raw):
-                r1 = rules_raw[indices[0]].get("raw_text", f"Rule {indices[0]+1}")
-                r2 = rules_raw[indices[1]].get("raw_text", f"Rule {indices[1]+1}")
-                print(
-                    f"\n  I noticed these two corrections might overlap:\n"
-                    f"  '{r1}' and '{r2}'\n"
-                    f"\n  {desc}\n"
-                    f"\n  Could you help me understand how these work together?"
-                )
-                input("  Your answer: ").strip()
-
-    # ------------------------------------------------------------------
-    # Stage 6: Scope classification — AI-driven reasoning
-    # ------------------------------------------------------------------
-
-    def _stage6_classify_scope(
+    def _stage3_classify_scope(
         self, rules_raw: list[dict], inp: FeedbackInput
     ) -> list[dict]:
         updated = list(rules_raw)
         for i, rule in enumerate(updated):
             if rule.get("scope_detected", "unclear") != "unclear":
-                # Already classified by Stage 2 with sufficient confidence — keep it.
-                # Auto-fill pattern_description from scope_signals when missing.
+                # Already classified by Stage 1 with sufficient confidence — keep it.
                 if rule.get("scope_detected") == "pattern" and not rule.get("pattern_description"):
                     updated[i] = {
                         **rule,
@@ -611,56 +338,12 @@ class FeedbackAgent(BaseAgent):
             if rule.get("_skipped"):
                 continue
 
-            # Ask the AI to reason about scope before asking the user.
             ai_result = self._ai_classify_scope(rule, inp)
-            ai_scope = ai_result.get("scope", "universal")
-            ai_confidence = float(ai_result.get("confidence", 0.0))
-            ai_pattern_desc = ai_result.get("pattern_description", "")
-
-            if ai_confidence >= 0.8 or self._non_interactive:
-                updated[i] = {
-                    **rule,
-                    "scope_detected": ai_scope,
-                    "pattern_description": ai_pattern_desc or rule.get("scope_signals", ""),
-                }
-            else:
-                # Low confidence — ask the user only in interactive mode.
-                raw_text = rule.get("raw_text", inp.raw_correction)
-                hint = ai_result.get("reasoning", "")
-                print(
-                    f"\n  For this correction:\n    '{raw_text}'\n"
-                    + (f"\n  My best guess is '{ai_scope}' ({hint}), but I'm not certain.\n" if hint else "")
-                    + f"\n  Should this apply to:\n"
-                    f"    1. This specific context only\n"
-                    f"    2. All similar contexts\n"
-                    f"    3. Every query, always\n"
-                    f"\n  Which best describes what you meant? (1/2/3, or Enter to accept my guess)"
-                )
-                choice = input("\n  Your choice: ").strip()
-
-                if choice == "1":
-                    updated[i] = {**rule, "scope_detected": "campaign"}
-                elif choice == "2":
-                    print(
-                        "\n  Could you describe what makes a context 'similar'?\n"
-                        "  For example: 'mobility cross-sell campaigns' or 'Stream+ queries'\n"
-                    )
-                    pattern = input("  Pattern description: ").strip()
-                    updated[i] = {
-                        **rule,
-                        "scope_detected": "pattern",
-                        "pattern_description": pattern or ai_pattern_desc or rule.get("scope_signals", ""),
-                    }
-                elif choice == "3":
-                    updated[i] = {**rule, "scope_detected": "universal"}
-                else:
-                    # Accept AI guess
-                    updated[i] = {
-                        **rule,
-                        "scope_detected": ai_scope,
-                        "pattern_description": ai_pattern_desc or rule.get("scope_signals", ""),
-                    }
-
+            updated[i] = {
+                **rule,
+                "scope_detected": ai_result.get("scope", "universal"),
+                "pattern_description": ai_result.get("pattern_description") or rule.get("scope_signals", ""),
+            }
         return updated
 
     def _ai_classify_scope(self, rule: dict, inp: FeedbackInput) -> dict:
@@ -685,9 +368,7 @@ class FeedbackAgent(BaseAgent):
             '"reasoning": "<one sentence explaining the scope choice>"}'
         )
         try:
-            system = [{"type": "text", "text": _FEEDBACK_SYSTEM}]
-            user = [{"type": "text", "text": prompt}]
-            raw = self._call_with_caching(system, user)
+            raw = self._call_with_caching(prompt)
             result = self._extract_json(raw)
             if result and "scope" in result:
                 return result
@@ -698,160 +379,13 @@ class FeedbackAgent(BaseAgent):
         return {"scope": scope, "confidence": 0.5, "pattern_description": "", "reasoning": "fallback"}
 
     # ------------------------------------------------------------------
-    # Stage 7: Validate with user
-    # ------------------------------------------------------------------
-
-    def _stage7_validate(
-        self, rules_raw: list[dict], inp: FeedbackInput
-    ) -> tuple[list[BusinessRule], list[BusinessRule]]:
-        confirmed: list[BusinessRule] = []
-        pending: list[BusinessRule] = []
-        total = len(rules_raw)
-        sep = "─" * 53
-
-        for i, rule_dict in enumerate(rules_raw):
-            if rule_dict.get("_skipped"):
-                pending.append(self._dict_to_rule(rule_dict, inp))
-                continue
-
-            if self._non_interactive:
-                confirmed.append(self._dict_to_rule(rule_dict, inp))
-                continue
-
-            scope = rule_dict.get("scope_detected", "campaign")
-            scope_label = self._scope_label(scope, rule_dict, inp)
-
-            print(
-                f"\n  Here's what I understood. Please confirm:\n"
-                f"\n  {sep}"
-                f"\n  Rule {i + 1} of {total}\n"
-                f"\n  You said:\n    '{rule_dict.get('raw_text', inp.raw_correction)}'\n"
-                f"\n  I understood this as:\n    '{rule_dict.get('understood_as', '')}'\n"
-                f"\n  This will apply to:\n    '{scope_label}'\n"
-                f"\n  Starting from:\n    Next execution onwards\n"
-                f"\n  Is this correct?"
-                f"\n    Y — Save this rule"
-                f"\n    N — That's not quite right"
-                f"\n    E — Let me edit the description"
-                f"\n  {sep}\n"
-            )
-
-            for attempt in range(3):
-                answer = input("  Y / N / E: ").strip().upper()
-
-                if answer == "Y":
-                    confirmed.append(self._dict_to_rule(rule_dict, inp))
-                    break
-
-                elif answer == "E":
-                    print("\n  Please type the corrected description:\n")
-                    edited = input("  New description: ").strip()
-                    if edited:
-                        rule_dict = {**rule_dict, "understood_as": edited}
-                    confirmed.append(self._dict_to_rule(rule_dict, inp))
-                    break
-
-                elif answer == "N":
-                    if attempt < 2:
-                        print("\n  What was wrong with my interpretation?\n")
-                        feedback = input("  What I missed: ").strip()
-                        if feedback:
-                            rule_dict = {
-                                **rule_dict,
-                                "understood_as": (
-                                    f"{rule_dict.get('understood_as', '')} "
-                                    f"(corrected: {feedback})"
-                                ).strip(),
-                            }
-                        print(
-                            f"\n  Updated:\n    '{rule_dict.get('understood_as', '')}'\n"
-                            f"\n  Is this correct now? (Y/N/E)\n"
-                        )
-                    else:
-                        pending.append(self._dict_to_rule(rule_dict, inp))
-                        print("\n  No problem. I'll leave this one for now.")
-                        break
-
-        return confirmed, pending
-
-    # ------------------------------------------------------------------
-    # Stage 8: Save confirmed rules
-    # ------------------------------------------------------------------
-
-    def _stage8_save(self, confirmed_rules: list[BusinessRule]) -> list[dict]:
-        if self._non_interactive:
-            # In web mode, rules are returned in rules_confirmed and saved only after
-            # the user explicitly confirms the interpretation via the browser UI.
-            return []
-
-        saved = 0
-        reinforced = 0
-        conflicts_resolved = 0
-        for rule in confirmed_rules:
-            outcome = self._dedup_and_save(rule)
-            if outcome == "saved":
-                saved += 1
-            elif outcome == "reinforced":
-                reinforced += 1
-            elif outcome == "conflict_resolved":
-                conflicts_resolved += 1
-
-        total = saved + reinforced + conflicts_resolved
-        if total:
-            parts = []
-            if saved:
-                parts.append(f"{saved} new rule{'s' if saved > 1 else ''}")
-            if reinforced:
-                parts.append(f"{reinforced} existing rule{'s' if reinforced > 1 else ''} strengthened")
-            if conflicts_resolved:
-                parts.append(f"{conflicts_resolved} conflict{'s' if conflicts_resolved > 1 else ''} resolved")
-            summary = ", ".join(parts)
-            print(
-                f"\n  Saved! {summary}. I'll apply these automatically from now on.\n"
-                f"  You'll see them mentioned in my thought process whenever they're being used."
-            )
-
-        return []  # new_glossary_terms — terms are already written in stage 3
-
-    def _dedup_and_save(self, rule: BusinessRule) -> str:
-        """Check for duplicates/conflicts before saving. Returns outcome string."""
-        check = self._registry.find_similar_or_conflicting(
-            rule, self._api_key or "", self._model
-        )
-
-        if check.get("is_duplicate") and check.get("duplicate_of"):
-            # Reinforce the existing rule's confidence instead of creating a duplicate.
-            existing_id: str = check["duplicate_of"]
-            merged_conf = check.get("reinforced_confidence") or rule.confidence
-            self._registry.reinforce_rule(existing_id, merged_conf)
-            return "reinforced"
-
-        if check.get("conflicts_with"):
-            # Disable the old conflicting rule and note why, then save the new one.
-            conflict_id: str = check["conflicts_with"]
-            conflict_desc: str = check.get("conflict_description") or "Superseded by a newer correction."
-            self._registry.disable_rule(
-                conflict_id,
-                conflict_note=f"Disabled by rule {rule.rule_id}: {conflict_desc}",
-            )
-            rule = rule.model_copy(update={
-                "conflict_notes": f"Replaced rule {conflict_id}: {conflict_desc}"
-            })
-            conflicts_resolved = True
-        else:
-            conflicts_resolved = False
-
-        self._registry.add_rule(rule)
-        return "conflict_resolved" if conflicts_resolved else "saved"
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _make_verbatim_rule(self, inp: FeedbackInput) -> BusinessRule:
         """Create a BusinessRule directly from the raw correction text.
 
-        Used as a fallback when LLM interpretation (Stage 2) is unavailable.
+        Used as a fallback when LLM interpretation (Stage 1) is unavailable.
         Scope defaults to 'universal' for AD_HOC corrections so the rule is
         applied to all future ad-hoc queries via optimization_context.
         """
@@ -908,17 +442,6 @@ class FeedbackAgent(BaseAgent):
         )
 
     @staticmethod
-    def _scope_label(scope: str, rule_dict: dict, inp: FeedbackInput) -> str:
-        if scope == "campaign":
-            return f"This campaign only ({inp.campaign_name})"
-        elif scope == "pattern":
-            pat = rule_dict.get("pattern_description") or rule_dict.get("scope_signals", "similar campaigns")
-            return f"All campaigns matching: {pat}"
-        elif scope == "universal":
-            return "Every campaign we run"
-        return f"This campaign only ({inp.campaign_name})"
-
-    @staticmethod
     def _build_summary(
         confirmed: list[BusinessRule], pending: list[BusinessRule]
     ) -> str:
@@ -949,21 +472,20 @@ class FeedbackAgent(BaseAgent):
     # API callers
     # ------------------------------------------------------------------
 
-    def _call_with_caching(
-        self,
-        system_blocks: list[dict],
-        user_content: list[dict],
-        thinking: Optional[dict] = None,
-    ) -> str:
-        """Ask the AI, with knowledge context folded into the prompt.
+    def _call_with_caching(self, prompt: str) -> str:
+        """Ask the AI, with the knowledge context folded into the prompt.
 
-        Note: `thinking` (Fuel iX/Anthropic extended-thinking mode) and
-        prompt-caching have no Gemini equivalent wired up here -- this is a
-        plain call regardless of what's passed for `thinking`.
+        Note: Gemini has no equivalent to Fuel iX/Anthropic's ephemeral
+        prompt-caching, so this is a plain call regardless.
+
+        thinking_budget=0: every call this method makes asks for a fixed JSON
+        shape and nothing else -- exactly the kind of straightforward
+        formatting task core/ai_client.py's ask_ai() warns can get silently
+        truncated by hidden "thinking" tokens eating the token budget before
+        any visible output is written. Disabling it here is what makes the
+        response reliably complete.
         """
-        system = "\n\n".join(b.get("text", "") for b in system_blocks)
-        prompt = "\n\n".join(b.get("text", "") for b in user_content)
-        return ask_ai(prompt, system=system, temperature=0, max_tokens=2048)
+        return ask_ai(prompt, system=_FEEDBACK_SYSTEM, temperature=0, max_tokens=4096, thinking_budget=0)
 
     @staticmethod
     def _extract_json(text: str) -> Optional[dict]:
@@ -993,33 +515,18 @@ class FeedbackAgent(BaseAgent):
         return None
 
     # ------------------------------------------------------------------
-    # File helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_json_safe(path: Path) -> Optional[dict]:
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-
-    def _write_glossary_safe(self, glossary: dict) -> None:
-        try:
-            tmp_fd, tmp_name = tempfile.mkstemp(
-                dir=str(_GLOSSARY_PATH.parent), suffix=".tmp"
-            )
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-                json.dump(glossary, fh, indent=2, ensure_ascii=False)
-            os.replace(tmp_name, str(_GLOSSARY_PATH))
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    # Failure log (web mode only — terminal mode writes via HITLAuditLoop)
+    # Failure log — raw record of every correction, for manual review
     # ------------------------------------------------------------------
 
     def _write_failure_log_entry(self, inp: FeedbackInput) -> None:
-        """Append a SemanticFailureLog record for analysis and pattern digests."""
+        """Append a SemanticFailureLog record for manual review.
+
+        This raw log is not currently auto-summarized -- an earlier digest
+        feature that scanned it for patterns depended on a registry class
+        that no longer exists, and was removed as broken rather than kept as
+        a silent no-op. The log itself is real and complete; a human can read
+        semantic_failure_log.json directly.
+        """
         try:
             failure_type = self._infer_failure_type_from_text(inp.raw_correction)
             entry = SemanticFailureLog(
@@ -1031,7 +538,7 @@ class FeedbackAgent(BaseAgent):
                 correction_description=inp.raw_correction,
                 inferred_failure_type=failure_type,
                 glossary_gaps=[],
-                intent_type="general_question" if inp.campaign_code in ("", "AD_HOC") else "campaign_execution",
+                intent_type="general_question" if inp.campaign_code in ("", "AD_HOC") else "sizing_request",
             )
             records: list[dict] = []
             if _FAILURE_LOG_PATH.exists():

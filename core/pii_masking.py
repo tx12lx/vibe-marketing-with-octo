@@ -1,10 +1,4 @@
-"""core/pii_masking.py -- PII-aware schema fetch and result masking for BigQuery.
-
-Ported as-is from the legacy `Vibe OCTO Quant/bq_reporter/bq_client.py`, which
-was only reachable through a Python editable-install link pointing at a
-project folder that no longer exists (the project was renamed). This is a
-relocation, not a redesign -- the masking rules are unchanged.
-"""
+"""core/pii_masking.py -- PII-aware schema fetch and result masking for BigQuery."""
 import json
 import time
 import warnings

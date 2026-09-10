@@ -1,39 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
-
-
-class BriefExtraction(BaseModel):
-    """Structured extraction from a campaign data brief — produced by two-stage LLM extraction
-    in `--refresh-briefs` mode.  All fields default to empty so records written by
-    `--full-refresh` (which does not contact Google Sheets) are schema-valid."""
-
-    campaign_strategy_summary: str = ""
-    targeting_filters: list[str] = []
-    exclusion_rules: list[str] = []
-    channel_governance: dict[str, Any] = {}
-    geographic_scope: list[str] = []
-    lifecycle_constraints: list[str] = []
-    product_eligibility_pairs: list[str] = []
-    segmentation_only_notes: list[str] = []
-    ambiguities_found: list[str] = []
-    extraction_confidence: dict[str, float] = {}
-    extracted_at: Optional[str] = None
-
-
-class CampaignCriteria(BaseModel):
-    """Original schema — preserved for backwards compatibility."""
-
-    model_config = ConfigDict(strict=True)
-
-    campaign_name: str
-    campaign_code: str
-    campaign_sub_code: str
-    cadence: str
-    medium: str
-    exclusion_layers: Optional[list[str]] = None
 
 
 class AudienceSizingRequest(BaseModel):
@@ -104,115 +73,27 @@ class NexusErrorPayload(BaseModel):
     failed_sql: Optional[str] = None
 
 
-class UniversalJSONSpec(BaseModel):
-    """Universal inter-agent contract. Superset of AudienceSizingRequest.
-
-    Emitted by NexusAgent.build_universal_spec().
-    Consumed by QuantAgent.audit_from_spec() and BriefingAgent.subscribe().
-    """
-
-    model_config = ConfigDict(strict=True)
-
-    # Core identity
-    campaign_name: str
-    campaign_code: str
-    campaign_sub_code: str
-    cadence: str
-    medium: str
-
-    # Tier and knowledge source provenance
-    campaign_tier: Literal["GOLD", "SILVER", "BRONZE"]
-    knowledge_source: Literal["brief_text", "bq_metadata", "nl_only"]
-    gold_blueprint_id: Optional[str] = None  # "{camp_id}::{sub_camp_id}" if GOLD
-
-    # Audience definition
-    target_population: str
-    # filters is required and non-empty when consumed by QuantAgent (sizing/execution).
-    # For brief-only requests it defaults to [] -- BriefingAgent does not use SQL filters.
-    filters: list[str] = []
-    exclusion_layers: Optional[list[str]] = None
-    optimization_context: Optional[str] = None
-
-    # BQ routing
-    bq_project: str = "bi-srv-hsmdet-pr-7b9def"
-    bq_dataset: str = "campaign_data"
-
-    # Runtime audit output
-    discrepancy_flags: list[str] = []
-    runtime_schema_snapshot: Optional[dict] = None
-
-    # Briefing agent inputs
-    brief_agent_inputs: Optional[dict] = None
-
-    # Execution guardrails
-    max_waterfall_steps: int = 10
-    require_gch_suppression: bool = False
-    dnc_channels: list[str] = []
-
-    def to_audience_sizing_request(self) -> "AudienceSizingRequest":
-        """Backwards-compatible downcast for QuantAgent.audit()."""
-        return AudienceSizingRequest(
-            campaign_name=self.campaign_name,
-            campaign_code=self.campaign_code,
-            campaign_sub_code=self.campaign_sub_code,
-            cadence=self.cadence,
-            medium=self.medium,
-            target_population=self.target_population,
-            filters=self.filters,
-            exclusion_layers=self.exclusion_layers,
-            optimization_context=self.optimization_context,
-            bq_project=self.bq_project,
-            bq_dataset=self.bq_dataset,
-        )
-
-
 class IntentClassification(BaseModel):
     """Intent classification emitted by NexusAgent.classify_intent().
 
-    Replaces the WORKFLOW_A / WORKFLOW_B binary with a five-type taxonomy
-    so every request can be routed through the unified knowledge pipeline.
-
     intent_type is a plain str so new agents can register custom intent types
-    via HANDLED_INTENTS without changing this schema.  The orchestrator validates
-    at runtime against the discovered intent set.
+    via HANDLED_INTENTS without changing this schema.
+
+    campaign_identified/campaign_code are informational context about whether
+    the request named a specific past campaign -- kept for audit-trail quality
+    even though only one intent type (sizing_request) currently exists to act
+    on it, and it does so by translating the request directly from the
+    schema/glossary/business-rules knowledge base rather than by looking up a
+    stored campaign brief (see agents/nexus_agent.py's module docstring).
     """
 
-    intent_type: str  # validated at runtime against _INTENT_ROUTING keys
+    intent_type: str
     confidence: float
     campaign_identified: bool
     campaign_code: Optional[str] = None
     knowledge_sources_consulted: list[str] = []
     business_rules_applied: list[str] = []
     reasoning: str = ""
-    data_domains: list[str] = []  # AI-selected knowledge layer domains for this request
-
-
-class SegmentCriterion(BaseModel):
-    """A single named, mutually exclusive audience segment."""
-
-    name: str        # Short label, e.g. "Never Had Mobility"
-    description: str  # One precise sentence describing who qualifies
-
-
-class BriefingOutput(BaseModel):
-    """Output produced by BriefingAgent.execute()."""
-
-    campaign_name: str
-    tier: str
-    brief_markdown: str
-    executive_summary: str
-    targeting_logic_summary: str
-    strategic_recommendations: list[str]
-    data_sources_cited: list[str]
-    confidence_score: float  # 0.0 to 1.0
-    generated_at: str        # ISO 8601
-    error_reason: Optional[str] = None
-    knowledge_sources_used: Optional[list[str]] = None
-
-    # Structured targeting criteria — populated by all data brief generation paths
-    structured_universe: Optional[str] = None          # one-sentence initial universe
-    structured_exclusions: Optional[list[str]] = None  # ordered list of exclusion criteria
-    structured_segments: Optional[list[SegmentCriterion]] = None  # mutually exclusive segments
 
 
 class SemanticFailureLog(BaseModel):
@@ -233,7 +114,7 @@ class SemanticFailureLog(BaseModel):
         "general_answer",
     ]
     glossary_gaps: list[str]
-    intent_type: str = ""  # campaign_execution | general_question | brief_generation | etc.
+    intent_type: str = ""  # sizing_request | general_question
 
 
 class BusinessRule(BaseModel):

@@ -7,5 +7,4 @@
 # Current registered agents:
 #   nexus_agent.py    — NexusAgent (routing, intent classification, general_question)
 #   quant_agent.py    — QuantAgent (SQL generation, audience sizing)
-#   briefing_agent.py — BriefingAgent (campaign intelligence brief generation)
 #   feedback_agent.py — FeedbackAgent (correction interpretation, rule extraction)

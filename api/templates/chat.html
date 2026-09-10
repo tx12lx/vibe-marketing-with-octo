@@ -28,12 +28,6 @@
   --gold-bg:      #FFF8E6;
   --gold-txt:     #7A5000;
   --gold-border:  rgba(122, 80, 0, 0.25);
-  --silver-bg:    #F2F2F7;
-  --silver-txt:   #4A4860;
-  --silver-border:rgba(74, 72, 96, 0.25);
-  --bronze-bg:    #F5EDE6;
-  --bronze-txt:   #6A3E1C;
-  --bronze-border:rgba(106, 62, 28, 0.25);
   --info-bg:      #E6EFF8;
   --info-txt:     #1A4E82;
   --r-sm:  6px;
@@ -254,73 +248,6 @@ body {
 .audience-label { font-size: 11px; color: var(--txt-2); margin-bottom: 3px; }
 .audience-count { font-size: 28px; font-weight: 600; color: var(--txt); line-height: 1.1; margin-bottom: 8px; }
 
-.tier-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-
-.badge {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 9px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.badge-gold   { background: var(--gold-bg);   color: var(--gold-txt);   border-color: var(--gold-border); }
-.badge-silver { background: var(--silver-bg); color: var(--silver-txt); border-color: var(--silver-border); }
-.badge-bronze { background: var(--bronze-bg); color: var(--bronze-txt); border-color: var(--bronze-border); }
-
-.confidence { font-size: 12px; color: var(--txt-2); }
-
-/* Brief box */
-.brief-box {
-  background: var(--bg);
-  border-radius: var(--r-md);
-  padding: 10px 12px;
-}
-
-.brief-section-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--txt-2);
-  margin-bottom: 4px;
-  margin-top: 10px;
-}
-
-.brief-section-label:first-child { margin-top: 0; }
-
-.brief-text {
-  font-size: 12px;
-  color: var(--txt);
-  line-height: 1.65;
-}
-
-.brief-text.muted { color: var(--txt-2); font-style: italic; }
-
-.exclusion-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.exclusion-list li {
-  font-size: 12px;
-  color: var(--txt);
-  line-height: 1.55;
-  padding: 2px 0 2px 14px;
-  position: relative;
-}
-
-.exclusion-list li::before {
-  content: '–';
-  position: absolute;
-  left: 0;
-  color: var(--txt-3);
-}
-
 .optimization-note {
   margin-top: 10px;
   padding: 8px 10px;
@@ -328,18 +255,6 @@ body {
   border-radius: var(--r-sm);
   font-size: 11px;
   color: var(--info-txt);
-  line-height: 1.5;
-}
-
-/* Discrepancy flag */
-.flag-box {
-  margin-top: 10px;
-  padding: 8px 10px;
-  background: var(--amber-bg);
-  border: 1px solid var(--amber-border);
-  border-radius: var(--r-sm);
-  font-size: 11px;
-  color: var(--amber);
   line-height: 1.5;
 }
 
@@ -817,27 +732,14 @@ body {
     });
   }
 
-  // ── Tier badge ─────────────────────────────────────────
-  function tierBadgeHtml(tier) {
-    const t = (tier || '').toUpperCase();
-    const cls = t === 'GOLD' ? 'badge-gold' : t === 'SILVER' ? 'badge-silver' : 'badge-bronze';
-    const label = t === 'GOLD' ? '★ GOLD blueprint' : t === 'SILVER' ? 'SILVER blueprint' : 'BRONZE';
-    return `<span class="badge ${cls}">${label}</span>`;
-  }
-
   // ── Result card ─────────────────────────────────────────
+  // Only ever built for a sizing_request result (the only intent that
+  // produces a QuantAuditLog) -- general_question answers and the
+  // "couldn't complete this" case are rendered separately, above.
   function buildResultCard(data) {
-    const hasAudience = data.audience_count != null;
-    const hasBrief    = data.brief_universe || (data.brief_exclusions && data.brief_exclusions.length);
-
     const metaRows = [];
-    if (data.campaign_name)    metaRows.push(['Campaign', esc(data.campaign_name)]);
-    if (data.campaign_code) {
-      const code = data.campaign_sub_code && data.campaign_sub_code !== data.campaign_code
-        ? `<span class="code-val">${esc(data.campaign_code)}</span> / <span class="code-val">${esc(data.campaign_sub_code)}</span>`
-        : `<span class="code-val">${esc(data.campaign_code)}</span>`;
-      metaRows.push(['Code', code]);
-    }
+    if (data.campaign_name) metaRows.push(['Campaign', esc(data.campaign_name)]);
+    if (data.campaign_code) metaRows.push(['Code', `<span class="code-val">${esc(data.campaign_code)}</span>`]);
     if (data.medium)  metaRows.push(['Medium', esc(data.medium)]);
     if (data.cadence) metaRows.push(['Cadence', esc(data.cadence)]);
 
@@ -845,88 +747,30 @@ body {
       ? `<table class="meta-table">${metaRows.map(([l,v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join('')}</table>`
       : '';
 
-    const audienceHtml = hasAudience
-      ? `<hr class="divider">
+    const audienceHtml = `<hr class="divider">
          <div class="audience-label">Qualified contacts</div>
-         <div class="audience-count">${fmt(data.audience_count)}</div>`
-      : '';
-
-    const tierHtml = data.tier
-      ? `<div class="tier-row">
-           ${tierBadgeHtml(data.tier)}
-           ${data.confidence != null ? `<span class="confidence">Confidence ${data.confidence}%</span>` : ''}
-         </div>`
-      : '';
-
-    let briefHtml = '';
-    if (hasBrief) {
-      let inner = '';
-      if (data.brief_universe) {
-        inner += `<div class="brief-section-label">Initial universe</div>
-                  <div class="brief-text">${esc(data.brief_universe)}</div>`;
-      }
-      if (data.brief_exclusions && data.brief_exclusions.length) {
-        inner += `<div class="brief-section-label">Exclusion criteria</div>
-                  <ul class="exclusion-list">${data.brief_exclusions.map(e => `<li>${esc(e)}</li>`).join('')}</ul>`;
-      }
-      if (data.brief_segments && data.brief_segments.length) {
-        inner += `<div class="brief-section-label">Segments</div>`;
-        data.brief_segments.forEach(s => {
-          inner += `<div class="brief-text" style="margin-bottom:4px"><strong>${esc(s.name)}:</strong> ${esc(s.description)}</div>`;
-        });
-      }
-      briefHtml = `<div class="brief-box">${inner}</div>`;
-    } else if (data.brief_executive_summary) {
-      briefHtml = `<div class="brief-box">
-                     <div class="brief-section-label">Campaign brief</div>
-                     <div class="brief-text">${esc(data.brief_executive_summary)}</div>
-                   </div>`;
-    } else if (!hasAudience) {
-      // Nothing was produced -- show a friendly placeholder so the user knows
-      // something went wrong and can flag it via the HITL buttons below.
-      briefHtml = `<div class="brief-box" style="background:var(--surface-2,#f5f5f5); border-style:dashed;">
-                     <div class="brief-text" style="color:var(--text-secondary,#666);">
-                       I wasn't able to generate a result for this request. This can happen if the data needed for this specific question isn't in my knowledge base yet, or if the request was outside my current scope.<br><br>
-                       If you think this should have worked, please use the <strong>Something looks wrong</strong> button below to let me know.
-                     </div>
-                   </div>`;
-    }
+         <div class="audience-count">${fmt(data.audience_count)}</div>`;
 
     const noteHtml = data.optimization_note
       ? `<div class="optimization-note">${esc(data.optimization_note)}</div>`
       : '';
 
-    const flagsHtml = (data.discrepancy_flags && data.discrepancy_flags.length)
-      ? data.discrepancy_flags.map(f => `<div class="flag-box">Advisory: ${esc(f)}</div>`).join('')
-      : '';
-
-    const headerTitle = hasAudience && hasBrief ? 'Audience & campaign brief'
-                      : hasAudience             ? 'Audience breakdown'
-                      :                          'Campaign brief';
-
-    // Sizing/campaign-execution results drive real customer targeting -- for
-    // these, looking at the SQL/waterfall is required before confirming, so
-    // "Looks good" isn't offered until "Show me how it was built" has been
-    // used at least once (the server enforces this too; see /hitl's
-    // review_required response -- this isn't just a UI-level nicety).
-    const highImpact = data.intent_type === 'sizing_request' || data.intent_type === 'campaign_execution';
-    const hitlPrompt = highImpact
-      ? 'This affects real customer targeting -- please review how it was built before confirming.'
-      : 'Does this look right to you?';
-    const hitlButtons = highImpact
-      ? `<button class="btn btn-rev"  onclick="handleHitl('review')">Show me how it was built</button>
-         <button class="btn btn-no"   onclick="handleHitl('no')">Something looks wrong</button>`
-      : `<button class="btn btn-yes"  onclick="handleHitl('yes')">Looks good</button>
-         <button class="btn btn-rev"  onclick="handleHitl('review')">Show me how it was built</button>
+    // Sizing results drive real customer targeting -- looking at the
+    // SQL/waterfall is required before confirming, so "Looks good" isn't
+    // offered until "Show me how it was built" has been used at least once
+    // (the server enforces this too; see /hitl's review_required response --
+    // this isn't just a UI-level nicety).
+    const hitlPrompt = 'This affects real customer targeting -- please review how it was built before confirming.';
+    const hitlButtons = `<button class="btn btn-rev"  onclick="handleHitl('review')">Show me how it was built</button>
          <button class="btn btn-no"   onclick="handleHitl('no')">Something looks wrong</button>`;
 
     return `
       <div class="card">
         <div class="card-header">
-          <div class="card-header-title">${headerTitle}</div>
+          <div class="card-header-title">Audience breakdown</div>
         </div>
         <div class="card-body">
-          ${metaHtml}${audienceHtml}${tierHtml}${briefHtml}${noteHtml}${flagsHtml}
+          ${metaHtml}${audienceHtml}${noteHtml}
         </div>
         <div class="hitl" id="hitl-zone">
           <p class="hitl-prompt">${hitlPrompt}</p>

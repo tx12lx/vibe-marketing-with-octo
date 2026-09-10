@@ -1,18 +1,11 @@
-"""knowledge/context.py -- the one front door every agent goes through to
-reach the knowledge layer.
+"""knowledge/context.py -- the one front door every agent and API layer goes
+through to reach the knowledge layer.
 
-KnowledgeContext implements exactly the methods agents/nexus_agent.py,
-agents/quant_agent.py, and vibe_orchestrator.py already call defensively
-(they were written against the old, now-deleted knowledge layer, but every
-call site is guarded with "if knowledge_ctx is not None"). Passing a real
-instance of this class into those same setters is what turns the sizing
-pipeline's knowledge back on -- nothing about the agents themselves needs to
-change.
-
-The same instance also fills the runtime's rules_registry slot -- rather than
-reviving two separate legacy classes, one object is the single front door for
-both "knowledge to read" and "rules to persist", consistent with the plan's
-"one clear front door" goal.
+One KnowledgeContext instance, built once in vibe_orchestrator.build_runtime()
+and bound into every agent via set_knowledge_context(), is the single object
+for both "knowledge to read" (schema, glossary, business rules, campaigns) and
+"feedback to persist" (confirmations, corrections, rule approvals) -- see
+VibeRuntime.knowledge_ctx.
 
 Nothing here caches in memory: every call reads straight from the SQLite
 store, which is fast enough at this corpus size and means reload_rules() has
@@ -43,12 +36,6 @@ _SCOPES_REQUIRING_REVIEW = frozenset({"universal", "pattern"})
 
 _log = logging.getLogger(__name__)
 
-_DOMAIN_SCHEMA_FILTERING_NOTE = (
-    "Domain-based schema filtering across multiple tables is deferred to the full "
-    "knowledge-layer cutover (Step 4) -- with only one table synced today it has "
-    "nothing to narrow down yet."
-)
-
 
 class KnowledgeContext:
     """The single front door to the knowledge layer, for both agents to read
@@ -66,6 +53,12 @@ class KnowledgeContext:
             for m in matches
         )
         return f"<campaigns>\n{items}\n</campaigns>"
+
+    @property
+    def glossary_summary(self) -> str:
+        """Compact one-line-per-term glossary listing, for prompts that need a
+        short reference rather than the full nexus_context/feedback_context block."""
+        return retrieve.get_glossary_summary()
 
     @property
     def campaign_count(self) -> int:
@@ -87,16 +80,20 @@ class KnowledgeContext:
             + retrieve.get_active_rules_text()
         )
 
+    @property
+    def feedback_context(self) -> str:
+        return (
+            "TABLE SCHEMA (use only these real column names)\n" + retrieve.get_table_schema_text() + "\n\n"
+            "GLOSSARY\n" + retrieve.get_glossary_summary() + "\n\n"
+            "EXISTING CONFIRMED BUSINESS RULES\n" + retrieve.get_active_rules_text()
+        )
+
     def get_dynamic_context(self, query: str, session_corrections: Optional[list] = None) -> str:
         lines = []
         if session_corrections:
             lines.append("CORRECTIONS FROM THIS SESSION:")
             lines.extend(f"- {c}" for c in session_corrections)
         return "\n".join(lines)
-
-    def retrieve_schema_for_domains(self, domains: list[str]) -> str:
-        _log.debug(_DOMAIN_SCHEMA_FILTERING_NOTE)
-        return ""
 
     def reload_rules(self) -> None:
         pass  # nothing is cached -- every read already goes straight to the database
@@ -163,28 +160,3 @@ class KnowledgeContext:
 
     def _load(self) -> None:
         pass  # nothing is cached in memory to reload
-
-    # -- rules-registry-shaped surface, used by vibe_orchestrator.route_by_intent --
-    # Applying rule *effects* to a spec (filters/exclusions) is real business-rule
-    # engine work, deferred to the full Step 4 cutover -- these keep every
-    # currently-guarded call site safe rather than crashing now that this
-    # object is no longer None, without pretending to apply effects that
-    # haven't been built yet.
-
-    _rules: list = []
-    last_applied_ids: list = []
-
-    def get_rules_for_execution(self, camp_id=None, medium=None, cadence=None, **_kwargs) -> list:
-        return []
-
-    def get_display_summary(self, rules: list) -> str:
-        return ""
-
-    def apply_rules_to_spec(self, spec, rules: list):
-        return spec
-
-    def record_rules_applied(self, rules: list) -> None:
-        pass
-
-    def record_hitl_yes(self, rule_ids: list) -> None:
-        pass

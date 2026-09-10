@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from pydantic_schemas import BriefingOutput, QuantAuditLog
+    from pydantic_schemas import QuantAuditLog
 
 # Maximum characters Slack allows in a single section text block.
 _SLACK_TEXT_LIMIT = 3000
@@ -150,71 +150,12 @@ def format_sizing_result(log: "QuantAuditLog") -> list[dict]:
     return blocks
 
 
-def format_brief_result(brief: "BriefingOutput") -> list[dict]:
-    """Campaign brief result with HITL buttons."""
-    brief_text = (
-        brief.brief_markdown[:_SLACK_TEXT_LIMIT]
-        if brief.brief_markdown
-        else "_Brief content could not be generated. Please try again._"
-    )
-    blocks: list[dict] = [
-        _header(f"Campaign Brief -- {brief.campaign_name}"),
-        _divider(),
-        _fields(
-            ("Campaign", brief.campaign_name),
-            ("Tier", brief.tier),
-            ("Confidence", f"{brief.confidence_score:.0%}"),
-        ),
-        _section(brief_text),
-    ]
-
-    if brief.data_sources_cited:
-        sources_text = "\n".join(f"- {s}" for s in brief.data_sources_cited)
-        blocks.append(_context(f"*Data sources:* {sources_text}"))
-
-    blocks += [_divider(), _hitl_buttons()]
-    return blocks
-
-
-def format_combined_result(log: "QuantAuditLog", brief: "BriefingOutput") -> list[dict]:
-    """Audience sizing + brief together (campaign_execution intent)."""
-    campaign = log.request.campaign_name or brief.campaign_name or "Campaign"
-    waterfall_text = _format_waterfall(log)
-
-    blocks: list[dict] = [
-        _header(f"Campaign Execution -- {campaign}"),
-        _divider(),
-        _fields(
-            ("Final Audience", f"{log.final_count:,} qualified contacts"),
-            ("Brief Confidence", f"{brief.confidence_score:.0%}"),
-        ),
-        _section(f"*Audience Breakdown*\n```\n{waterfall_text}\n```"),
-        _divider(),
-        _header("Campaign Brief"),
-        _section(brief.brief_markdown[:_SLACK_TEXT_LIMIT]),
-        _divider(),
-        _hitl_buttons(),
-    ]
-    return blocks
-
-
 def format_sql_detail(log: "QuantAuditLog") -> list[dict]:
     """'Show me how it was built' response: the SQL waterfall query."""
     sql_text = (log.sql or "No SQL available")[:3800]
     return [
         _header("How Your Audience Was Built"),
         _section(f"*SQL Waterfall Query*\n```\n{sql_text}\n```"),
-    ]
-
-
-def format_sources_detail(brief: "BriefingOutput") -> list[dict]:
-    """'Show me how it was built' response for briefs: data sources used."""
-    sources = brief.data_sources_cited or []
-    sources_text = "\n".join(f"- {s}" for s in sources) if sources else "Campaign knowledge base"
-    return [
-        _header("How This Brief Was Built"),
-        _fields(("Tier", brief.tier), ("Confidence", f"{brief.confidence_score:.0%}")),
-        _section(f"*Data Sources*\n{sources_text}"),
     ]
 
 

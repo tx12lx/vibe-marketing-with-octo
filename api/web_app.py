@@ -5,9 +5,9 @@ Serves a professional HTML chat page and handles campaign queries,
 HITL button clicks, and correction submissions over HTTP.
 
 Multiple concurrent users are supported via per-session state isolation.
-File writes to shared learning artifacts (glossary.json, business_rules.json,
-verified_app_registry.json) are protected by a threading.Lock so simultaneous
-corrections from two users cannot corrupt those files.
+Writes to the shared knowledge layer (knowledge/store.py's SQLite database --
+confirmed corrections, new business rules) are protected by a threading.Lock
+so simultaneous corrections from two users cannot race each other.
 
 How to run:
     uvicorn api.web_app:app --host 0.0.0.0 --port 3000
@@ -48,9 +48,9 @@ from vibe_orchestrator import (  # noqa: E402
     generate_stuck_explanation,
     process_core_request,
 )
-from core.audit_logger import HITL_YES  # noqa: E402
+from core.audit_logger import HITL_NO, HITL_REVIEW_NO, HITL_REVIEW_YES, HITL_YES  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
-from pydantic_schemas import BriefingOutput, QuantAuditLog, UniversalJSONSpec  # noqa: E402
+from pydantic_schemas import QuantAuditLog  # noqa: E402
 from api.session_store import SessionStore  # noqa: E402
 
 _log = logging.getLogger(__name__)
@@ -63,9 +63,9 @@ _runtime: Optional[VibeRuntime] = None
 _session_store = SessionStore()
 
 # Intents whose result actually drives real customer targeting -- for these,
-# looking at the evidence (SQL / sources) is required before a "yes" is
-# accepted, not just offered as an optional button. See hitl_endpoint().
-_HIGH_IMPACT_INTENTS = frozenset({"sizing_request", "campaign_execution"})
+# looking at the evidence (SQL) is required before a "yes" is accepted, not
+# just offered as an optional button. See hitl_endpoint().
+_HIGH_IMPACT_INTENTS = frozenset({"sizing_request"})
 _executor = ThreadPoolExecutor(max_workers=4)
 _write_lock = threading.Lock()
 
@@ -335,7 +335,7 @@ async def hitl_endpoint(request: Request) -> JSONResponse:
             # Enforced here, not just left to the UI's button order -- a direct API
             # call can't skip past looking at the evidence either. See the "review
             # before approve" gap this closes: previously nothing stopped someone
-            # from confirming a sizing/campaign-execution result sight-unseen.
+            # from confirming a sizing result sight-unseen.
             return JSONResponse({
                 "type": "review_required",
                 "message": (
@@ -353,6 +353,7 @@ async def hitl_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(_build_review_response(session))
 
     # action == "no"
+    _log_hitl_resolution(session, session_id, HITL_REVIEW_NO if session.reviewed_this_result else HITL_NO)
     session.awaiting_correction = True
     return JSONResponse({
         "type": "correction_prompt",
@@ -380,7 +381,6 @@ async def correction_endpoint(request: Request) -> JSONResponse:
         _executor,
         _process_correction_sync,
         text,
-        session.last_spec,
         session.last_audit_log,
         session.last_query,
         session,
@@ -526,32 +526,24 @@ def _process_query_sync(text: str, session_id: str) -> dict:
             "detail": result.error[:300],
         }
 
-    if result.log is not None or result.brief_output is not None:
-        session.store_result(
-            query=text,
-            intent=result.intent,
-            spec=result.spec,
-            log=result.log,
-            brief=result.brief_output,
-        )
+    if result.log is not None:
+        session.store_result(query=text, intent=result.intent, log=result.log)
 
-    processing_notes = _build_processing_notes(result.intent, result.spec)
+    processing_notes = _build_processing_notes(result.intent)
     intent_type = result.intent.intent_type if result.intent else "general_question"
 
-    if intent_type == "general_question" and result.log is None and result.brief_output is None:
+    if intent_type == "general_question":
         return {
             "type": "general_answer",
             "processing_notes": processing_notes,
-            "message": "I've answered from the knowledge base. Is there anything else I can help with?",
+            "message": result.answer_text or "I've answered from the knowledge base. Is there anything else I can help with?",
         }
 
-    # If a non-general-question intent produced nothing useful, use the AI to
-    # generate a warm explanation and ask the user for a clarifying detail.
-    if result.log is None and result.brief_output is None:
+    # If a sizing request produced nothing useful, use the AI to generate a
+    # warm explanation and ask the user for a clarifying detail.
+    if result.log is None:
         session.last_query = text  # store for retry without user retyping
-        explanation = generate_stuck_explanation(
-            _runtime.nexus, text, result.intent, result.spec, result.brief_output
-        )
+        explanation = generate_stuck_explanation(_runtime.nexus, text, result.intent)
         return {
             "type": "stuck",
             "explanation": explanation,
@@ -571,52 +563,30 @@ def _format_result(result: RequestResult, processing_notes: list) -> dict:
         # Defaults so the frontend never KeyErrors
         "campaign_name": "",
         "campaign_code": "",
-        "campaign_sub_code": "",
         "medium": "",
         "cadence": "",
-        "tier": "",
-        "discrepancy_flags": [],
         "audience_count": None,
         "optimization_note": None,
         "confidence": None,
-        "brief_universe": "",
-        "brief_exclusions": [],
-        "brief_segments": [],
-        "brief_executive_summary": "",
         "knowledge_sources": [],
     }
 
-    if result.spec:
-        out["campaign_name"] = result.spec.campaign_name
-        out["campaign_code"] = result.spec.campaign_code
-        out["campaign_sub_code"] = result.spec.campaign_sub_code
-        out["medium"] = result.spec.medium
-        out["cadence"] = result.spec.cadence
-        out["tier"] = result.spec.campaign_tier
-        out["discrepancy_flags"] = result.spec.discrepancy_flags or []
-
     if result.log:
+        out["campaign_name"] = result.log.request.campaign_name
+        out["campaign_code"] = result.log.request.campaign_code
+        out["medium"] = result.log.request.medium
+        out["cadence"] = result.log.request.cadence
         out["audience_count"] = result.log.final_count
         out["optimization_note"] = result.log.optimization_note
 
-    if result.brief_output:
-        out["confidence"] = round(result.brief_output.confidence_score * 100)
-        out["brief_universe"] = result.brief_output.structured_universe or ""
-        out["brief_exclusions"] = result.brief_output.structured_exclusions or []
-        out["brief_segments"] = [
-            {"name": s.name, "description": s.description}
-            for s in (result.brief_output.structured_segments or [])
-        ]
-        out["brief_executive_summary"] = result.brief_output.executive_summary or ""
-        out["knowledge_sources"] = result.brief_output.knowledge_sources_used or []
-    elif result.intent:
+    if result.intent:
         out["confidence"] = round(result.intent.confidence * 100)
         out["knowledge_sources"] = result.intent.knowledge_sources_consulted or []
 
     return out
 
 
-def _build_processing_notes(intent, spec) -> list:
+def _build_processing_notes(intent) -> list:
     notes = []
     if intent is None:
         return notes
@@ -632,25 +602,45 @@ def _build_processing_notes(intent, spec) -> list:
     elif len(rules) > 1:
         notes.append(f"Applying {len(rules)} verified business rules")
 
-    if spec and spec.discrepancy_flags:
-        for flag in spec.discrepancy_flags[:2]:
-            notes.append(f"Advisory: {flag}")
-
     return notes
 
 
-def _handle_hitl_yes_sync(session, session_id: str) -> dict:
-    spec = session.last_spec
-    log = session.last_audit_log
-    brief = session.last_brief
+def _log_hitl_resolution(session, session_id: str, outcome: str) -> None:
+    """Record a HITL resolution (yes / no, review-qualified or not) to the audit log.
 
-    if spec is None or log is None:
+    Covers all three buttons -- previously only "yes" was ever logged, so the
+    audit trail silently had no record of "something looks wrong" or of
+    someone reviewing the evidence before deciding. campaign_id is best-effort
+    from whatever sizing result is on the session; never blocks the user-facing
+    response on a logging failure.
+    """
+    if _runtime is None or _runtime.audit_logger is None:
+        return
+    log = session.last_audit_log
+    campaign_id = log.request.campaign_code if log is not None else None
+    try:
+        _runtime.audit_logger.log_hitl_resolution(
+            session_id=session_id,
+            user=getattr(session, "last_sender", "web-unverified"),
+            campaign_id=campaign_id,
+            hitl_outcome=outcome,
+        )
+    except Exception:
+        pass
+
+
+def _handle_hitl_yes_sync(session, session_id: str) -> dict:
+    log = session.last_audit_log
+
+    if log is None:
         return {
             "type": "hitl_confirmed",
             "message": "Result confirmed. Thanks!",
             "detail": "",
         }
 
+    campaign_code = log.request.campaign_code
+    campaign_name = log.request.campaign_name or "this request"
     confirmation_saved = False
     user_identity = getattr(session, "last_sender", "web-unverified")
 
@@ -658,23 +648,17 @@ def _handle_hitl_yes_sync(session, session_id: str) -> dict:
         if _runtime.knowledge_ctx is not None:
             try:
                 _runtime.knowledge_ctx.record_confirmation(
-                    campaign_code=spec.campaign_code,
+                    campaign_code=campaign_code,
                     user_identity=user_identity,
                 )
                 confirmation_saved = True
             except Exception as exc:
                 _log.warning("Knowledge-layer confirmation write failed: %s", exc)
 
-        if _runtime.audit_logger is not None:
-            try:
-                _runtime.audit_logger.log_hitl_resolution(
-                    session_id=session_id,
-                    user=user_identity,
-                    campaign_id=spec.campaign_code,
-                    hitl_outcome=HITL_YES,
-                )
-            except Exception:
-                pass
+    # session.reviewed_this_result is read before the endpoint clears HITL
+    # state, so this still reflects whether the evidence was actually looked
+    # at before "yes" -- see the review-before-approve gate in hitl_endpoint().
+    _log_hitl_resolution(session, session_id, HITL_REVIEW_YES if session.reviewed_this_result else HITL_YES)
 
     # This message must describe only what actually happened: a confirmation
     # receipt recorded in the knowledge layer's history (knowledge/store.py's
@@ -684,7 +668,7 @@ def _handle_hitl_yes_sync(session, session_id: str) -> dict:
     if confirmation_saved:
         return {
             "type": "hitl_confirmed",
-            "message": f"Got it -- I've recorded that '{spec.campaign_name}' was confirmed correct.",
+            "message": f"Got it -- I've recorded that '{campaign_name}' was confirmed correct.",
             "detail": "This confirmation is saved in the knowledge layer's history.",
         }
     return {
@@ -696,15 +680,6 @@ def _handle_hitl_yes_sync(session, session_id: str) -> dict:
 
 def _build_review_response(session) -> dict:
     log = session.last_audit_log
-    brief = session.last_brief
-    intent_type = session.last_intent.intent_type if session.last_intent else ""
-
-    if intent_type in ("brief_generation", "brief_qa") and brief is not None:
-        return {
-            "type": "review_sources",
-            "sources": brief.data_sources_cited or [],
-            "knowledge_sources": brief.knowledge_sources_used or [],
-        }
 
     if log is not None and log.sql:
         return {
@@ -721,7 +696,6 @@ def _build_review_response(session) -> dict:
 
 def _process_correction_sync(
     correction: str,
-    spec: Optional[UniversalJSONSpec],
     log: Optional[QuantAuditLog],
     query: str,
     session=None,
@@ -729,9 +703,8 @@ def _process_correction_sync(
     try:
         from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
         feedback_output = _run_adhoc_feedback(
-            spec, log, query, correction,
+            log, query, correction,
             knowledge_ctx=_runtime.knowledge_ctx,
-            non_interactive=True,
             user_identity=getattr(session, "last_sender", "web-unverified") if session is not None else "web-unverified",
         )
 
@@ -778,17 +751,13 @@ def _save_confirmed_correction_sync(session, pending: dict) -> dict:
             # (contained to the one campaign already being worked on) stays immediate.
             any_active = False
             any_pending = False
-            if rules and _runtime.rules_registry is not None:
+            if rules and _runtime.knowledge_ctx is not None:
                 for rule in rules:
-                    outcome = _runtime.rules_registry.add_rule(rule)
+                    outcome = _runtime.knowledge_ctx.add_rule(rule)
                     if outcome.get("status") == "pending_review":
                         any_pending = True
                     else:
                         any_active = True
-
-            if _runtime.rules_registry is not None:
-                _runtime.rules_registry._load()
-            if _runtime.knowledge_ctx is not None:
                 _runtime.knowledge_ctx.reload_rules()
 
             record = text + (f" [Understood: {interpretation}]" if interpretation else "")
@@ -839,24 +808,19 @@ def _process_clarification_sync(clarification: str, session_id: str, session) ->
     try:
         from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
         feedback_output = _run_adhoc_feedback(
-            session.last_spec,
             session.last_audit_log,
             original_query,
             clarification,
             knowledge_ctx=_runtime.knowledge_ctx,
-            non_interactive=True,
             user_identity=getattr(session, "last_sender", "web-unverified"),
         )
         if feedback_output is not None:
             rules = feedback_output.rules_confirmed or []
             interpretation = feedback_output.interpretation_summary or ""
             with _write_lock:
-                if rules and _runtime.rules_registry is not None:
+                if rules and _runtime.knowledge_ctx is not None:
                     for rule in rules:
-                        _runtime.rules_registry.add_rule(rule)
-                if _runtime.rules_registry is not None:
-                    _runtime.rules_registry._load()
-                if _runtime.knowledge_ctx is not None:
+                        _runtime.knowledge_ctx.add_rule(rule)
                     _runtime.knowledge_ctx.reload_rules()
             record = clarification + (f" [Understood: {interpretation}]" if interpretation else "")
             session.active_corrections.append(record)

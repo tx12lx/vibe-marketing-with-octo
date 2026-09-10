@@ -10,9 +10,9 @@ persistence functions directly rather than reimplementing them -- one clear
 front door for business logic and permanent storage; only the presentation
 layer (this file + api/slack_formatter.py) is Slack-specific.
 
-Scope for this pass: sizing_request and general_question intents only --
-briefing is still None in build_runtime() today (same gap the web UI has),
-so brief/campaign-execution intents aren't functional yet, independent of Slack.
+Only two intents exist: sizing_request and general_question -- see
+agents/nexus_agent.py's module docstring for why the earlier
+brief/campaign-execution machinery was removed rather than kept as dead code.
 The "stuck, need a clarifying detail" case is shown as a one-shot explanation
 here (no retry loop yet, unlike the web UI) -- ask a fresh question instead.
 
@@ -107,33 +107,23 @@ def _handle_query(text: str, channel: str, thread_ts: str, session: SlackSession
         )
         return
 
-    if result.log is not None or result.brief_output is not None:
-        session.store_result(
-            query=text, intent=result.intent, spec=result.spec, log=result.log, brief=result.brief_output,
-        )
+    if result.log is not None:
+        session.store_result(query=text, intent=result.intent, log=result.log)
 
     intent_type = result.intent.intent_type if result.intent else "general_question"
 
-    if intent_type == "general_question" and result.log is None and result.brief_output is None:
-        _post(
-            client, channel, thread_ts, "Answered from the knowledge base.",
-            blocks=fmt.format_general_answer("I've answered from the knowledge base. Is there anything else I can help with?"),
-        )
+    if intent_type == "general_question":
+        answer = result.answer_text or "I've answered from the knowledge base. Is there anything else I can help with?"
+        _post(client, channel, thread_ts, "Answered from the knowledge base.", blocks=fmt.format_general_answer(answer))
         return
 
-    if result.log is None and result.brief_output is None:
+    if result.log is None:
         session.last_query = text
-        explanation = generate_stuck_explanation(_runtime.nexus, text, result.intent, result.spec, result.brief_output)
+        explanation = generate_stuck_explanation(_runtime.nexus, text, result.intent)
         _post(client, channel, thread_ts, "I need a bit more information.", blocks=fmt.format_error(explanation))
         return
 
-    if result.log is not None and result.brief_output is not None:
-        blocks = fmt.format_combined_result(result.log, result.brief_output)
-    elif result.brief_output is not None:
-        blocks = fmt.format_brief_result(result.brief_output)
-    else:
-        blocks = fmt.format_sizing_result(result.log)
-
+    blocks = fmt.format_sizing_result(result.log)
     _post(client, channel, thread_ts, f"Result for: {text}", blocks=blocks)
 
 
@@ -150,7 +140,7 @@ def _safe_handle_correction_text(text: str, channel: str, thread_ts: str, sessio
 
 def _handle_correction_text(text: str, channel: str, thread_ts: str, session: SlackSessionState) -> None:
     client = app.client
-    result = web_app._process_correction_sync(text, session.last_spec, session.last_audit_log, session.last_query, session)
+    result = web_app._process_correction_sync(text, session.last_audit_log, session.last_query, session)
 
     if result["type"] == "correction_clarifying":
         session.awaiting_correction = True  # the next @mention is the answer to this question
@@ -190,12 +180,11 @@ def handle_hitl_review(ack, body, client) -> None:
     channel = body["channel"]["id"]
     thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
     session = _session_store.get(channel)
+    session.reviewed_this_result = True
     result = web_app._build_review_response(session)
 
     if result["type"] == "review_sql":
         blocks = fmt.format_sql_detail(session.last_audit_log)
-    elif result["type"] == "review_sources":
-        blocks = fmt.format_sources_detail(session.last_brief)
     else:
         blocks = fmt.format_error(result.get("message", "No detail is available for this result."))
     _post(client, channel, thread_ts, "Here's how it was built.", blocks=blocks)
@@ -207,6 +196,8 @@ def handle_hitl_no(ack, body, client) -> None:
     channel = body["channel"]["id"]
     thread_ts = body["message"].get("thread_ts") or body["message"]["ts"]
     session = _session_store.get(channel)
+    outcome = web_app.HITL_REVIEW_NO if session.reviewed_this_result else web_app.HITL_NO
+    web_app._log_hitl_resolution(session, channel, outcome)
     session.awaiting_correction = True
     _post(client, channel, thread_ts, "No problem! Please describe what looks wrong in your own words -- no need to be technical.")
 

@@ -1,13 +1,12 @@
 """
 Vibe OCTO Quant — Technical Auditor Agent
 
-Receives a validated AudienceSizingRequest from Nexus and:
-  1. Strictly rejects any payload that does not conform to AudienceSizingRequest.
-  2. Generates a BigQuery waterfall SQL query via Fuel iX Claude.
-  3. Executes the query against BigQuery using ADC credentials.
-  4. Masks customer PII in Python before returning results.
-  5. Parses the waterfall rows and computes an optimization note.
-  6. Returns a QuantAuditLog on success, or a NexusErrorPayload on any failure —
+Receives a validated AdHocSizingRequest from Nexus (direct_count) and:
+  1. Generates a BigQuery waterfall SQL query via the knowledge-grounded prompt.
+  2. Executes the query against BigQuery using ADC credentials.
+  3. Masks customer PII in Python before returning results.
+  4. Parses the waterfall rows and computes an optimization note.
+  5. Returns a QuantAuditLog on success, or a NexusErrorPayload on any failure —
      never raises raw exceptions to the orchestrator.
 """
 from __future__ import annotations
@@ -20,28 +19,23 @@ import warnings
 from pathlib import Path
 from typing import Optional, Union
 
-import requests
 from dotenv import load_dotenv
-from pydantic import ValidationError
 from core.resilience import resilient_bq_query
 from core.ai_client import ask_ai
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
-_QUANT_DIR = _ROOT_DIR / "Vibe OCTO Quant"  # original subdirectory for .env loading
 
 for _p in [str(_ROOT_DIR)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-load_dotenv(_QUANT_DIR / ".env")
+load_dotenv(_ROOT_DIR / ".env")
 
 from pydantic_schemas import (
     AdHocSizingRequest,
-    AudienceSizingRequest,
     NexusErrorPayload,
     QuantAuditLog,
-    UniversalJSONSpec,
     WaterfallLayer,
 )
 from core.base_agent import BaseAgent
@@ -90,79 +84,6 @@ _QUANT_SYSTEM = (
     "The very first character of the response must be 'W' (WITH) or 'S' (SELECT).\n"
     "Emitting any prose causes an immediate parse failure in the execution pipeline."
 )
-
-_WATERFALL_SQL_PROMPT = """Generate a BigQuery audience waterfall query for this sizing request.
-
-Campaign   : {campaign_name} ({campaign_code} / {campaign_sub_code})
-Population : {target_population}
-Filters    : {filters_json}
-Exclusions : {exclusions_json}
-BQ Project : {bq_project}
-BQ Dataset : {bq_dataset}
-
-Note: Filters and Exclusions above have been sieved by Nexus to contain only Targeting
-Criteria (province scope, propensity deciles, lifecycle windows, GCH recency suppression,
-product pairs, channel governance flags). Segmentation criteria — copy splits, language
-ratios, creative version rules — have been discarded upstream. Do not reintroduce them.
-
-Available schema:
-{schema_context}
-
-Waterfall structure required — two fixed anchors with request-determined middle steps.
-Total CTEs: 3-10 (choose based on which filters actually apply; no pass-throughs allowed):
-
-  CTE 1 (always): "Base Universe"
-    SELECT * FROM `{bq_project}.{bq_dataset}.<table>` WHERE UPPER(lob_desc) IN (...) AND standard_exclusions = 0
-
-  Dynamic middle CTEs — include only when the filter applies:
-    Active Eligible Subscribers  : WHERE primary_sub = 1 AND sub_status = 'A' AND standard_exclusions = 0 AND stop_sell = 0
-                                   Combine into one step when all apply.
-    Geographic Filter            : province scope (when specified in Filters/Exclusions)
-    Product Eligibility          : ownership/eligibility pairs (when cross-sell in Filters)
-    Lifecycle Window             : commit_end_date / T-X window (when specified in Filters)
-    NBA Model Filter             : Table 2 join (when propensity model in Filters)
-    GCH Suppression              : LEFT JOIN anti-join per system rules (when GCH in Exclusions)
-                                   Resolve CAMPAIGN_CD, CAMPAIGN_SUB_CD, interval days from
-                                   the suppression entry in Exclusions above.
-    Channel Governance           : DNC flag constraints; must precede "Final Targetable Audience"
-                                   Apply channel exclusivity sieve when 'only', 'exclusively',
-                                   or 'solely' pairs with a channel: named = 0, unnamed = 1.
-                                   Four governed flags: em_dnc, sms_dnc, ob_dnc, dm_dnc.
-                                   When GCH in Exclusions, embed GCH LEFT JOIN anti-join here
-                                   using SELECT t.* FROM <prior> t LEFT JOIN ... pattern.
-
-  Last CTE (always): "Final Targetable Audience"
-    SELECT * FROM <prior_cte> WHERE control_group_flg = 'N'
-    Label must be exactly "Final Targetable Audience"
-
-The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
-Every arm MUST carry explicit column aliases — no arm may omit step_order, AS layer_name, or AS audience_count.
-Schema identical for every arm (step_order integer keeps BigQuery from reordering rows):
-  SELECT <N> AS step_order, '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
-  UNION ALL ...
-  ORDER BY step_order
-N starts at 1 for "Base Universe" and increments by 1 for each subsequent arm.
-First arm is always "Base Universe" (step_order=1); last arm is always "Final Targetable Audience".
-control_group_flg = 'N' must NOT appear in any CTE above "Final Targetable Audience".
-
-CTE structure rules — non-negotiable:
-- Linear SELECT * inheritance: every CTE selects ALL columns from the immediately preceding
-  CTE so that downstream WHERE clauses can reference any column without ambiguity.
-    <any_cte>  : SELECT * FROM <prior_cte> WHERE <this_step_filter>
-    EXCEPTION: when joining Table 2 or a self-join, alias the preceding CTE as t and use
-    SELECT t.* to carry all columns while joining.
-    EXCEPTION: GCH suppression uses SELECT t.* FROM <prior> t LEFT JOIN ... per system rules.
-
-Constraints:
-- Never SELECT any customer identifier values in output — only aggregate counts
-- Apply filters cumulatively (each CTE builds on the previous WHERE clause)
-- Use ONLY the filter criteria listed above — do not add extra WHERE conditions from
-  historical campaign knowledge or assumed targeting patterns not present in Filters
-- If the schema does not contain an expected field, use the closest available field
-  and add a comment explaining the substitution
-
-OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
-The first character must be 'W' (WITH). Any explanatory text causes a pipeline parse failure."""
 
 # ---------------------------------------------------------------------------
 # FFH table awareness — injected whenever a query targets bq_dly_dbm_customer_profl
@@ -233,7 +154,7 @@ First arm label: "Base Universe" (step_order=1). Last arm label: "Final Targetab
 
 
 def _is_ffh_request(
-    request: "AudienceSizingRequest",
+    request: "AdHocSizingRequest",
 ) -> bool:
     """Return True if the request targets the FFH/Home Solutions table."""
     text = " ".join(filter(None, [
@@ -311,8 +232,8 @@ The first character must be 'W' (WITH). Any explanatory text causes a pipeline p
 
 class QuantAgent(BaseAgent):
     WORKER_ID = "quant_v1"
-    HANDLED_INTENTS: frozenset[str] = frozenset({"sizing_request", "campaign_execution"})
-    INPUT_SCHEMA = UniversalJSONSpec
+    HANDLED_INTENTS: frozenset[str] = frozenset({"sizing_request"})
+    INPUT_SCHEMA = AdHocSizingRequest
     OUTPUT_SCHEMA = QuantAuditLog
 
     def __init__(self) -> None:
@@ -320,7 +241,6 @@ class QuantAgent(BaseAgent):
         self._default_dataset = os.getenv("BQ_DATASET", "campaign_data")
         self._last_sql: str = ""
         self._session_context: str = ""
-        self._runtime_schema: str = ""
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
 
     def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
@@ -331,94 +251,22 @@ class QuantAgent(BaseAgent):
     # BaseAgent contract
     # ------------------------------------------------------------------
 
-    def subscribe(self, spec: UniversalJSONSpec) -> None:
-        """Store the UniversalJSONSpec for the current execution cycle."""
-        self._pending_spec: Optional[UniversalJSONSpec] = spec
+    def subscribe(self, spec: AdHocSizingRequest) -> None:
+        """Not used — QuantAgent is invoked via direct_count(), not subscribe/execute."""
 
     def execute(self) -> QuantAuditLog:
-        """Execute the audit pipeline against the subscribed spec.
-
-        Delegates to audit_from_spec(). If no spec has been subscribed,
-        returns a NexusErrorPayload-equivalent wrapped as an audit failure.
-        """
-        pending = getattr(self, "_pending_spec", None)
-        if pending is None:
-            raise RuntimeError("subscribe() must be called before execute()")
-        return self.audit_from_spec(pending)
+        """Not used — QuantAgent is invoked via direct_count(), not subscribe/execute."""
+        raise NotImplementedError(
+            "QuantAgent does not use the subscribe/execute interface. Call direct_count() directly."
+        )
 
     def set_session_context(self, context: str) -> None:
         """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
         self._session_context = context
 
-    def set_runtime_schema(self, schema_str: str) -> None:
-        """Receive the live INFORMATION_SCHEMA snapshot injected by the orchestrator (Pillar 2).
-
-        Stored for use in SQL generation prompts. The injected string contains
-        live column metadata from INFORMATION_SCHEMA.COLUMNS, distinct from the
-        VIEW DDL fetched by _fetch_schema(). Both can be used together: VIEW DDL
-        provides field types for SQL generation; the snapshot provides structural
-        coverage for zero-shot BRONZE path reasoning.
-        """
-        self._runtime_schema = schema_str
-
     # ------------------------------------------------------------------
     # Public API — strict gateway, never raises to orchestrator
     # ------------------------------------------------------------------
-
-    def audit_from_spec(
-        self, spec: UniversalJSONSpec
-    ) -> Union[QuantAuditLog, NexusErrorPayload]:
-        """Accept a UniversalJSONSpec and delegate to the existing audit() pipeline.
-
-        Downcasts spec to AudienceSizingRequest via to_audience_sizing_request().
-        The 7-step CTE waterfall, PII masking, optimization notes, and error
-        boundary logic are entirely unchanged.
-        """
-        return self.audit(spec.to_audience_sizing_request().model_dump())
-
-    def audit(self, payload: dict) -> Union[QuantAuditLog, NexusErrorPayload]:
-        """Validate payload and run the full audit pipeline.
-
-        Returns QuantAuditLog on success, NexusErrorPayload on any failure.
-        Raw exceptions are suppressed — Nexus receives structured error context.
-        """
-        try:
-            request = AudienceSizingRequest(**payload)
-        except ValidationError as exc:
-            field_errors = "; ".join(
-                f"{'.'.join(str(l) for l in e['loc'])}: {e['msg']}"
-                for e in exc.errors()[:3]
-            )
-            return NexusErrorPayload(
-                error_type="validation_error",
-                error_summary=(
-                    f"Payload rejected — {exc.error_count()} field error(s). {field_errors}"
-                ),
-                original_request=payload,
-                retry_hint=(
-                    "Ensure all required fields are present and correctly typed. "
-                    "Required: campaign_name (str), campaign_code (str), "
-                    "campaign_sub_code (str), cadence (str), medium (str), "
-                    "target_population (str), filters (list[str] — at least one entry), "
-                    "bq_project (str), bq_dataset (str)."
-                ),
-            )
-
-        self._last_sql = ""
-        try:
-            return self._run_audit(request)
-        except Exception as exc:
-            return NexusErrorPayload(
-                error_type="database_error",
-                error_summary=str(exc)[:400],
-                original_request=payload,
-                failed_sql=self._last_sql or None,
-                retry_hint=(
-                    "Check that target_population and filters use standard telecom "
-                    "marketing terminology recognisable in the BQ schema. "
-                    "Verify ADC credentials are active for the BQ project."
-                ),
-            )
 
     def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
         """Path 2 — execute a request-aware waterfall count query for an ad-hoc sizing request."""
@@ -482,34 +330,6 @@ class QuantAgent(BaseAgent):
                 ),
             )
 
-    # ------------------------------------------------------------------
-    # Audit pipeline
-    # ------------------------------------------------------------------
-
-    def _run_audit(self, request: AudienceSizingRequest) -> QuantAuditLog:
-        ThoughtDisplay.sql_generation(
-            request.campaign_name,
-            len(request.filters or []),
-            len(request.exclusion_layers or []),
-        )
-        schema = self._fetch_schema(request.bq_project, request.bq_dataset)
-        sql = self._generate_waterfall_sql(request, schema)
-        ThoughtDisplay.progress("Audience blueprint ready. Running the analysis now...")
-        raw_rows = self._execute_query(sql, request.bq_project)
-        masked_rows = _mask_pii(raw_rows)
-        waterfall = _parse_waterfall(masked_rows)
-        note = _optimization_note(waterfall)
-        final_count = _final_audience_count(waterfall)
-        ThoughtDisplay.results_ready(final_count, waterfall, note)
-
-        return QuantAuditLog(
-            request=request,
-            sql=sql,
-            waterfall=waterfall,
-            final_count=final_count,
-            optimization_note=note,
-        )
-
     def _fetch_schema(self, project: str, dataset: str) -> str:
         """Schema + business meaning, from the knowledge layer -- not a live
         BigQuery fetch. This is the single source of what Quant knows about
@@ -525,38 +345,6 @@ class QuantAgent(BaseAgent):
             return text
         except Exception:
             return f"-- Schema unavailable for {project}.{dataset}"
-
-    def _generate_waterfall_sql(
-        self, request: AudienceSizingRequest, schema: str
-    ) -> str:
-        prompt = _WATERFALL_SQL_PROMPT.format(
-            campaign_name=request.campaign_name,
-            campaign_code=request.campaign_code,
-            campaign_sub_code=request.campaign_sub_code,
-            target_population=request.target_population,
-            filters_json=json.dumps(request.filters, ensure_ascii=False),
-            exclusions_json=json.dumps(request.exclusion_layers or [], ensure_ascii=False),
-            bq_project=request.bq_project,
-            bq_dataset=request.bq_dataset,
-            schema_context=schema[:6000] if schema else "(not available)",
-        )
-        # Append FFH column override when the request targets the Home Solutions table.
-        if _is_ffh_request(request):
-            ffh_project = request.bq_project or self._default_project
-            prompt = prompt + "\n" + _FFH_WATERFALL_OVERRIDE.format(bq_project=ffh_project)
-        # Apply optimization_context corrections when present.
-        opt_ctx = (request.optimization_context or "").strip()
-        if opt_ctx:
-            prompt = (
-                prompt
-                + f"\n\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
-                f" Apply these substitutions exactly as stated:\n{opt_ctx}\n"
-            )
-        sql = self._call_sql(prompt)
-        self._last_sql = sql
-        if os.getenv("QUANT_DEBUG_SQL"):
-            print(f"[Quant SQL — waterfall]\n{sql}\n", file=sys.stderr)
-        return sql
 
     def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
         opt_ctx = (request.optimization_context or "").strip()
@@ -654,19 +442,6 @@ def _mask_pii(rows: list[dict]) -> list[dict]:
             masked[k] = "***" if _is_filter_only_pii(k) else v
         out.append(masked)
     return out
-
-
-
-def _log_waterfall(waterfall: list[WaterfallLayer]) -> None:
-    if not waterfall:
-        return
-    width_label = max(len(l.layer_name) for l in waterfall)
-    divider = "-" * (width_label + 18)
-    print(f"\n{'AUDIENCE WATERFALL':^{width_label + 18}}")
-    print(divider)
-    for layer in waterfall:
-        print(f"  {layer.layer_name:<{width_label}}  {layer.audience_count:>12,}")
-    print(divider)
 
 
 def _parse_waterfall(rows: list[dict]) -> list[WaterfallLayer]:
