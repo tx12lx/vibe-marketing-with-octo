@@ -1,1 +1,1 @@
-web: python slack_cloud_run.py
+web: python web_cloud_run.py

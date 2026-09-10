@@ -189,12 +189,66 @@ async def favicon_ico() -> Response:
 # Startup
 # ---------------------------------------------------------------------------
 
+def _sync_schema_thread() -> None:
+    """Sync the knowledge layer's schema in the background, not blocking startup.
+
+    A real Cloud Run deploy showed this can take longer than Cloud Run's
+    startup-probe timeout on a cold container -- if it ran before the app
+    started serving, a slow (or hanging) sync could mean the container never
+    opens its port at all and never starts. Running it here instead means the
+    app is reachable immediately; queries in the first few seconds may see an
+    empty or stale schema until this finishes, which is the same graceful
+    degradation the knowledge layer already handles (see knowledge/store.py's
+    check_health()), not a new failure mode.
+    """
+    def _run() -> None:
+        try:
+            from knowledge.sync_schema import main as sync_schema_main  # noqa: PLC0415
+
+            _log.info("Syncing the knowledge layer's schema in the background...")
+            sync_schema_main()
+            _log.info("Knowledge layer schema sync complete.")
+        except Exception:
+            _log.exception("Schema sync failed (the app keeps serving with whatever schema was already synced).")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _start_slack_bot_thread(runtime: VibeRuntime) -> None:
+    """Start the Slack bot in a background thread, sharing this process's
+    already-built runtime (and therefore its one KnowledgeContext) instead of
+    letting the Slack side build its own -- that's the whole point of running
+    both front ends in one process: exactly one knowledge database, not two
+    that can drift apart. Only runs if Slack credentials are configured; the
+    import is deferred so a slow or failing Slack import can't block the web
+    app's own startup or health checks (same reasoning as slack_cloud_run.py's
+    existing background-thread pattern this reuses)."""
+    if not (os.getenv("SLACK_BOT_TOKEN") and os.getenv("SLACK_APP_TOKEN")):
+        _log.info("SLACK_BOT_TOKEN/SLACK_APP_TOKEN not set -- Slack front end disabled, serving web chat only.")
+        return
+
+    def _run() -> None:
+        try:
+            from api.slack_app import main as start_slack_bot  # noqa: PLC0415
+
+            start_slack_bot(runtime=runtime)
+        except Exception:
+            # Previously this could fail silently in the background with nothing
+            # but a buried stack trace -- log it loudly instead so a broken Slack
+            # connection is never mistaken for a working one.
+            _log.exception("Slack bot failed to start -- web chat is unaffected, but Slack is not connected.")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     global _runtime
     _log.info("Vibe OCTO web server starting — initializing runtime...")
+    _sync_schema_thread()
     loop = asyncio.get_event_loop()
     _runtime = await loop.run_in_executor(_executor, build_runtime)
+    _start_slack_bot_thread(_runtime)
 
     fuelix_key = os.getenv("FUELIX_API_KEY", "")
     bq_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")

@@ -1,9 +1,14 @@
 """web_cloud_run.py -- Cloud Run entry point for the browser web app.
 
 Runs api/web_app.py's FastAPI app directly on $PORT. The knowledge layer's
-schema is synced once, synchronously, before the app starts serving --
-this container's local disk does not survive a restart, so it starts with
-the same knowledge gap the Slack Cloud Run host does (see slack_cloud_run.py).
+schema sync (and, if Slack credentials are configured, the Slack bot itself)
+both start in the background from api/web_app.py's own startup event, so
+this file just needs to open the port -- a real deploy showed schema sync can
+take longer than Cloud Run's startup-probe timeout on a cold container, which
+meant blocking on it here before uvicorn ever started serving could leave the
+container unable to start at all. This container's local disk does not
+survive a restart, so it starts with the same knowledge gap the Slack Cloud
+Run host does (see slack_cloud_run.py) until sync catches back up.
 
 Reachable by the public over HTTPS, but only after Identity-Aware Proxy
 authenticates the caller as one of the people granted
@@ -34,7 +39,6 @@ from fastapi import Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from knowledge.store import _db_path, connect
-from knowledge.sync_schema import main as sync_schema_main
 from api.web_app import app
 
 _log = logging.getLogger(__name__)
@@ -209,11 +213,12 @@ async def upload_knowledge_db(request: Request) -> dict:
 
 
 if __name__ == "__main__":
-    try:
-        _log.info("Syncing the knowledge layer's schema before serving requests...")
-        sync_schema_main()
-    except Exception as exc:  # noqa: BLE001 -- a failed sync shouldn't stop the app from starting
-        _log.warning("Schema sync at startup failed (app will still start): %s", exc)
-
+    # Schema sync now runs in the background from api/web_app.py's own startup
+    # event (see _sync_schema_thread there) rather than blocking here before
+    # uvicorn ever opens the port -- a real Cloud Run deploy of this file
+    # showed schema sync can take longer than Cloud Run's startup-probe
+    # timeout on a cold container, which meant the container never started at
+    # all. Serving immediately and syncing in the background (the same
+    # pattern slack_cloud_run.py already used successfully) fixes that.
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)

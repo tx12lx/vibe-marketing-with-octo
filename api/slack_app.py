@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import threading
+from typing import Optional
 
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -32,7 +33,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 import api.web_app as web_app
 from api import slack_formatter as fmt
 from api.slack_session_store import SlackSessionState, SlackSessionStore
-from vibe_orchestrator import RequestResult, build_runtime, generate_stuck_explanation, process_core_request
+from vibe_orchestrator import RequestResult, VibeRuntime, build_runtime, generate_stuck_explanation, process_core_request
 
 _log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -238,10 +239,21 @@ def handle_correction_clarify(ack, body, client) -> None:
 # Startup
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main(runtime: Optional[VibeRuntime] = None) -> None:
+    """Start the Slack bot. If a runtime is already built (the combined web+Slack
+    entrypoint builds one for the web app's own startup and hands it here), reuse
+    it instead of building a second, independent one -- two separate runtimes in
+    the same process would mean two separate KnowledgeContext setups racing to
+    set web_app._runtime, which is exactly the split-knowledge problem this
+    combined entrypoint exists to eliminate. Standalone use (no argument) keeps
+    working exactly as before."""
     global _runtime
-    _log.info("Vibe OCTO Slack bot starting -- initializing runtime...")
-    _runtime = build_runtime()
+    if runtime is not None:
+        _runtime = runtime
+        _log.info("Vibe OCTO Slack bot starting -- reusing the already-built runtime...")
+    else:
+        _log.info("Vibe OCTO Slack bot starting -- initializing runtime...")
+        _runtime = build_runtime()
     web_app._runtime = _runtime  # so the reused api.web_app functions have a runtime to act on
     _log.info("Runtime ready. Starting Socket Mode connection to Slack...")
     handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
