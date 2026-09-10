@@ -543,7 +543,7 @@ def _process_query_sync(text: str, session_id: str) -> dict:
     # warm explanation and ask the user for a clarifying detail.
     if result.log is None:
         session.last_query = text  # store for retry without user retyping
-        explanation = generate_stuck_explanation(_runtime.nexus, text, result.intent)
+        explanation = generate_stuck_explanation(_runtime.nexus, text, result.intent, result.stuck_reason)
         return {
             "type": "stuck",
             "explanation": explanation,

@@ -119,7 +119,7 @@ def _handle_query(text: str, channel: str, thread_ts: str, session: SlackSession
 
     if result.log is None:
         session.last_query = text
-        explanation = generate_stuck_explanation(_runtime.nexus, text, result.intent)
+        explanation = generate_stuck_explanation(_runtime.nexus, text, result.intent, result.stuck_reason)
         _post(client, channel, thread_ts, "I need a bit more information.", blocks=fmt.format_error(explanation))
         return
 

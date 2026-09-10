@@ -143,13 +143,19 @@ Campaign identification rules:
     change how a sizing_request is executed; every sizing_request is translated
     directly from the knowledge base regardless of whether a campaign was identified.
 
+Note: this classification step only ever consults the glossary summary and the
+retrieved campaign records shown above -- it never sees the confirmed business
+rules text, so it cannot honestly report which rules were applied. Always
+return an empty list for business_rules_applied here; the orchestrator fills
+knowledge_sources_consulted itself from what was actually consulted.
+
 Return exactly this JSON (no markdown, no explanation):
 {{
   "intent_type": "<sizing_request or general_question>",
   "confidence": <0.0 to 1.0>,
   "campaign_identified": <true or false>,
   "campaign_code": "<camp_id from retrieved records if identified, else null>",
-  "knowledge_sources_consulted": ["glossary", "knowledge_layer"],
+  "knowledge_sources_consulted": [],
   "business_rules_applied": [],
   "reasoning": "<one sentence explaining the classification>"
 }}"""
@@ -187,8 +193,13 @@ class NexusAgent(BaseAgent):
     # Public API
     # ------------------------------------------------------------------
 
-    def build_sizing_request_from_nl(self, query: str) -> Optional[AdHocSizingRequest]:
-        """Translate a natural-language audience description into an ad-hoc sizing request."""
+    def build_sizing_request_from_nl(self, query: str) -> tuple[Optional[AdHocSizingRequest], Optional[str]]:
+        """Translate a natural-language audience description into an ad-hoc sizing request.
+
+        Returns (request, error_summary). error_summary is populated only when
+        request is None, so the caller has the real failure reason instead of
+        a silent None it has to guess about.
+        """
         prompt = _NL_PARSE_PROMPT.format(query=query)
         return self._parse_to_adhoc_request(prompt)
 
@@ -226,8 +237,13 @@ class NexusAgent(BaseAgent):
         try:
             raw = self._call_simple(prompt)
             data = self._extract_json(raw)
-            if not data.get("knowledge_sources_consulted"):
-                data["knowledge_sources_consulted"] = sources_consulted
+            # Always trust Python's own record of what was consulted over
+            # whatever the model echoed back -- this is what actually ran,
+            # not a claim the model is in a position to verify. Likewise,
+            # this call never receives business-rule text, so it can never
+            # honestly report a rule as applied.
+            data["knowledge_sources_consulted"] = sources_consulted
+            data["business_rules_applied"] = []
             classification = IntentClassification(**data)
         except Exception:
             classification = IntentClassification(
@@ -276,10 +292,16 @@ class NexusAgent(BaseAgent):
         error_details: str,
         campaign_identified: bool = False,
     ) -> str:
-        """Generate a warm, conversational explanation for a request the tool could not complete.
+        """Generate a short, honest explanation for a request the tool could not complete.
 
-        Tells the user what was understood, what specifically blocked progress, and
-        asks one focused follow-up question. Fully agnostic to request type.
+        error_details, when set, is the real failure reason (a technical error
+        surfaced from Quant or from Nexus's own request-building step) -- not a
+        guess. In that case this must say plainly that something went wrong and
+        invite a retry; it must never disguise a technical failure as a
+        business-clarification question, since that fabricates an ambiguity
+        that was never real. Only when error_details is empty -- meaning the
+        pipeline ran without a technical error but still produced nothing --
+        does this ask a genuine clarifying question.
         """
         sources_text = ", ".join(knowledge_sources) if knowledge_sources else "none"
         intent_label = intent_type.replace("_", " ") if intent_type else "unknown"
@@ -293,22 +315,45 @@ class NexusAgent(BaseAgent):
             if not campaign_identified else ""
         )
 
-        prompt = (
-            f'A user asked: "{original_query}"\n\n'
-            f"The tool classified this as a {intent_label} and consulted these knowledge sources: {sources_text}.\n"
-            + (f"The following issue was encountered: {error_details}\n\n" if error_details else "\n")
-            + scope_instruction
-            + "Using the knowledge base above, write a short response (3-5 sentences) that:\n"
-            "1. Acknowledges what you understood the user was asking for, in warm and plain language.\n"
-            "2. Explains specifically what piece of information or context is missing or unclear.\n"
-            "3. Asks one focused, direct question that the user could answer to help you proceed.\n\n"
-            "Do not use bullet points. Write in a warm, friendly, conversational tone. "
-            "Do not mention SQL, database columns, or technical identifiers. "
-            "Do not say you are an AI. Do not apologize excessively."
-        )
+        if error_details:
+            prompt = (
+                f'A user asked: "{original_query}"\n\n'
+                f"The tool classified this as a {intent_label} but hit a real technical problem while "
+                f"trying to answer it: {error_details}\n\n"
+                + scope_instruction
+                + "Write a short response (2-4 sentences) that:\n"
+                "1. Acknowledges what you understood the user was asking for, in warm and plain language.\n"
+                "2. Tells the user plainly that something went wrong while pulling the answer together. "
+                "Do not invent a business ambiguity or ask them to define a term -- the problem is "
+                "technical, not a missing definition, so do not imply otherwise.\n"
+                "3. Invites them to try again (possibly rephrasing), or to contact the OCTO team if it "
+                "keeps happening.\n\n"
+                "Do not use bullet points. Do not mention SQL, database columns, error messages, or other "
+                "technical identifiers verbatim. Do not say you are an AI. Do not apologize excessively."
+            )
+        else:
+            prompt = (
+                f'A user asked: "{original_query}"\n\n'
+                f"The tool classified this as a {intent_label} and consulted these knowledge sources: "
+                f"{sources_text}, but genuinely could not find enough information to proceed -- no "
+                "technical error occurred; the request itself is missing something.\n\n"
+                + scope_instruction
+                + "Using the knowledge base above, write a short response (3-5 sentences) that:\n"
+                "1. Acknowledges what you understood the user was asking for, in warm and plain language.\n"
+                "2. Explains specifically what piece of information or context is missing or unclear.\n"
+                "3. Asks one focused, direct question that the user could answer to help you proceed.\n\n"
+                "Do not use bullet points. Write in a warm, friendly, conversational tone. "
+                "Do not mention SQL, database columns, or technical identifiers. "
+                "Do not say you are an AI. Do not apologize excessively."
+            )
         try:
             return self._call_with_knowledge(prompt)
         except Exception:
+            if error_details:
+                return (
+                    "I ran into a technical problem while working on that. Could you try again? "
+                    "If it keeps happening, please reach out to the OCTO team."
+                )
             return (
                 "I understood your request but I wasn't able to generate a result with the "
                 "information I currently have. Could you share any additional context that "
@@ -320,17 +365,19 @@ class NexusAgent(BaseAgent):
     # Request construction
     # ------------------------------------------------------------------
 
-    def _parse_to_adhoc_request(self, prompt: str) -> Optional[AdHocSizingRequest]:
+    def _parse_to_adhoc_request(self, prompt: str) -> tuple[Optional[AdHocSizingRequest], Optional[str]]:
         try:
             raw = self._call_with_knowledge(prompt)
             data = self._extract_json(raw)
-            return AdHocSizingRequest(**data)
+            return AdHocSizingRequest(**data), None
         except ValidationError as exc:
+            summary = f"Nexus produced an invalid sizing request ({exc.error_count()} field error(s))"
             print(f"  [Nexus] Ad-hoc payload validation failed ({exc.error_count()} field error(s))")
-            return None
+            return None, summary
         except Exception as exc:
+            summary = f"Nexus request build error: {exc.__class__.__name__}: {exc}"
             print(f"  [Nexus] Ad-hoc request build error: {exc.__class__.__name__}: {exc}")
-            return None
+            return None, summary
 
     # ------------------------------------------------------------------
     # API calls

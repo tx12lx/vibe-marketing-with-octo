@@ -131,7 +131,7 @@ def route_by_intent(
     quant: QuantAgent,
     intent: IntentClassification,
     query: str,
-) -> tuple[Optional[QuantAuditLog], Optional[str]]:
+) -> tuple[Optional[QuantAuditLog], Optional[str], Optional[str]]:
     """Route a classified request to the agent that can act on it.
 
     Intent routing:
@@ -144,28 +144,31 @@ def route_by_intent(
     build_runtime()'s set_knowledge_context() calls), so nothing needs to be
     passed through here beyond the query itself.
 
-    Returns (log, answer_text). Exactly one is populated on success; both are
-    None when nothing could be produced (the caller then asks the AI to
-    explain what's missing -- see generate_stuck_explanation()).
+    Returns (log, answer_text, stuck_reason). Exactly one of log/answer_text is
+    populated on success; both are None when nothing could be produced, and
+    stuck_reason then carries the real failure reason (a technical error from
+    Nexus's request-building step or from Quant) so the caller can tell the
+    user what actually went wrong instead of falling back to a guess --
+    see generate_stuck_explanation().
     """
     it = intent.intent_type
 
     if it == "sizing_request":
-        request = nexus.build_sizing_request_from_nl(query)
+        request, build_error = nexus.build_sizing_request_from_nl(query)
         if request is None:
-            return None, None
+            return None, None, build_error
         result = quant.direct_count(request)
         if isinstance(result, QuantAuditLog):
-            return result, None
+            return result, None, None
         ThoughtDisplay.translate_nexus_error(result.error_summary)
-        return None, None
+        return None, None, result.error_summary
 
     if it == "general_question":
         answer = nexus.answer_general_question(query)
-        return None, (answer or None)
+        return None, (answer or None), None
 
     ThoughtDisplay.error(f"Unrecognised intent type '{it}'")
-    return None, None
+    return None, None, f"Unrecognised intent type '{it}'"
 
 
 # ---------------------------------------------------------------------------
@@ -256,11 +259,17 @@ class RequestResult:
         log: Optional[QuantAuditLog],
         answer_text: Optional[str] = None,
         error: Optional[str] = None,
+        stuck_reason: Optional[str] = None,
     ) -> None:
         self.intent = intent
         self.log = log
         self.answer_text = answer_text  # populated for general_question
-        self.error = error  # set when the pipeline failed without producing output
+        self.error = error  # set when the pipeline raised an unhandled exception
+        # Real reason a sizing_request produced neither log nor answer_text
+        # without raising -- e.g. a SQL/schema error from Quant, or a request-
+        # build failure from Nexus. None when the request was never attempted
+        # (unset only if route_by_intent itself wasn't reached).
+        self.stuck_reason = stuck_reason
 
 
 def build_runtime() -> VibeRuntime:
@@ -294,16 +303,23 @@ def generate_stuck_explanation(
     nexus: NexusAgent,
     query: str,
     intent: Optional[IntentClassification],
+    stuck_reason: Optional[str] = None,
 ) -> str:
-    """Call the AI to explain why a request produced no result and ask one follow-up question.
+    """Call the AI to explain why a request produced no result.
 
-    Fully request-agnostic -- collects whatever context is available and delegates
-    all reasoning to NexusAgent.explain_stuck_request().
+    stuck_reason, when given, is the real failure reason from route_by_intent()
+    (a technical error) and is passed straight through -- NexusAgent.explain_stuck_request()
+    uses it to tell the user the truth (something broke, try again) instead of
+    fabricating a business-clarification question. Only falls back to the
+    generic "no matching data sources" message when the caller has no real
+    reason to report.
     """
     intent_type = intent.intent_type if intent else "unknown"
     knowledge_sources = list(intent.knowledge_sources_consulted or []) if intent else []
     campaign_identified = intent.campaign_identified if intent else False
-    error_details = "" if knowledge_sources else "No matching data sources were found for this request."
+    error_details = stuck_reason or (
+        "" if knowledge_sources else "No matching data sources were found for this request."
+    )
 
     return nexus.explain_stuck_request(
         original_query=query,
@@ -336,8 +352,8 @@ def process_core_request(
                 rt.quant.set_session_context(ctx)
 
         intent = rt.nexus.classify_intent(query)
-        log, answer_text = route_by_intent(rt.nexus, rt.quant, intent, query)
-        result = RequestResult(intent=intent, log=log, answer_text=answer_text)
+        log, answer_text, stuck_reason = route_by_intent(rt.nexus, rt.quant, intent, query)
+        result = RequestResult(intent=intent, log=log, answer_text=answer_text, stuck_reason=stuck_reason)
 
         if rt.audit_logger is not None:
             try:
