@@ -50,6 +50,7 @@ from vibe_orchestrator import (  # noqa: E402
     generate_stuck_explanation,
     process_core_request,
 )
+from core.admin_routes import register_admin_status_page, register_knowledge_db_admin_routes  # noqa: E402
 from core.audit_logger import HITL_NO, HITL_REVIEW_NO, HITL_REVIEW_YES, HITL_YES  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
@@ -75,6 +76,14 @@ _write_lock = threading.Lock()
 _TEMPLATES_DIR = _API_DIR / "templates"
 
 app = FastAPI(title="Vibe Marketing with OCTO — Web Interface", version="4.0.0")
+
+# /admin and /admin/knowledge-db were previously only wired up on web_cloud_run.py,
+# an entry point this VM deployment doesn't actually run -- so the durability status
+# (including whether GitHub sync is silently failing) had no way to reach anyone
+# looking at the app actually running in production. Registered here too, on the
+# real live surface, gated by the same shared-password/IAP layer as everything else.
+register_knowledge_db_admin_routes(app)
+register_admin_status_page(app, get_schema_sync_status=lambda: schema_sync_status)
 
 
 # ---------------------------------------------------------------------------
