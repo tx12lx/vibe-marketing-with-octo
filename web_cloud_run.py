@@ -39,6 +39,7 @@ from fastapi import Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from knowledge.store import _db_path, connect
+import api.web_app as web_app
 from api.web_app import app
 
 _log = logging.getLogger(__name__)
@@ -55,12 +56,35 @@ def _status_summary() -> str:
             ).fetchone()["n"]
             rules = conn.execute("SELECT COUNT(*) AS n FROM business_rules WHERE status='active'").fetchone()["n"]
             glossary = conn.execute("SELECT COUNT(*) AS n FROM glossary_terms").fetchone()["n"]
-        return (
+        summary = (
             f"{tables} table(s), {columns} column(s) synced ({confirmed} human-confirmed), "
             f"{rules} active business rule(s), {glossary} glossary term(s)."
         )
+        sync = web_app.schema_sync_status
+        if sync.get("state") == "failed":
+            summary += f" SCHEMA SYNC FAILED: {sync.get('error')}"
+        elif sync.get("state") == "running":
+            summary += " (schema sync still running...)"
+        return summary + " " + _durability_summary()
     except Exception as exc:  # noqa: BLE001 -- shown to a human on an admin page, not swallowed silently
         return f"Could not read the knowledge database: {exc}"
+
+
+def _durability_summary() -> str:
+    """One line on whether learned knowledge is actually durable right now -- this
+    exists because the schema-sync failure that broke the tool for a full day was
+    invisible until someone thought to check a status page by hand. Never let that
+    happen silently again: this is checked at every /admin load, not just at startup."""
+    from knowledge import git_store  # noqa: PLC0415 -- deferred to match this module's other lazy imports
+
+    if not git_store.is_configured():
+        return "Durability: GITHUB_TOKEN is not set -- learned knowledge will NOT survive a restart."
+    if not git_store.last_sync_status:
+        return "Durability: connected to GitHub, no writes yet this run."
+    failed = {k: v for k, v in git_store.last_sync_status.items() if v != "ok"}
+    if failed:
+        return f"Durability: WARNING -- last GitHub sync failed for {list(failed.keys())}: {failed}"
+    return "Durability: all learned knowledge is syncing to GitHub successfully."
 
 
 @app.get("/admin", response_class=HTMLResponse)

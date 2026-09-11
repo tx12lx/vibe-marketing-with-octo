@@ -189,6 +189,13 @@ async def favicon_ico() -> Response:
 # Startup
 # ---------------------------------------------------------------------------
 
+#: Set once the background schema-sync thread finishes (success or failure) -- see
+#: /health and /admin's status line. This exists because a prior schema-sync failure
+#: was completely invisible (no logs reached Cloud Logging on that deployment) and went
+#: undiagnosed for a full day; this status is readable independent of any log pipeline.
+schema_sync_status: dict = {"state": "not started"}
+
+
 def _sync_schema_thread() -> None:
     """Sync the knowledge layer's schema in the background, not blocking startup.
 
@@ -202,14 +209,18 @@ def _sync_schema_thread() -> None:
     check_health()), not a new failure mode.
     """
     def _run() -> None:
+        global schema_sync_status
+        schema_sync_status = {"state": "running"}
         try:
             from knowledge.sync_schema import main as sync_schema_main  # noqa: PLC0415
 
             _log.info("Syncing the knowledge layer's schema in the background...")
             sync_schema_main()
             _log.info("Knowledge layer schema sync complete.")
-        except Exception:
+            schema_sync_status = {"state": "ok"}
+        except Exception as exc:
             _log.exception("Schema sync failed (the app keeps serving with whatever schema was already synced).")
+            schema_sync_status = {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -248,6 +259,10 @@ async def _startup() -> None:
     _sync_schema_thread()
     loop = asyncio.get_event_loop()
     _runtime = await loop.run_in_executor(_executor, build_runtime)
+    # Rebuild the local knowledge cache (business rules, glossary, feedback) from its
+    # durable GitHub-backed copy -- this container's own disk never survives a restart,
+    # see knowledge/git_store.py. A no-op if GITHUB_TOKEN isn't set.
+    await loop.run_in_executor(_executor, _runtime.knowledge_ctx.hydrate_from_github)
     _start_slack_bot_thread(_runtime)
 
     fuelix_key = os.getenv("FUELIX_API_KEY", "")
@@ -281,6 +296,7 @@ async def health() -> dict:
         "runtime_ready": _runtime is not None,
         "campaign_count": campaign_count,
         "active_sessions": len(_session_store._sessions),
+        "schema_sync": schema_sync_status,
     }
 
 
@@ -416,6 +432,7 @@ async def confirm_correction_endpoint(request: Request) -> JSONResponse:
         _save_confirmed_correction_sync,
         session,
         pending,
+        session_id,
     )
     return JSONResponse(result)
 
@@ -738,7 +755,11 @@ def _process_correction_sync(
         }
 
 
-def _save_confirmed_correction_sync(session, pending: dict) -> dict:
+def _save_confirmed_correction_sync(session, pending: dict, session_id: str) -> dict:
+    """Save a confirmed correction as a learned rule, then immediately retry the
+    original question with it applied -- capturing feedback is only half of "apply
+    it in real time"; the user who just told the tool it was wrong should see the
+    corrected answer in this same turn, not have to ask the same question again."""
     with _write_lock:
         try:
             rules = pending.get("rules", [])
@@ -780,16 +801,24 @@ def _save_confirmed_correction_sync(session, pending: dict) -> dict:
             else:
                 message = "Perfect, I've got it! I'll apply this from now on -- for the rest of this session and every future session."
 
-            return {
-                "type": "correction_confirmed",
-                "message": message,
-            }
         except Exception as exc:
             _log.warning("Correction save failed: %s", exc)
             return {
                 "type": "correction_confirmed",
                 "message": "Your feedback has been saved.",
             }
+
+    # Retry the original question now that the correction is in effect -- outside the
+    # write lock, since this re-runs the full sizing pipeline and shouldn't hold it.
+    retry_result = None
+    if session.last_query:
+        retry_result = _process_query_sync(session.last_query, session_id)
+
+    return {
+        "type": "correction_confirmed",
+        "message": message,
+        "retry_result": retry_result,
+    }
 
 
 def _process_clarification_sync(clarification: str, session_id: str, session) -> dict:

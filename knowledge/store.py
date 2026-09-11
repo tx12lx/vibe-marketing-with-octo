@@ -418,6 +418,12 @@ def reject_rule(
         )
 
 
+def get_all_business_rules(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every business rule regardless of status -- for durable backup (see
+    knowledge/git_store.py), not for grounding a prompt (use get_active_rules for that)."""
+    return conn.execute("SELECT * FROM business_rules ORDER BY id").fetchall()
+
+
 def get_active_rules(
     conn: sqlite3.Connection,
     scope: Optional[str] = None,
@@ -527,6 +533,67 @@ def get_feedback_events(conn: sqlite3.Connection, campaign_code: Optional[str] =
             "SELECT * FROM feedback_events WHERE campaign_code=? ORDER BY created_at", (campaign_code,)
         ).fetchall()
     return conn.execute("SELECT * FROM feedback_events ORDER BY created_at").fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Hydration from durable backup -- knowledge/git_store.py holds the durable
+# copy of everything in this section (business rules, glossary, feedback,
+# campaign summaries); a fresh container calls these once at startup to
+# rebuild its local cache from it. Safe to call repeatedly (INSERT OR REPLACE
+# keyed on id) since a fresh container's tables start empty.
+# ---------------------------------------------------------------------------
+
+def hydrate_business_rules(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    with conn:
+        for r in rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO business_rules "
+                "(id, rule_text, scope, project, dataset, table_name, campaign_code, "
+                "added_by, added_at, status, superseded_by, approved_by, approved_at, review_note) "
+                "VALUES (:id, :rule_text, :scope, :project, :dataset, :table_name, :campaign_code, "
+                ":added_by, :added_at, :status, :superseded_by, :approved_by, :approved_at, :review_note)",
+                r,
+            )
+
+
+def hydrate_glossary_terms(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    with conn:
+        for r in rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO glossary_terms (id, term, definition, added_by, added_at, source) "
+                "VALUES (:id, :term, :definition, :added_by, :added_at, :source)",
+                r,
+            )
+
+
+def hydrate_feedback_events(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    with conn:
+        for r in rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO feedback_events "
+                "(id, event_type, campaign_code, raw_text, structured_rule_id, user_identity, created_at) "
+                "VALUES (:id, :event_type, :campaign_code, :raw_text, :structured_rule_id, :user_identity, :created_at)",
+                r,
+            )
+
+
+def hydrate_campaign_summaries(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """rows come from git_store as the same shape get_all_campaign_summaries() returns
+    (embedding already unpacked to a plain float list) -- re-pack it back to a BLOB here."""
+    with conn:
+        for r in rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO campaign_summaries "
+                "(id, campaign_code, sub_code, summary_text, embedding, embedding_dim, "
+                "source_query, created_at, confirmed_by) "
+                "VALUES (:id, :campaign_code, :sub_code, :summary_text, :embedding, :embedding_dim, "
+                ":source_query, :created_at, :confirmed_by)",
+                {
+                    **r,
+                    "embedding": _pack_embedding(r["embedding"]),
+                    "embedding_dim": len(r["embedding"]),
+                },
+            )
 
 
 # ---------------------------------------------------------------------------

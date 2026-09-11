@@ -1036,6 +1036,21 @@ body {
       if (zone) {
         applyHitlResponse(zone, data);
       }
+      // Show the corrected answer immediately, in this same turn -- not just a
+      // confirmation that the feedback was saved for next time.
+      if (data.retry_result) {
+        const botDiv = document.createElement('div');
+        botDiv.className = 'msg-bot';
+        if (data.retry_result.processing_notes && data.retry_result.processing_notes.length) {
+          appendNotes(data.retry_result.processing_notes, botDiv);
+        }
+        renderResponse(data.retry_result, botDiv);
+        messagesEl.appendChild(botDiv);
+        if (data.retry_result.type === 'result') {
+          currentHitlEl = botDiv.querySelector('#hitl-zone');
+        }
+        scrollBottom();
+      }
     } catch (err) {
       if (zone) {
         zone.innerHTML = `<div class="flywheel"><div class="flywheel-title">Correction confirmed. I'll apply this from now on.</div></div>`;

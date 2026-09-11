@@ -17,12 +17,21 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from knowledge import retrieve
+from knowledge import git_store, retrieve
 from knowledge.store import (
     add_business_rule,
+    add_glossary_term,
     approve_rule,
     connect,
+    get_all_business_rules,
+    get_all_campaign_summaries,
+    get_feedback_events,
+    get_glossary_terms,
     get_pending_rules,
+    hydrate_business_rules,
+    hydrate_campaign_summaries,
+    hydrate_feedback_events,
+    hydrate_glossary_terms,
     record_feedback_event,
     reject_rule,
 )
@@ -98,6 +107,37 @@ class KnowledgeContext:
     def reload_rules(self) -> None:
         pass  # nothing is cached -- every read already goes straight to the database
 
+    def hydrate_from_github(self) -> None:
+        """Rebuild the local cache from the durable GitHub-backed copy -- call once at
+        startup. A no-op if GITHUB_TOKEN isn't set (see knowledge/git_store.py), so this
+        is always safe to call regardless of environment. Safe to call repeatedly."""
+        if not git_store.is_configured():
+            _log.info("GITHUB_TOKEN not set -- knowledge layer is local-only this run.")
+            return
+        try:
+            data = git_store.read_all()
+        except Exception:
+            _log.exception("Could not read knowledge from GitHub -- starting with an empty local cache.")
+            return
+        with connect() as conn:
+            hydrate_business_rules(conn, data.get("business_rules", []))
+            hydrate_glossary_terms(conn, data.get("glossary_terms", []))
+            hydrate_feedback_events(conn, data.get("feedback_events", []))
+            hydrate_campaign_summaries(conn, data.get("campaign_summaries", []))
+        _log.info(
+            "Knowledge layer hydrated from GitHub: %d business rule(s), %d glossary term(s), "
+            "%d feedback event(s), %d campaign summary/summaries.",
+            len(data.get("business_rules", [])), len(data.get("glossary_terms", [])),
+            len(data.get("feedback_events", [])), len(data.get("campaign_summaries", [])),
+        )
+
+    def _sync_business_rules_and_feedback(self, conn, message: str) -> None:
+        """Queue a background commit of the current, full business_rules and
+        feedback_events tables -- called after any write to either, since add_rule()
+        touches both (see below)."""
+        git_store.queue_sync("business_rules", [dict(r) for r in get_all_business_rules(conn)], message)
+        git_store.queue_sync("feedback_events", [dict(r) for r in get_feedback_events(conn)], message)
+
     # -- write side, used by api/web_app.py's HITL/correction persistence ----
 
     def add_rule(self, rule) -> dict:
@@ -128,6 +168,7 @@ class KnowledgeContext:
                 structured_rule_id=rule_id,
                 user_identity=rule.verified_by,
             )
+            self._sync_business_rules_and_feedback(conn, f"New rule #{rule_id} ({rule.scope}) from {rule.verified_by}")
         return {"rule_id": rule_id, "status": status}
 
     def get_pending_rules(self) -> list[dict]:
@@ -141,10 +182,12 @@ class KnowledgeContext:
         maker-checker gate, enforced here in code rather than left to convention."""
         with connect() as conn:
             approve_rule(conn, rule_id, approved_by=approver_identity, note=note)
+            self._sync_business_rules_and_feedback(conn, f"Approve rule #{rule_id} (by {approver_identity})")
 
     def reject_rule(self, rule_id: int, approver_identity: str, note: str = "") -> None:
         with connect() as conn:
             reject_rule(conn, rule_id, approved_by=approver_identity, note=note)
+            self._sync_business_rules_and_feedback(conn, f"Reject rule #{rule_id} (by {approver_identity})")
 
     def record_confirmation(self, campaign_code: Optional[str], user_identity: str = "unknown") -> None:
         """Permanently record a 'looks good' confirmation -- called from
@@ -156,6 +199,22 @@ class KnowledgeContext:
                 event_type="confirm",
                 campaign_code=campaign_code,
                 user_identity=user_identity,
+            )
+            git_store.queue_sync(
+                "feedback_events", [dict(r) for r in get_feedback_events(conn)],
+                f"Confirmation from {user_identity}" + (f" on {campaign_code}" if campaign_code else ""),
+            )
+
+    def add_glossary_term(self, term: str, definition: str, added_by: str = "unknown", source: str = "hitl") -> None:
+        """Add a glossary term and durably persist it. Not currently called from any
+        HITL flow (glossary is seeded, not learned, today) -- added so the write path
+        exists once the tool starts learning new terms from conversation, per this
+        knowledge layer being a first-class, growing component rather than a fixed seed."""
+        with connect() as conn:
+            add_glossary_term(conn, term=term, definition=definition, added_by=added_by, source=source)
+            git_store.queue_sync(
+                "glossary_terms", [dict(r) for r in get_glossary_terms(conn)],
+                f"New glossary term '{term}' from {added_by}",
             )
 
     def _load(self) -> None:

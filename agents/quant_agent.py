@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import threading
 import warnings
 from pathlib import Path
 from typing import Optional, Union
@@ -239,13 +240,30 @@ class QuantAgent(BaseAgent):
     def __init__(self) -> None:
         self._default_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
         self._default_dataset = os.getenv("BQ_DATASET", "campaign_data")
-        self._last_sql: str = ""
-        self._session_context: str = ""
+        # One QuantAgent instance is shared by every concurrent request (built once in
+        # vibe_orchestrator.build_runtime()) -- both of these were plain instance attributes,
+        # meaning two users' requests running on different worker threads at the same time
+        # could overwrite each other's session context or last-generated SQL. Thread-local
+        # storage isolates each request's worker thread automatically; see the properties
+        # below.
+        self._local = threading.local()
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
 
     def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
         """Bind the centralised KnowledgeContext built at startup."""
         self._knowledge_ctx = ctx
+
+    @property
+    def _last_sql(self) -> str:
+        return getattr(self._local, "last_sql", "")
+
+    @_last_sql.setter
+    def _last_sql(self, value: str) -> None:
+        self._local.last_sql = value
+
+    @property
+    def _session_context(self) -> str:
+        return getattr(self._local, "session_context", "")
 
     # ------------------------------------------------------------------
     # BaseAgent contract
@@ -261,8 +279,12 @@ class QuantAgent(BaseAgent):
         )
 
     def set_session_context(self, context: str) -> None:
-        """Receive dynamic glossary/catalog context from the orchestrator for prompt injection."""
-        self._session_context = context
+        """Receive dynamic glossary/catalog context from the orchestrator for prompt injection.
+
+        Thread-local: only visible to whichever request's worker thread called this, see
+        __init__'s note on why this can't be a plain instance attribute.
+        """
+        self._local.session_context = context
 
     # ------------------------------------------------------------------
     # Public API — strict gateway, never raises to orchestrator

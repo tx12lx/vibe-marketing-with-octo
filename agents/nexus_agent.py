@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -178,16 +179,29 @@ class NexusAgent(BaseAgent):
         )
 
     def __init__(self) -> None:
-        self._session_context: str = ""
+        # One NexusAgent instance is shared by every concurrent request (built once in
+        # vibe_orchestrator.build_runtime()) -- thread-local storage, not a plain instance
+        # attribute, so two users' requests running on different worker threads at the same
+        # time can never see or overwrite each other's session context. Each thread sets its
+        # own value at the start of a request and reads only that value for its duration.
+        self._local = threading.local()
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
 
     def set_knowledge_context(self, ctx: "KnowledgeContext") -> None:
         """Bind the centralised KnowledgeContext built at startup."""
         self._knowledge_ctx = ctx
 
+    @property
+    def _session_context(self) -> str:
+        return getattr(self._local, "session_context", "")
+
     def set_session_context(self, context: str) -> None:
-        """Receive dynamic session context (e.g. accumulated corrections) for prompt injection."""
-        self._session_context = context
+        """Receive dynamic session context (e.g. accumulated corrections) for prompt injection.
+
+        Thread-local: only visible to whichever request's worker thread called this, see
+        __init__'s note on why this can't be a plain instance attribute.
+        """
+        self._local.session_context = context
 
     # ------------------------------------------------------------------
     # Public API
