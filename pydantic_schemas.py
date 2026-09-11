@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import os
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+# Same env vars agents/quant_agent.py and agents/nexus_agent.py read -- a schema default
+# should never hardcode a value the agents themselves treat as configurable.
+_DEFAULT_BQ_PROJECT = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
+_DEFAULT_BQ_DATASET = os.getenv("BQ_DATASET", "campaign_data")
 
 
 class AudienceSizingRequest(BaseModel):
@@ -23,8 +29,8 @@ class AudienceSizingRequest(BaseModel):
     filters: list[str]
     exclusion_layers: Optional[list[str]] = None
     optimization_context: Optional[str] = None
-    bq_project: str = "bi-srv-hsmdet-pr-7b9def"
-    bq_dataset: str = "campaign_data"
+    bq_project: str = _DEFAULT_BQ_PROJECT
+    bq_dataset: str = _DEFAULT_BQ_DATASET
 
     @field_validator("filters")
     @classmethod

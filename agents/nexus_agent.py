@@ -26,7 +26,7 @@ not -- now goes through the one grounded, working path: build_sizing_request_fro
 from __future__ import annotations
 
 import json
-import re
+import os
 import sys
 import threading
 from pathlib import Path
@@ -34,6 +34,7 @@ from typing import Optional
 
 from pydantic import ValidationError
 from core.ai_client import ask_ai
+from core.json_extract import extract_json
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -51,6 +52,12 @@ from core.thought_display import ThoughtDisplay  # noqa: E402
 
 _MAX_TOKENS_BUILD = 4096
 _MAX_TOKENS_QUERY = 8192
+
+# Same env vars QuantAgent reads (agents/quant_agent.py) -- kept in sync so a request
+# built here and executed there always target the same table, without either file
+# hardcoding a value the other doesn't know about.
+_DEFAULT_BQ_PROJECT = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
+_DEFAULT_BQ_DATASET = os.getenv("BQ_DATASET", "campaign_data")
 
 _NEXUS_SYSTEM = (
     "You are Vibe OCTO Nexus, a senior management consulting AI embedded in a "
@@ -105,8 +112,8 @@ Return exactly this JSON (no markdown):
   "filters": ["<filter grounded in the schema/glossary/business rules or the consultant's stated criteria>"],
   "exclusion_layers": [],
   "optimization_context": "<3 sentences on cadence or channel safety>",
-  "bq_project": "bi-srv-hsmdet-pr-7b9def",
-  "bq_dataset": "campaign_data"
+  "bq_project": "{bq_project}",
+  "bq_dataset": "{bq_dataset}"
 }}"""
 
 _INTENT_CLASSIFY_V2_PROMPT = """\
@@ -214,7 +221,7 @@ class NexusAgent(BaseAgent):
         request is None, so the caller has the real failure reason instead of
         a silent None it has to guess about.
         """
-        prompt = _NL_PARSE_PROMPT.format(query=query)
+        prompt = _NL_PARSE_PROMPT.format(query=query, bq_project=_DEFAULT_BQ_PROJECT, bq_dataset=_DEFAULT_BQ_DATASET)
         return self._parse_to_adhoc_request(prompt)
 
     def classify_intent(self, query: str) -> IntentClassification:
@@ -435,14 +442,4 @@ class NexusAgent(BaseAgent):
 
     @staticmethod
     def _extract_json(text: str) -> dict:
-        try:
-            return json.loads(text.strip())
-        except json.JSONDecodeError:
-            pass
-        match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-        if match:
-            return json.loads(match.group(1))
-        start, end = text.find("{"), text.rfind("}") + 1
-        if start != -1 and end > start:
-            return json.loads(text[start:end])
-        raise ValueError(f"No valid JSON in response. First 300 chars: {text[:300]!r}")
+        return extract_json(text)

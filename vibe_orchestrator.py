@@ -6,14 +6,17 @@ Design principle: this file is the only wiring layer. It knows which agents
 exist and which request maps to which agent method — nothing else. Agent cores
 are fully independent and test in isolation.
 
-Scaling to a new agent or capability requires no changes to this file at all:
+Adding a new agent or capability:
   1. Drop a new agents/<name>.py file defining a BaseAgent subclass with
      WORKER_ID and HANDLED_INTENTS set (see _discover_agents() below) --
-     it is auto-discovered and registered at startup.
-  2. If the new capability needs its own request-routing branch, add one
-     case to route_by_intent() below; that is the only place request
-     dispatch happens.
-Zero changes to Nexus, Quant, or pydantic_schemas are needed either way.
+     it is auto-discovered and instantiated at startup with zero changes
+     needed to this file or to any existing agent.
+  2. If the new capability needs a new intent type handled, add one case to
+     route_by_intent() below -- that is the only place request dispatch
+     happens, and it stays a deliberate, explicit case per intent rather than
+     a generic lookup, since agents don't share a uniform call signature (see
+     _discover_agents()'s docstring for why) and some intents (sizing_request)
+     are a real multi-agent handoff, not a single agent call.
 """
 from __future__ import annotations
 
@@ -54,11 +57,20 @@ def _discover_agents(agents_dir: Path) -> tuple[dict[str, type], dict[str, type]
     """Scan agents/ for BaseAgent subclasses and build registries.
 
     Returns:
-      agent_registry   — {worker_id: AgentClass} for direct instantiation
-      intent_routing   — {intent_type: AgentClass}, built for any future
-                         caller that wants intent-to-agent-class lookup;
-                         route_by_intent() below currently calls each agent's
-                         methods directly instead of going through this map.
+      agent_registry   — {worker_id: AgentClass} for direct instantiation.
+      intent_routing   — {intent_type: AgentClass}, informational only (used for
+                         audit/introspection, e.g. listing what handles what) --
+                         NOT a dispatch table route_by_intent() below can call
+                         generically. Nexus and Quant each expose their own
+                         specific methods (classify_intent, build_sizing_request_
+                         from_nl, direct_count, answer_general_question) rather
+                         than a uniform execute(), and sizing_request is a real
+                         two-agent handoff (Nexus builds the request, Quant runs
+                         it) that no single {intent: one_agent} entry could
+                         express anyway. Making a new agent's intent route
+                         automatically would need a uniform agent-execution
+                         interface first -- a bigger, separate change, not
+                         something this registry can paper over safely.
     """
     import importlib
     import inspect

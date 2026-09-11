@@ -29,39 +29,21 @@ import os
 import threading
 
 import uvicorn
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI
 
-from knowledge.store import _db_path
+from core.admin_routes import register_knowledge_db_admin_routes
 from knowledge.sync_schema import main as sync_schema_main
 
 _log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="Vibe OCTO -- Slack Cloud Run host")
+register_knowledge_db_admin_routes(app)
 
 
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
-
-
-@app.get("/admin/knowledge-db")
-async def download_knowledge_db() -> Response:
-    path = _db_path()
-    if not path.exists():
-        return JSONResponse({"error": "No knowledge database file exists yet on this instance."}, status_code=404)
-    return FileResponse(path, media_type="application/octet-stream", filename="vibe_octo_knowledge.db")
-
-
-@app.post("/admin/knowledge-db")
-async def upload_knowledge_db(request: Request) -> dict:
-    path = _db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = await request.body()
-    path.write_bytes(body)
-    _log.info("Knowledge database replaced from an uploaded copy (%d bytes).", len(body))
-    return {"status": "ok", "bytes_written": len(body)}
 
 
 def _start_slack_bot() -> None:

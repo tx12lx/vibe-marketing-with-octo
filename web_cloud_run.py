@@ -35,15 +35,17 @@ import logging
 import os
 
 import uvicorn
-from fastapi import Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 
-from knowledge.store import _db_path, connect
+from core.admin_routes import register_knowledge_db_admin_routes
+from knowledge.store import connect
 import api.web_app as web_app
 from api.web_app import app
 
 _log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+register_knowledge_db_admin_routes(app)
 
 
 def _status_summary() -> str:
@@ -216,24 +218,6 @@ loadPendingRules();
 </script>
 """
     return HTMLResponse(content=html)
-
-
-@app.get("/admin/knowledge-db")
-async def download_knowledge_db() -> Response:
-    path = _db_path()
-    if not path.exists():
-        return JSONResponse({"error": "No knowledge database file exists yet on this instance."}, status_code=404)
-    return FileResponse(path, media_type="application/octet-stream", filename="vibe_octo_knowledge.db")
-
-
-@app.post("/admin/knowledge-db")
-async def upload_knowledge_db(request: Request) -> dict:
-    path = _db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = await request.body()
-    path.write_bytes(body)
-    _log.info("Knowledge database replaced from an uploaded copy (%d bytes).", len(body))
-    return {"status": "ok", "bytes_written": len(body)}
 
 
 if __name__ == "__main__":

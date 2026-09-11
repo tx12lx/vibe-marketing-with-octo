@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import warnings
 from typing import Optional
@@ -25,12 +26,17 @@ from knowledge.store import IntegrityError, connect, replace_table_columns
 _log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-# The tables this knowledge layer knows about. Scoped to one table for the
-# current proof-of-concept -- expanding to the full nine is purely a matter of
-# adding their fully-qualified names here.
-DEFAULT_TABLES = [
-    "bi-srv-hsmdet-pr-7b9def.campaign_data.bq_fda_mob_mobility_base",
+# The tables this knowledge layer knows about. Scoped to one table for the current
+# proof-of-concept -- expanding to more is a matter of adding comma-separated
+# fully-qualified names to BQ_TABLE_NAME (or BQ_TABLE_NAMES for more than one), not
+# editing code. Same BQ_PROJECT_ID/BQ_DATASET env vars agents/quant_agent.py and
+# agents/nexus_agent.py already read, kept in sync rather than each hardcoding its own copy.
+_DEFAULT_BQ_PROJECT = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
+_DEFAULT_BQ_DATASET = os.getenv("BQ_DATASET", "campaign_data")
+_DEFAULT_TABLE_NAMES = [
+    t.strip() for t in os.getenv("BQ_TABLE_NAME", "bq_fda_mob_mobility_base").split(",") if t.strip()
 ]
+DEFAULT_TABLES = [f"{_DEFAULT_BQ_PROJECT}.{_DEFAULT_BQ_DATASET}.{t}" for t in _DEFAULT_TABLE_NAMES]
 
 
 def _sensitivity_for(column_name: str) -> str:

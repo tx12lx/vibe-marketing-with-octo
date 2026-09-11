@@ -35,6 +35,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from core.ai_client import ask_ai
+from core.json_extract import extract_json
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -490,29 +491,7 @@ class FeedbackAgent(BaseAgent):
     @staticmethod
     def _extract_json(text: str) -> Optional[dict]:
         """Extract and parse the first JSON object from an LLM response."""
-        text = text.strip()
-        try:
-            result = json.loads(text)
-            if isinstance(result, dict):
-                return result
-        except json.JSONDecodeError:
-            pass
-
-        start = text.find("{")
-        if start == -1:
-            return None
-        depth = 0
-        for i, ch in enumerate(text[start:], start):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start: i + 1])
-                    except json.JSONDecodeError:
-                        return None
-        return None
+        return extract_json(text)
 
     # ------------------------------------------------------------------
     # Failure log — raw record of every correction, for manual review
