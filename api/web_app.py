@@ -53,7 +53,7 @@ from vibe_orchestrator import (  # noqa: E402
 from core.audit_logger import HITL_NO, HITL_REVIEW_NO, HITL_REVIEW_YES, HITL_YES  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
-from pydantic_schemas import QuantAuditLog  # noqa: E402
+from pydantic_schemas import NexusErrorPayload, QuantAuditLog  # noqa: E402
 from api.session_store import SessionStore  # noqa: E402
 
 _log = logging.getLogger(__name__)
@@ -864,9 +864,24 @@ def _save_confirmed_correction_sync(session, pending: dict, session_id: str) -> 
             }
 
     # Retry the original question now that the correction is in effect -- outside the
-    # write lock, since this re-runs the full sizing pipeline and shouldn't hold it.
+    # write lock, since this re-runs the sizing pipeline and shouldn't hold it.
+    #
+    # When there's a prior successful result to build on, patch the correction directly
+    # onto the exact query that already worked (see QuantAgent.apply_confirmed_correction())
+    # instead of asking the AI to write the whole thing over from scratch -- that full
+    # regeneration is what let a confirmed correction look "ignored" when some unrelated
+    # part of the freshly-rewritten query silently changed instead. Fall back to a full
+    # rebuild only when there's nothing to patch (no prior sizing result, or no rule
+    # description came out of this correction to apply).
     retry_result = None
-    if session.last_query:
+    correction_descriptions = [
+        r.rule_description for r in rules if getattr(r, "rule_description", "")
+    ] if rules else []
+    if session.last_audit_log is not None and correction_descriptions:
+        retry_result = _apply_correction_and_retry_sync(
+            session, session.last_audit_log, correction_descriptions, session_id,
+        )
+    elif session.last_query:
         retry_result = _process_query_sync(session.last_query, session_id)
 
     return {
@@ -874,6 +889,33 @@ def _save_confirmed_correction_sync(session, pending: dict, session_id: str) -> 
         "message": message,
         "retry_result": retry_result,
     }
+
+
+def _apply_correction_and_retry_sync(
+    session, previous_log: QuantAuditLog, correction_descriptions: list, session_id: str,
+) -> dict:
+    """Apply a just-confirmed correction as a deterministic patch on top of the exact query
+    that already worked, and update session state the same way a normal retry would."""
+    result = _runtime.quant.apply_confirmed_correction(previous_log, correction_descriptions)
+
+    if isinstance(result, NexusErrorPayload):
+        _log.warning("Correction patch failed: %s", result.error_summary)
+        return {
+            "type": "error",
+            "message": "I ran into an issue applying that correction to your last result.",
+            "detail": result.error_summary[:300],
+        }
+
+    session.store_result(query=session.last_query, intent=session.last_intent, log=result)
+    session.record_turn(
+        session.last_query,
+        f"Sized \"{result.request.target_population}\" -> {result.final_count:,} "
+        f"({result.request.campaign_name})",
+    )
+    return _format_result(
+        RequestResult(intent=session.last_intent, log=result),
+        _build_processing_notes(session.last_intent),
+    )
 
 
 def _process_clarification_sync(clarification: str, session_id: str, session) -> dict:

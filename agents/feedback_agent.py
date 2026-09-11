@@ -85,9 +85,18 @@ Analyse the user's correction and extract ALL distinct business rules it contain
 For each rule:
 1. Identify exactly what is being corrected (in plain business language)
 2. Determine what correct behaviour should be
-3. Flag any ambiguities requiring clarification
-4. Classify scope from available signals
-5. List any terms not found in the provided knowledge base
+3. Check it against EXISTING CONFIRMED BUSINESS RULES in the knowledge base context above --
+   if this rule would contradict or reverse one of those (e.g. an existing rule says to
+   exclude something and this one would stop excluding it, or vice versa), do NOT propose it
+   as a normal new rule. Instead set contradicts_existing_rule to true, quote the exact
+   existing rule text in contradicting_rule_text, and phrase clarifying_question as a direct
+   question asking the user to confirm they mean to override that existing rule (quoting it),
+   rather than a general ambiguity question. This check is independent of confidence -- a rule
+   can be a clear, confident interpretation of the user's words and still contradict something
+   already confirmed; both cases must be flagged.
+4. Flag any other ambiguities requiring clarification
+5. Classify scope from available signals
+6. List any terms not found in the provided knowledge base
 
 Output a single JSON object with this exact structure — no preamble, no explanation:
 {
@@ -106,7 +115,9 @@ Output a single JSON object with this exact structure — no preamble, no explan
       },
       "confidence": <float 0.0 to 1.0>,
       "needs_clarification": <true | false>,
-      "clarifying_question": "<targeted question if needs_clarification is true, else empty string>",
+      "clarifying_question": "<targeted question if needs_clarification or contradicts_existing_rule is true, else empty string>",
+      "contradicts_existing_rule": <true | false>,
+      "contradicting_rule_text": "<exact text of the existing confirmed rule this contradicts, else empty string>",
       "scope_detected": "<one of: campaign | pattern | universal | unclear>",
       "scope_signals": "<words or context that led to this scope classification>",
       "unknown_terms": ["<term1>", "<term2>"]
@@ -308,6 +319,21 @@ class FeedbackAgent(BaseAgent):
     def _stage2_clarify(self, rules_raw: list[dict]) -> list[dict]:
         updated = list(rules_raw)
         for i, rule in enumerate(updated):
+            # A contradiction with an already-confirmed rule is forced to clarification
+            # regardless of confidence -- unlike plain ambiguity, high confidence in the
+            # interpretation says nothing about whether the user actually meant to reverse
+            # something already confirmed, so it must never silently pass through into a
+            # second, contradicting rule the way it did before this check existed.
+            if rule.get("contradicts_existing_rule") and not self._pending_clarification:
+                existing = rule.get("contradicting_rule_text", "")
+                question = rule.get("clarifying_question") or (
+                    f"This looks like it conflicts with a rule you already confirmed: "
+                    f"\"{existing}\". Do you want this new correction to replace that rule?"
+                )
+                self._pending_clarification = question
+                updated[i] = {**rule, "_skipped": True}
+                continue
+
             if not rule.get("needs_clarification"):
                 continue
             question = rule.get("clarifying_question", "")

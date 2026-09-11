@@ -211,10 +211,14 @@ Total CTEs: 3-10 (choose based on which filters actually apply; no pass-throughs
     SELECT * FROM <prior_cte> WHERE control_group_flg = 'N'
     Label must be exactly "Final Targetable Audience"
 
-The final SELECT is a UNION ALL of COUNT(DISTINCT ban) from each CTE in sequence order.
+Counting unit — use whatever CONFIRMED BUSINESS RULES above says to count (e.g. individual
+subscriber rows vs. distinct billing accounts). Only if no confirmed rule addresses this at all,
+default to COUNT(*) (one row = one customer). Never default to COUNT(DISTINCT ban) — apply it
+only when a confirmed business rule explicitly calls for counting distinct billing accounts.
+The final SELECT is a UNION ALL of that same counting expression from each CTE in sequence order.
 Every arm MUST carry explicit column aliases — no arm may omit step_order, AS layer_name, or AS audience_count.
 Schema identical for every arm (step_order integer keeps BigQuery from reordering rows):
-  SELECT <N> AS step_order, '<step_label>' AS layer_name, COUNT(DISTINCT ban) AS audience_count FROM <cte_name>
+  SELECT <N> AS step_order, '<step_label>' AS layer_name, <same counting expression as every other arm> AS audience_count FROM <cte_name>
   UNION ALL ...
   ORDER BY step_order
 N starts at 1 for "Base Universe" and increments by 1 for each subsequent arm.
@@ -232,6 +236,37 @@ Use ONLY the filter criteria listed above.
 {optimization_context_section}
 OUTPUT: return raw SQL only — no prose, no fences, no semicolon.
 The first character must be 'W' (WITH). Any explanatory text causes a pipeline parse failure."""
+
+# Used only when a confirmed correction is being applied to a query that already ran
+# successfully (see QuantAgent.apply_confirmed_correction()) -- a narrow edit instruction,
+# not a fresh "write the whole query" prompt, so nothing about the query the AI is NOT
+# being asked to fix (the base population, the counting unit, any other CTE) is free to
+# drift between one run and the next the way it can when the whole query is regenerated
+# from a natural-language description every time.
+_APPLY_CORRECTION_PROMPT = """You already generated and successfully ran this exact BigQuery waterfall query:
+
+{previous_sql}
+
+The user has now confirmed the following additional correction(s). Apply ONLY these, and
+change nothing else about the query above:
+{corrections_json}
+
+Rules — non-negotiable:
+- Copy the "Base Universe" CTE and every other existing CTE forward EXACTLY as they already
+  appear above: same table, same filters, same column names, same counting expression (e.g.
+  COUNT(*) or COUNT(DISTINCT <column>)). Do not redesign, reorder, or "improve" anything that
+  isn't one of the corrections listed above.
+- Insert exactly one new CTE per correction listed above, each immediately before the final
+  CTE ("Final Targetable Audience" or equivalent), applying that correction as a WHERE clause
+  on top of the immediately preceding CTE's output: SELECT * FROM <prior_cte> WHERE <new filter>.
+- Give each new CTE a short, plain-English label describing the correction (not column names).
+- Renumber step_order sequentially across the whole query and update the final UNION ALL
+  SELECT list to include the new arm(s) in the correct position, in the exact same output
+  shape (step_order, layer_name, audience_count) and the exact same counting expression
+  already used by every other arm above.
+- Return ONLY the complete, updated raw SQL — no markdown, no explanation, no trailing
+  semicolon. The first character must be 'W' (WITH). Any explanatory text causes a pipeline
+  parse failure."""
 
 
 class QuantAgent(BaseAgent):
@@ -441,6 +476,78 @@ class QuantAgent(BaseAgent):
         if os.getenv("QUANT_DEBUG_SQL"):
             print(f"[Quant SQL — ad-hoc]\n{sql}\n", file=sys.stderr)
         return sql
+
+    def apply_confirmed_correction(
+        self, previous_log: QuantAuditLog, corrections: list[str],
+    ) -> Union[QuantAuditLog, NexusErrorPayload]:
+        """Patch a just-confirmed correction directly onto the exact SQL that already ran
+        successfully, instead of asking the AI to write the whole query over again from a
+        natural-language description.
+
+        Regenerating the entire query from scratch on every retry is how a confirmed
+        correction can look "ignored" even though it was applied correctly: nothing stops
+        the model from also silently rewriting something unrelated -- which values count
+        as "postpaid", whether to count individual subscribers or distinct billing accounts
+        -- and the user only ever sees the one final number change, with no way to tell that
+        it moved for a reason that had nothing to do with what they actually corrected.
+        Editing the known-good SQL in place, one new CTE at a time, removes that risk: the
+        base population and every prior filter are copied forward untouched by instruction,
+        not left to the model's discretion to reproduce faithfully.
+        """
+        request = previous_log.request
+        updated_request = request.model_copy(
+            update={"filters": [*(request.filters or []), *corrections]}
+        )
+        ThoughtDisplay.progress("Applying your correction to the query that already worked...")
+        try:
+            prompt = _APPLY_CORRECTION_PROMPT.format(
+                previous_sql=previous_log.sql,
+                corrections_json=json.dumps(corrections, ensure_ascii=False),
+            )
+            sql = self._call_sql(prompt)
+            self._last_sql = sql
+            if os.getenv("QUANT_DEBUG_SQL"):
+                print(f"[Quant SQL — correction patch]\n{sql}\n", file=sys.stderr)
+
+            try:
+                raw_rows = self._execute_query(sql, request.bq_project)
+            except Exception as exc:
+                from google.api_core.exceptions import GoogleAPICallError  # noqa: PLC0415
+
+                if not isinstance(exc, GoogleAPICallError):
+                    raise
+                # The targeted edit didn't produce valid SQL -- fall back to a full rebuild
+                # (the pre-existing behavior) rather than surface a failure for something
+                # that used to work before this correction was added.
+                _log.warning(
+                    "Correction-patch SQL failed (%s) -- falling back to a full rebuild.",
+                    str(exc)[:300],
+                )
+                return self.direct_count(updated_request)
+
+            masked_rows = _mask_pii(raw_rows)
+            waterfall = _parse_waterfall(masked_rows)
+            note = _optimization_note(waterfall)
+            final_count = _final_audience_count(waterfall)
+            ThoughtDisplay.results_ready(final_count, waterfall, note)
+            return QuantAuditLog(
+                request=updated_request,
+                sql=sql,
+                waterfall=waterfall,
+                final_count=final_count,
+                optimization_note=note,
+            )
+        except Exception as exc:
+            _log.exception(
+                "apply_confirmed_correction failed for %r: %s", request.campaign_name, exc,
+            )
+            return NexusErrorPayload(
+                error_type="database_error",
+                error_summary=str(exc)[:400],
+                original_request=updated_request.model_dump(),
+                failed_sql=self._last_sql or None,
+                retry_hint="Falling back to rebuilding the full query from scratch.",
+            )
 
     def _call_sql(self, prompt: str) -> str:
         """Call Fuel iX for SQL generation.
