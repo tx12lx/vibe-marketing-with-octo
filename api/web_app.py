@@ -774,24 +774,30 @@ def _process_correction_sync(
 ) -> dict:
     try:
         from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
-        pending_contradiction = (
+        pending_contradiction_text = (
             getattr(session, "pending_contradiction_text", "") if session is not None else ""
+        )
+        pending_contradiction_rule = (
+            getattr(session, "pending_contradiction_rule", None) if session is not None else None
         )
         feedback_output = _run_adhoc_feedback(
             log, query, correction,
             knowledge_ctx=_runtime.knowledge_ctx,
             user_identity=getattr(session, "last_sender", "web-unverified") if session is not None else "web-unverified",
-            pending_contradiction_text=pending_contradiction,
+            pending_contradiction_text=pending_contradiction_text,
+            pending_contradiction_new_rule=pending_contradiction_rule,
         )
 
         if session is not None:
             # Cleared by default; re-set below only if THIS turn raised a new
             # contradiction that needs the same yes/no resolution on the next turn.
             session.pending_contradiction_text = ""
+            session.pending_contradiction_rule = None
 
         if feedback_output is not None and feedback_output.clarifying_question:
             if session is not None and feedback_output.contradiction_existing_rule_text:
                 session.pending_contradiction_text = feedback_output.contradiction_existing_rule_text
+                session.pending_contradiction_rule = feedback_output.contradiction_new_rule
             return {
                 "type": "correction_clarifying",
                 "question": feedback_output.clarifying_question,

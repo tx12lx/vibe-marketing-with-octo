@@ -176,6 +176,12 @@ class FeedbackInput(BaseModel):
     # answer to "do you want this to override that rule?", not a fresh correction to
     # interpret from scratch. See FeedbackAgent._resolve_pending_contradiction().
     pending_contradiction_text: str = ""
+    # The specific rule dict that was blocked (Stage 1's raw interpretation of the
+    # ORIGINAL correction, before the contradiction check skipped it) -- if the user
+    # confirms they want to override, this is what actually gets saved, so the saved
+    # rule reflects the original correction's own clean interpretation rather than the
+    # user's short "yes, go ahead" reply to the follow-up question.
+    pending_contradiction_new_rule: Optional[dict] = None
 
 
 class FeedbackOutput(BaseModel):
@@ -194,3 +200,7 @@ class FeedbackOutput(BaseModel):
     # being re-run through the full interpretation pipeline, which would just flag the same
     # contradiction again.
     contradiction_existing_rule_text: str = ""
+    # The blocked rule dict (Stage 1's raw interpretation) -- persisted by the caller
+    # alongside contradiction_existing_rule_text so it can be handed back in as
+    # FeedbackInput.pending_contradiction_new_rule if the user confirms the override.
+    contradiction_new_rule: Optional[dict] = None

@@ -170,6 +170,9 @@ class FeedbackAgent(BaseAgent):
         # tell the caller which existing rule text triggered it (see FeedbackOutput.
         # contradiction_existing_rule_text and _resolve_pending_contradiction() below).
         self._pending_contradiction_rule_text: str = ""
+        # The full Stage 1 rule dict that got blocked, alongside the two above -- see
+        # FeedbackOutput.contradiction_new_rule.
+        self._pending_contradiction_new_rule: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Injection points
@@ -238,8 +241,10 @@ class FeedbackAgent(BaseAgent):
         if self._pending_clarification:
             question = self._pending_clarification
             contradiction_text = self._pending_contradiction_rule_text
+            contradiction_rule = self._pending_contradiction_new_rule
             self._pending_clarification = ""
             self._pending_contradiction_rule_text = ""
+            self._pending_contradiction_new_rule = None
             return FeedbackOutput(
                 rules_extracted=[],
                 rules_confirmed=[],
@@ -249,6 +254,7 @@ class FeedbackAgent(BaseAgent):
                 success=False,
                 clarifying_question=question,
                 contradiction_existing_rule_text=contradiction_text,
+                contradiction_new_rule=contradiction_rule,
             )
 
         # Stage 3 — scope classification
@@ -349,6 +355,7 @@ class FeedbackAgent(BaseAgent):
                 )
                 self._pending_clarification = question
                 self._pending_contradiction_rule_text = existing
+                self._pending_contradiction_new_rule = rule
                 updated[i] = {**rule, "_skipped": True}
                 continue
 
@@ -476,31 +483,23 @@ class FeedbackAgent(BaseAgent):
                 success=True,
             )
 
-        rule = BusinessRule(
-            rule_id=str(uuid.uuid4()),
-            created_at=datetime.now(tz=timezone.utc).isoformat(),
-            verified_by=inp.user_identity or "unknown",
-            raw_correction=inp.raw_correction,
-            rule_description=f'Supersedes an earlier rule ("{existing_text}"): {inp.raw_correction}',
-            rule_type="general",
-            structured_value={
-                "note": inp.raw_correction,
-                "description": "User-confirmed override of a previously confirmed, conflicting rule.",
-            },
-            scope="campaign",
-            campaign_code=inp.campaign_code if inp.campaign_code not in ("", "AD_HOC") else None,
-            campaign_name=inp.campaign_name if inp.campaign_code not in ("", "AD_HOC") else None,
-            priority=3,
-            applies_to_future=True,
-            overrides_acc_summary=False,
-            clarification_rounds=1,
-            source="hitl_feedback_contradiction_override",
-            confidence=0.9,
+        # Build the rule from the ORIGINAL correction's own clean interpretation (Stage 1's
+        # understood_as, structured_value, scope, etc. -- everything _dict_to_rule already
+        # knows how to read), not from the user's short "yes" reply -- that reply confirms
+        # intent, it isn't itself the substance of what should be saved.
+        pending_rule_dict = inp.pending_contradiction_new_rule
+        rule = (
+            self._dict_to_rule(pending_rule_dict, inp)
+            if pending_rule_dict
+            else self._make_verbatim_rule(inp)
         )
         return FeedbackOutput(
             rules_extracted=[rule], rules_confirmed=[rule], rules_pending=[],
             new_glossary_terms=[],
-            interpretation_summary=rule.rule_description,
+            interpretation_summary=(
+                f"{rule.rule_description} (confirmed to override an earlier rule: "
+                f'"{existing_text}")'
+            ),
             success=True,
         )
 

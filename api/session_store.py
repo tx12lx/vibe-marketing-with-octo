@@ -33,6 +33,7 @@ class SessionState:
         "pending_correction",
         "transcript",
         "pending_contradiction_text",
+        "pending_contradiction_rule",
     )
 
     # How many past turns get replayed into the model as conversation context (see
@@ -81,6 +82,9 @@ class SessionState:
         # that question, not a fresh correction (see FeedbackAgent.
         # _resolve_pending_contradiction()). Cleared as soon as it's resolved either way.
         self.pending_contradiction_text: str = ""
+        # The blocked rule dict that goes with pending_contradiction_text -- see
+        # FeedbackOutput.contradiction_new_rule.
+        self.pending_contradiction_rule: Optional[dict] = None
 
     def record_turn(self, query: str, answer: str) -> None:
         self.transcript.append({"query": query, "answer": answer})
