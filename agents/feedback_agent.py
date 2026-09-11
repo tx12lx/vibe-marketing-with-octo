@@ -452,30 +452,39 @@ class FeedbackAgent(BaseAgent):
         re-extract the same correction and flag the same contradiction again, trapping the
         user in a loop.
 
-        Whether to override an already-confirmed rule is consequential enough that it
-        shouldn't rest on a single non-deterministic model call: a direct "yes"/"no" opening
-        is read deterministically first (this covers the overwhelming majority of real
-        replies to a yes/no question), and the model is only asked when the reply doesn't
-        clearly start either way.
+        Live testing found real replies rarely open with a literal "yes"/"no" -- a user is
+        just as likely to restate their intent ("the exclusion is not a default", "remove it
+        entirely") as to answer the question directly. A prompt that only recognizes literal
+        yes/no wording misread "the exclusion is not a default" as declining the override --
+        the exact opposite of what the user meant, and a silent wrong answer is worse than
+        asking again: getting this wrong means a rule keeps applying (or stops applying)
+        opposite to what the user actually asked for, with no visible sign anything went
+        wrong. So the deterministic yes/no opening is still read first (cheap, unambiguous
+        cases need no model call at all), but anything else goes to a three-way read --
+        override / keep / genuinely unclear -- and "unclear" asks again in plainer words
+        instead of silently defaulting to "keep."
         """
         existing_text = inp.pending_contradiction_text
-        affirmed = self._read_affirmation(inp.raw_correction)
-        if affirmed is None:
-            check_prompt = (
-                "A user was asked the following question about a correction they submitted:\n"
-                f'  "This looks like it conflicts with a rule you already confirmed: '
-                f'\\"{existing_text}\\". Do you want this new correction to replace that rule?"\n\n'
-                f'Their reply: "{inp.raw_correction}"\n\n'
-                "Does their reply affirm that they want the new correction to replace/override "
-                "the existing rule? Answer with exactly one word: YES or NO."
-            )
-            try:
-                raw = ask_ai(check_prompt, system=_FEEDBACK_SYSTEM, temperature=0, max_tokens=10)
-                affirmed = raw.strip().upper().startswith("Y")
-            except Exception:
-                affirmed = False
+        decision = self._read_affirmation(inp.raw_correction)
+        if decision is None:
+            decision = self._ask_ai_override_decision(existing_text, inp.raw_correction)
 
-        if not affirmed:
+        if decision is None:
+            return FeedbackOutput(
+                rules_extracted=[], rules_confirmed=[], rules_pending=[],
+                new_glossary_terms=[],
+                interpretation_summary="",
+                success=False,
+                clarifying_question=(
+                    f'Sorry, I want to make sure I get this right before changing anything. '
+                    f'You already have this rule saved: "{existing_text}". Should I keep '
+                    f'applying it as-is, or stop applying it based on what you just told me?'
+                ),
+                contradiction_existing_rule_text=existing_text,
+                contradiction_new_rule=inp.pending_contradiction_new_rule,
+            )
+
+        if not decision:
             return FeedbackOutput(
                 rules_extracted=[], rules_confirmed=[], rules_pending=[],
                 new_glossary_terms=[],
@@ -485,8 +494,8 @@ class FeedbackAgent(BaseAgent):
 
         # Build the rule from the ORIGINAL correction's own clean interpretation (Stage 1's
         # understood_as, structured_value, scope, etc. -- everything _dict_to_rule already
-        # knows how to read), not from the user's short "yes" reply -- that reply confirms
-        # intent, it isn't itself the substance of what should be saved.
+        # knows how to read), not from the user's short confirming reply -- that reply
+        # confirms intent, it isn't itself the substance of what should be saved.
         pending_rule_dict = inp.pending_contradiction_new_rule
         rule = (
             self._dict_to_rule(pending_rule_dict, inp)
@@ -502,6 +511,50 @@ class FeedbackAgent(BaseAgent):
             ),
             success=True,
         )
+
+    @staticmethod
+    def _ask_ai_override_decision(existing_text: str, reply: str) -> Optional[bool]:
+        """Read a reply to the override question as OVERRIDE / KEEP / genuinely UNCLEAR.
+
+        Explicitly told to recognize restated intent, not just literal yes/no -- this is
+        what the plain yes/no version got wrong live (see _resolve_pending_contradiction).
+        Returns True (override), False (keep), or None (ask again) -- never guesses when
+        the model itself isn't sure, since a wrong guess here silently does the opposite of
+        what the user asked for.
+        """
+        check_prompt = (
+            f'A user previously confirmed this rule: "{existing_text}"\n\n'
+            "They then submitted a correction that conflicts with it, and were asked whether "
+            "the new correction should replace/override that existing rule.\n\n"
+            f'Their reply: "{reply}"\n\n'
+            "Read their reply carefully -- they may not say \"yes\" or \"no\" directly; they "
+            "may restate their own intent in different words instead (for example, saying the "
+            "existing rule \"is not a default\", should be \"removed\", or \"doesn't apply\" all "
+            "clearly mean they want to OVERRIDE it, even without the word \"yes\"). Decide:\n"
+            "  OVERRIDE -- they want the existing rule replaced, removed, or no longer applied by default\n"
+            "  KEEP     -- they want the existing rule to stay exactly as it is\n"
+            "  UNCLEAR  -- you genuinely cannot tell either way from their reply\n\n"
+            "Answer with exactly one word: OVERRIDE, KEEP, or UNCLEAR."
+        )
+        try:
+            # thinking_budget=0: this model spends part of max_tokens on hidden
+            # "thinking" tokens by default -- confirmed live that a small max_tokens (10)
+            # with thinking left on silently consumed the whole budget before ever writing
+            # the visible answer, so ask_ai returned "" every time and this always fell
+            # through to None. No deliberation is needed for a single-word classification,
+            # so thinking is disabled outright rather than just raising max_tokens, which
+            # would only mask the same risk at a higher token count.
+            raw = ask_ai(
+                check_prompt, system=_FEEDBACK_SYSTEM, temperature=0,
+                max_tokens=20, thinking_budget=0,
+            ).strip().upper()
+        except Exception:
+            return None
+        if raw.startswith("OVERRIDE"):
+            return True
+        if raw.startswith("KEEP"):
+            return False
+        return None
 
     def _make_verbatim_rule(self, inp: FeedbackInput) -> BusinessRule:
         """Create a BusinessRule directly from the raw correction text.
