@@ -1,1 +1,83 @@
-[]
+[
+  {
+    "campaign_code": null,
+    "created_at": "2026-09-10T23:55:04Z",
+    "event_type": "correction",
+    "id": 1,
+    "raw_text": "The query failed to filter for all postpaid LOBs",
+    "structured_rule_id": 7,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": "ADHOC",
+    "created_at": "2026-09-11T00:11:53Z",
+    "event_type": "correction",
+    "id": 2,
+    "raw_text": "Please also exclude anyone on a month-to-month contract for this one",
+    "structured_rule_id": 8,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": null,
+    "created_at": "2026-09-11T01:13:27Z",
+    "event_type": "correction",
+    "id": 3,
+    "raw_text": "The query shouldn't filter on commit_end_date since customer lifecycle was not mentioned in the prompt",
+    "structured_rule_id": 9,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": null,
+    "created_at": "2026-09-11T01:15:18Z",
+    "event_type": "correction",
+    "id": 4,
+    "raw_text": "The query shouldn't exclude month to month customers since the prompt didn't mention cusomter cycles.",
+    "structured_rule_id": 10,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": null,
+    "created_at": "2026-09-11T01:32:50Z",
+    "event_type": "correction",
+    "id": 5,
+    "raw_text": "exclude month-to-month customers, only count people on a term contract",
+    "structured_rule_id": 11,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": null,
+    "created_at": "2026-09-11T01:34:30Z",
+    "event_type": "correction",
+    "id": 6,
+    "raw_text": "month-to-month customers should still be excluded, make sure that filter is actually applied",
+    "structured_rule_id": 12,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": "ADHOC",
+    "created_at": "2026-09-11T01:58:21Z",
+    "event_type": "correction",
+    "id": 7,
+    "raw_text": "Yes, replace it, I still want month-to-month customers excluded.",
+    "structured_rule_id": 13,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": "ADHOC",
+    "created_at": "2026-09-11T02:02:08Z",
+    "event_type": "correction",
+    "id": 8,
+    "raw_text": "exclude month-to-month customers, only count people on a term contract",
+    "structured_rule_id": 14,
+    "user_identity": "web-unverified"
+  },
+  {
+    "campaign_code": null,
+    "created_at": "2026-09-11T02:15:40Z",
+    "event_type": "correction",
+    "id": 9,
+    "raw_text": "exclude customers under the age of 18",
+    "structured_rule_id": 15,
+    "user_identity": "web-unverified"
+  }
+]
