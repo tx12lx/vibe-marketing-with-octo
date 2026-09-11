@@ -59,19 +59,38 @@ _MAX_TOKENS_QUERY = 8192
 _DEFAULT_BQ_PROJECT = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
 _DEFAULT_BQ_DATASET = os.getenv("BQ_DATASET", "campaign_data")
 
-_NEXUS_SYSTEM = (
+# Split into an identity block (shared by every call) and a JSON mandate (only for calls
+# that actually want structured output) -- _call_with_knowledge() is shared by both
+# JSON-producing callers (build_sizing_request_from_nl) and prose-producing callers
+# (answer_general_question, explain_stuck_request), and a system prompt unconditionally
+# demanding "Return ONLY valid JSON" directly contradicts a user prompt asking for a
+# warm, 2-4 sentence plain-English answer. A more instruction-literal model (confirmed
+# live switching to Gemini 2.5 Pro) follows the system mandate over the conflicting user
+# prompt and wraps its prose answer in a raw JSON blob -- a less literal model may have
+# silently ignored the system prompt instead, which is what made this go unnoticed.
+_NEXUS_IDENTITY = (
     "You are Vibe OCTO Nexus, a senior management consulting AI embedded in a "
     "Canadian telecom marketing team (TELUS / Koodo). "
-    "You classify what a user is asking for, extract structured targeting parameters "
-    "from natural language, and emit validated JSON payloads for downstream audience "
-    "sizing. "
-    "Return ONLY valid JSON — no explanation, no markdown, no trailing text.\n\n"
     "All table names, column meanings, and business rules are provided separately, from "
     "the knowledge layer -- not hardcoded here. Treat anything marked '(confirmed)' as "
     "ground truth. Treat anything marked '(unconfirmed guess)' as tentative -- you may "
     "still use it, but say so plainly if your classification depends on an unconfirmed "
     "guess, so a human can verify it."
 )
+
+_NEXUS_JSON_MANDATE = (
+    "You classify what a user is asking for, extract structured targeting parameters "
+    "from natural language, and emit validated JSON payloads for downstream audience "
+    "sizing. "
+    "Return ONLY valid JSON — no explanation, no markdown, no trailing text."
+)
+
+_NEXUS_PROSE_MANDATE = (
+    "For this specific request, answer directly in plain English prose -- no JSON, no "
+    "markdown code fences, no structured format of any kind. Just the answer itself."
+)
+
+_NEXUS_SYSTEM = _NEXUS_IDENTITY + " " + _NEXUS_JSON_MANDATE
 
 _NL_PARSE_PROMPT = """A consultant has submitted an ad-hoc audience sizing request:
   "{query}"
@@ -300,7 +319,7 @@ class NexusAgent(BaseAgent):
             "Do not mention SQL, database columns, or technical identifiers."
         )
         try:
-            return self._call_with_knowledge(prompt)
+            return self._call_with_knowledge(prompt, expect_json=False)
         except Exception:
             return (
                 "I don't have enough context to answer that question directly. "
@@ -370,7 +389,7 @@ class NexusAgent(BaseAgent):
                 "Do not say you are an AI. Do not apologize excessively."
             )
         try:
-            return self._call_with_knowledge(prompt)
+            return self._call_with_knowledge(prompt, expect_json=False)
         except Exception:
             if error_details:
                 return (
@@ -416,12 +435,18 @@ class NexusAgent(BaseAgent):
         )
         return ask_ai(user_prompt, system=system, temperature=0, max_tokens=_MAX_TOKENS_BUILD)
 
-    def _call_with_knowledge(self, user_query: str) -> str:
+    def _call_with_knowledge(self, user_query: str, expect_json: bool = True) -> str:
         """Call the AI model with the full knowledge-layer context prepended.
 
         The confirmed schema, glossary, and business rules for every synced
         table are the model's authoritative reference for this call -- this is
         what makes Nexus's answers grounded rather than freely inferred.
+
+        expect_json: True for callers building a structured payload
+        (build_sizing_request_from_nl); False for callers that want a warm,
+        plain-English answer (answer_general_question, explain_stuck_request) --
+        those must not carry the "return only JSON" system mandate, since that
+        directly contradicts what their own prompt is asking for.
         """
         if self._knowledge_ctx is not None:
             cached_text = (
@@ -435,10 +460,11 @@ class NexusAgent(BaseAgent):
 
         prompt = cached_text + "\n\n" + user_query
 
+        base_system = _NEXUS_SYSTEM if expect_json else _NEXUS_IDENTITY + " " + _NEXUS_PROSE_MANDATE
         system = (
-            _NEXUS_SYSTEM + "\n\n" + self._session_context
+            base_system + "\n\n" + self._session_context
             if self._session_context
-            else _NEXUS_SYSTEM
+            else base_system
         )
         return ask_ai(prompt, system=system, temperature=0, max_tokens=_MAX_TOKENS_QUERY)
 
