@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import uuid
@@ -426,25 +427,46 @@ class FeedbackAgent(BaseAgent):
     # Helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _read_affirmation(reply: str) -> Optional[bool]:
+        """Deterministically read a plain yes/no opening (case-insensitive, allowing simple
+        leading punctuation/quotes). Returns None when the reply doesn't clearly start
+        either way, so the caller can fall back to an AI read for genuinely unclear text."""
+        text = reply.strip().lstrip("\"'").lower()
+        if re.match(r"^yes\b", text) or re.match(r"^yep\b", text) or re.match(r"^yeah\b", text):
+            return True
+        if re.match(r"^no\b", text) or re.match(r"^nope\b", text):
+            return False
+        return None
+
     def _resolve_pending_contradiction(self, inp: FeedbackInput) -> FeedbackOutput:
         """Resolve the user's answer to "do you want this to override that existing rule?"
-        with one small yes/no read, instead of re-running the full interpretation pipeline
-        on it -- which would just re-extract the same correction and flag the same
-        contradiction again, trapping the user in a loop."""
+        instead of re-running the full interpretation pipeline on it -- which would just
+        re-extract the same correction and flag the same contradiction again, trapping the
+        user in a loop.
+
+        Whether to override an already-confirmed rule is consequential enough that it
+        shouldn't rest on a single non-deterministic model call: a direct "yes"/"no" opening
+        is read deterministically first (this covers the overwhelming majority of real
+        replies to a yes/no question), and the model is only asked when the reply doesn't
+        clearly start either way.
+        """
         existing_text = inp.pending_contradiction_text
-        check_prompt = (
-            "A user was asked the following question about a correction they submitted:\n"
-            f'  "This looks like it conflicts with a rule you already confirmed: '
-            f'\\"{existing_text}\\". Do you want this new correction to replace that rule?"\n\n'
-            f'Their reply: "{inp.raw_correction}"\n\n'
-            "Does their reply affirm that they want the new correction to replace/override "
-            "the existing rule? Answer with exactly one word: YES or NO."
-        )
-        try:
-            raw = ask_ai(check_prompt, system=_FEEDBACK_SYSTEM, temperature=0, max_tokens=10)
-            affirmed = raw.strip().upper().startswith("Y")
-        except Exception:
-            affirmed = False
+        affirmed = self._read_affirmation(inp.raw_correction)
+        if affirmed is None:
+            check_prompt = (
+                "A user was asked the following question about a correction they submitted:\n"
+                f'  "This looks like it conflicts with a rule you already confirmed: '
+                f'\\"{existing_text}\\". Do you want this new correction to replace that rule?"\n\n'
+                f'Their reply: "{inp.raw_correction}"\n\n'
+                "Does their reply affirm that they want the new correction to replace/override "
+                "the existing rule? Answer with exactly one word: YES or NO."
+            )
+            try:
+                raw = ask_ai(check_prompt, system=_FEEDBACK_SYSTEM, temperature=0, max_tokens=10)
+                affirmed = raw.strip().upper().startswith("Y")
+            except Exception:
+                affirmed = False
 
         if not affirmed:
             return FeedbackOutput(
