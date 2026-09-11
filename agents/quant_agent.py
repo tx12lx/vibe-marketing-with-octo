@@ -12,6 +12,7 @@ Receives a validated AdHocSizingRequest from Nexus (direct_count) and:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -23,6 +24,8 @@ from typing import Optional, Union
 from dotenv import load_dotenv
 from core.resilience import resilient_bq_query
 from core.ai_client import ask_ai
+
+_log = logging.getLogger(__name__)
 
 _AGENTS_DIR = Path(__file__).resolve().parent
 _ROOT_DIR = _AGENTS_DIR.parent
@@ -327,7 +330,25 @@ class QuantAgent(BaseAgent):
                 applied_rules=applied_rules,
             )
             ThoughtDisplay.progress("Running the waterfall query now...")
-            raw_rows = self._execute_query(sql, request.bq_project)
+            try:
+                raw_rows = self._execute_query(sql, request.bq_project)
+            except Exception as exc:
+                # A malformed generated query (e.g. mismatched UNION ALL column counts --
+                # more likely the longer and more accumulated a session's filters get) is
+                # a SQL-quality problem, not a transient one -- retrying the same SQL would
+                # just fail the same way. Regenerate once with BigQuery's own error fed back
+                # as a correction hint, then retry execution exactly once; a second failure
+                # is treated as real and propagates to the except block below as before.
+                from google.api_core.exceptions import GoogleAPICallError  # noqa: PLC0415
+
+                if not isinstance(exc, GoogleAPICallError):
+                    raise
+                _log.warning(
+                    "First SQL attempt failed (%s) -- regenerating once with the error as a hint.",
+                    str(exc)[:300],
+                )
+                sql = self._generate_adhoc_waterfall_sql(request, schema, error_hint=str(exc)[:500])
+                raw_rows = self._execute_query(sql, request.bq_project)
             masked_rows = _mask_pii(raw_rows)
             waterfall = _parse_waterfall(masked_rows)
             note = _optimization_note(waterfall)
@@ -341,6 +362,14 @@ class QuantAgent(BaseAgent):
                 optimization_note=note,
             )
         except Exception as exc:
+            # Previously silent -- this failure reaches the user only as a deliberately
+            # vague "technical issue" message (see vibe_orchestrator.generate_stuck_
+            # explanation), which is correct for them but meant there was nowhere at all
+            # to find out what actually broke. Now it is at least in the server's own log.
+            _log.exception(
+                "direct_count failed for %r (target_population=%r): %s",
+                request.campaign_name, request.target_population, exc,
+            )
             return NexusErrorPayload(
                 error_type="database_error",
                 error_summary=str(exc)[:400],
@@ -368,7 +397,7 @@ class QuantAgent(BaseAgent):
         except Exception:
             return f"-- Schema unavailable for {project}.{dataset}"
 
-    def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str) -> str:
+    def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str, error_hint: str = "") -> str:
         opt_ctx = (request.optimization_context or "").strip()
 
         # Inject FFH column override when the request targets the Home Solutions table.
@@ -382,6 +411,16 @@ class QuantAgent(BaseAgent):
             override_parts.append(
                 f"\nCOLUMN NAME OVERRIDES — supersede all schema and waterfall definitions above."
                 f" Apply these substitutions exactly as stated:\n{opt_ctx}\n"
+            )
+
+        # Set only on the one-time regenerate-after-failure retry in direct_count() -- the
+        # model's own error, quoted back at it, is a far more specific correction signal
+        # than a generic reminder to "keep every UNION ALL arm's columns identical" would be.
+        if error_hint:
+            override_parts.append(
+                "\nYOUR PREVIOUS ATTEMPT AT THIS QUERY FAILED WITH THIS EXACT BIGQUERY ERROR "
+                f"— fix the specific problem it describes, most likely a UNION ALL arm with the "
+                f"wrong number or aliasing of columns:\n{error_hint}\n"
             )
 
         optimization_context_section = "\n".join(override_parts) if override_parts else ""
