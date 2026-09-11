@@ -33,7 +33,18 @@ _BACKOFF_BASE = 1.0
 # requirement (confirmed with Alex Everitt) -- even if the env var is unset.
 _PROJECT = os.getenv("GEMINI_PROJECT_ID", "cdo-hsm-adobe-fda-np-9fbb44")
 _LOCATION = os.getenv("GEMINI_LOCATION", "northamerica-northeast1")
-_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+
+# Some models (confirmed live: gemini-2.5-pro) reject thinking_budget=0 outright rather
+# than just ignoring it -- "thinking" isn't optional for them. When that happens, ask_ai
+# retries once without asking to disable it, but that means thinking now silently spends
+# part of max_tokens the caller never budgeted for (that call was written assuming
+# thinking was off). This is the same failure mode already fixed once in
+# agents/feedback_agent.py's override-decision classifier -- fixed centrally here so every
+# caller of thinking_budget=0 is safe under a model that can't honor it, not just the one
+# call site that happened to get tested.
+_THINKING_UNSUPPORTED_MARKER = "does not support setting thinking_budget"
+_MIN_TOKENS_WHEN_THINKING_FORCED = 2048
 
 _client: Optional[genai.Client] = None
 
@@ -43,6 +54,17 @@ def _get_client() -> genai.Client:
     if _client is None:
         _client = genai.Client(vertexai=True, project=_PROJECT, location=_LOCATION)
     return _client
+
+
+def _build_config(
+    system: Optional[str], temperature: float, max_tokens: int, thinking_budget: Optional[int],
+) -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        system_instruction=system,
+        temperature=temperature,
+        max_output_tokens=max_tokens,
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget) if thinking_budget is not None else None,
+    )
 
 
 def ask_ai(
@@ -65,14 +87,12 @@ def ask_ai(
     formatting tasks (e.g. "reply with only this JSON shape") that hidden spend
     can silently truncate the real output. Pass thinking_budget=0 to disable it
     for calls that don't need deliberation; leave unset (default) for anything
-    that benefits from it, like SQL generation or intent classification.
+    that benefits from it, like SQL generation or intent classification. Not every
+    model allows disabling it -- see _THINKING_UNSUPPORTED_MARKER above for what
+    happens then.
     """
-    config = types.GenerateContentConfig(
-        system_instruction=system,
-        temperature=temperature,
-        max_output_tokens=max_tokens,
-        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget) if thinking_budget is not None else None,
-    )
+    config = _build_config(system, temperature, max_tokens, thinking_budget)
+    adapted_for_forced_thinking = False
 
     last_exc: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES + 1):
@@ -87,6 +107,22 @@ def ask_ai(
             last_exc = exc
             retryable = True
         except errors.ClientError as exc:
+            if (
+                thinking_budget is not None
+                and not adapted_for_forced_thinking
+                and _THINKING_UNSUPPORTED_MARKER in str(exc)
+            ):
+                _log.info(
+                    "Model %s can't disable thinking (requested thinking_budget=%s) -- "
+                    "retrying without it, with a higher token floor so thinking can't "
+                    "silently consume the whole budget before writing a visible answer.",
+                    _MODEL, thinking_budget,
+                )
+                adapted_for_forced_thinking = True
+                config = _build_config(
+                    system, temperature, max(max_tokens, _MIN_TOKENS_WHEN_THINKING_FORCED), None,
+                )
+                continue
             last_exc = exc
             retryable = exc.code == 429  # rate limited -- worth retrying
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
