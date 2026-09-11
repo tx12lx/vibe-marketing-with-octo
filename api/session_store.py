@@ -32,6 +32,7 @@ class SessionState:
         "active_corrections",
         "pending_correction",
         "transcript",
+        "pending_contradiction_text",
     )
 
     # How many past turns get replayed into the model as conversation context (see
@@ -75,6 +76,11 @@ class SessionState:
         # Only turns that produced a real answer are recorded (see record_turn()) --
         # a "stuck, need more info" turn has nothing useful to hand back to the model.
         self.transcript: list[dict] = []
+        # Set when the last correction was blocked for contradicting an existing
+        # confirmed rule -- the next /correction submission is then the user's answer to
+        # that question, not a fresh correction (see FeedbackAgent.
+        # _resolve_pending_contradiction()). Cleared as soon as it's resolved either way.
+        self.pending_contradiction_text: str = ""
 
     def record_turn(self, query: str, answer: str) -> None:
         self.transcript.append({"query": query, "answer": answer})

@@ -171,6 +171,11 @@ class FeedbackInput(BaseModel):
     knowledge_tier: str       # GOLD | SILVER | BRONZE
     raw_input_prompt: str     # What user originally asked
     user_identity: str = "unknown"  # who is actually submitting this correction -- carried through to BusinessRule.verified_by
+    # Set only when the PREVIOUS correction on this session was blocked because it
+    # contradicted an existing confirmed rule -- raw_correction above is then the user's
+    # answer to "do you want this to override that rule?", not a fresh correction to
+    # interpret from scratch. See FeedbackAgent._resolve_pending_contradiction().
+    pending_contradiction_text: str = ""
 
 
 class FeedbackOutput(BaseModel):
@@ -183,3 +188,9 @@ class FeedbackOutput(BaseModel):
     interpretation_summary: str
     success: bool
     clarifying_question: str = ""  # Non-empty when AI needs more info before saving a rule
+    # Set alongside clarifying_question only when the question is specifically about a
+    # contradiction with an existing confirmed rule (not general ambiguity) -- the caller
+    # persists this so the user's next reply can be resolved as a yes/no answer instead of
+    # being re-run through the full interpretation pipeline, which would just flag the same
+    # contradiction again.
+    contradiction_existing_rule_text: str = ""

@@ -164,6 +164,11 @@ class FeedbackAgent(BaseAgent):
         self._input: Optional[FeedbackInput] = None
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
         self._pending_clarification: str = ""
+        # Set alongside _pending_clarification only when stage 2 blocked a rule for
+        # contradicting an existing confirmed rule -- lets _run_pipeline's early return
+        # tell the caller which existing rule text triggered it (see FeedbackOutput.
+        # contradiction_existing_rule_text and _resolve_pending_contradiction() below).
+        self._pending_contradiction_rule_text: str = ""
 
     # ------------------------------------------------------------------
     # Injection points
@@ -200,6 +205,14 @@ class FeedbackAgent(BaseAgent):
     def _run_pipeline(self, inp: FeedbackInput) -> FeedbackOutput:
         self._write_failure_log_entry(inp)
 
+        # The previous turn on this session was blocked by a contradiction with an
+        # existing confirmed rule -- inp.raw_correction here is the user's answer to
+        # "do you want this to override that rule?", not a fresh correction. Resolve it
+        # directly rather than running it through stage 1 again, which would just
+        # re-extract the same rule and flag the same contradiction a second time.
+        if inp.pending_contradiction_text:
+            return self._resolve_pending_contradiction(inp)
+
         # Stage 1 — LLM interpretation
         interpretation = self._stage1_interpret(inp)
         if interpretation is None:
@@ -223,7 +236,9 @@ class FeedbackAgent(BaseAgent):
 
         if self._pending_clarification:
             question = self._pending_clarification
+            contradiction_text = self._pending_contradiction_rule_text
             self._pending_clarification = ""
+            self._pending_contradiction_rule_text = ""
             return FeedbackOutput(
                 rules_extracted=[],
                 rules_confirmed=[],
@@ -232,6 +247,7 @@ class FeedbackAgent(BaseAgent):
                 interpretation_summary="",
                 success=False,
                 clarifying_question=question,
+                contradiction_existing_rule_text=contradiction_text,
             )
 
         # Stage 3 — scope classification
@@ -331,6 +347,7 @@ class FeedbackAgent(BaseAgent):
                     f"\"{existing}\". Do you want this new correction to replace that rule?"
                 )
                 self._pending_clarification = question
+                self._pending_contradiction_rule_text = existing
                 updated[i] = {**rule, "_skipped": True}
                 continue
 
@@ -408,6 +425,62 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _resolve_pending_contradiction(self, inp: FeedbackInput) -> FeedbackOutput:
+        """Resolve the user's answer to "do you want this to override that existing rule?"
+        with one small yes/no read, instead of re-running the full interpretation pipeline
+        on it -- which would just re-extract the same correction and flag the same
+        contradiction again, trapping the user in a loop."""
+        existing_text = inp.pending_contradiction_text
+        check_prompt = (
+            "A user was asked the following question about a correction they submitted:\n"
+            f'  "This looks like it conflicts with a rule you already confirmed: '
+            f'\\"{existing_text}\\". Do you want this new correction to replace that rule?"\n\n'
+            f'Their reply: "{inp.raw_correction}"\n\n'
+            "Does their reply affirm that they want the new correction to replace/override "
+            "the existing rule? Answer with exactly one word: YES or NO."
+        )
+        try:
+            raw = ask_ai(check_prompt, system=_FEEDBACK_SYSTEM, temperature=0, max_tokens=10)
+            affirmed = raw.strip().upper().startswith("Y")
+        except Exception:
+            affirmed = False
+
+        if not affirmed:
+            return FeedbackOutput(
+                rules_extracted=[], rules_confirmed=[], rules_pending=[],
+                new_glossary_terms=[],
+                interpretation_summary="Okay, I'll leave the existing rule as it is -- no changes made.",
+                success=True,
+            )
+
+        rule = BusinessRule(
+            rule_id=str(uuid.uuid4()),
+            created_at=datetime.now(tz=timezone.utc).isoformat(),
+            verified_by=inp.user_identity or "unknown",
+            raw_correction=inp.raw_correction,
+            rule_description=f'Supersedes an earlier rule ("{existing_text}"): {inp.raw_correction}',
+            rule_type="general",
+            structured_value={
+                "note": inp.raw_correction,
+                "description": "User-confirmed override of a previously confirmed, conflicting rule.",
+            },
+            scope="campaign",
+            campaign_code=inp.campaign_code if inp.campaign_code not in ("", "AD_HOC") else None,
+            campaign_name=inp.campaign_name if inp.campaign_code not in ("", "AD_HOC") else None,
+            priority=3,
+            applies_to_future=True,
+            overrides_acc_summary=False,
+            clarification_rounds=1,
+            source="hitl_feedback_contradiction_override",
+            confidence=0.9,
+        )
+        return FeedbackOutput(
+            rules_extracted=[rule], rules_confirmed=[rule], rules_pending=[],
+            new_glossary_terms=[],
+            interpretation_summary=rule.rule_description,
+            success=True,
+        )
 
     def _make_verbatim_rule(self, inp: FeedbackInput) -> BusinessRule:
         """Create a BusinessRule directly from the raw correction text.

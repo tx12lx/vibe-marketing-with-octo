@@ -193,6 +193,7 @@ def _run_adhoc_feedback(
     correction: str,
     knowledge_ctx: Optional["KnowledgeContext"] = None,
     user_identity: str = "unknown",
+    pending_contradiction_text: str = "",
 ) -> Optional[FeedbackOutput]:
     """Invoke FeedbackAgent to interpret a correction on a sizing result or a
     general-question answer.
@@ -228,6 +229,7 @@ def _run_adhoc_feedback(
             knowledge_tier="BRONZE",
             raw_input_prompt=query,
             user_identity=user_identity,
+            pending_contradiction_text=pending_contradiction_text,
         )
         agent = FeedbackAgent()
         if knowledge_ctx is not None:
