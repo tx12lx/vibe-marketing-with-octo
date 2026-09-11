@@ -8,7 +8,8 @@ consoles. No SQL, column names, schema identifiers, or stack traces are shown.
 from __future__ import annotations
 
 import sys
-from typing import Optional
+import threading
+from typing import Callable, Optional
 
 _W = 68        # total box line width including borders
 _INNER = 64    # usable content chars per row: border + space + 64 + space + border
@@ -81,20 +82,54 @@ def _label_rows(label: str, value: str) -> list[str]:
 
 
 class ThoughtDisplay:
-    """Stateless terminal display for Vibe OCTO pipeline steps.
+    """Terminal display for Vibe OCTO pipeline steps, plus an optional live stream.
 
-    All methods are classmethods that print directly to stdout.
+    All methods are classmethods that print directly to stdout (unchanged terminal
+    behavior). Additionally, each step emits one short, plain-English line to a
+    per-thread "stream sink" if one is set (see set_stream_sink()) -- this is what
+    lets api/web_app.py's /query endpoint show the tool's reasoning in the browser
+    in real time (see Phase 3 of the plan) without touching how the terminal /
+    CLI experience already works. Thread-local, matching agents/nexus_agent.py and
+    agents/quant_agent.py's session-context fix: one request's pipeline runs on one
+    worker thread for its duration, so each request's sink is independent of every
+    other concurrent request's.
     """
+
+    _local = threading.local()
+
+    @classmethod
+    def set_stream_sink(cls, sink: Callable[[str], None]) -> None:
+        """Route this thread's plain-English progress lines to `sink` as well as
+        printing them as usual. Call clear_stream_sink() when the request is done."""
+        cls._local.sink = sink
+
+    @classmethod
+    def clear_stream_sink(cls) -> None:
+        cls._local.sink = None
+
+    @classmethod
+    def _emit(cls, message: str) -> None:
+        """Send one short, plain-English line to this thread's stream sink, if any.
+        Never raises -- a broken or slow sink must never break the underlying pipeline."""
+        sink = getattr(cls._local, "sink", None)
+        if sink is None:
+            return
+        try:
+            sink(message)
+        except Exception:
+            pass
 
     @staticmethod
     def _box(title: str, body: list[str]) -> None:
         parts = [_top(), _row(title), _div()] + body + [_bot()]
         print("\n" + "\n".join(parts))
 
-    @staticmethod
-    def progress(message: str) -> None:
-        """Print a simple inline progress line (no box)."""
+    @classmethod
+    def progress(cls, message: str) -> None:
+        """Print a simple inline progress line (no box); also stream it verbatim --
+        every existing progress() call is already a short, plain-English sentence."""
         print(f"  {message}")
+        cls._emit(message)
 
     # ------------------------------------------------------------------
     # Pipeline step displays
@@ -124,6 +159,7 @@ class ThoughtDisplay:
             if sources_str:
                 body += _label_rows("Knowledge", sources_str)
             cls._box("I'll answer from our campaign knowledge base.", body)
+            cls._emit("Got it -- let me check what we already know about that.")
         else:
             body = [*_label_rows("I heard", short_q)]
             if campaign_hint:
@@ -133,6 +169,7 @@ class ThoughtDisplay:
             if sources_str:
                 body += _label_rows("Knowledge", sources_str)
             cls._box("Understood. Let me find the best audience for your request...", body)
+            cls._emit("Got it -- that's an audience sizing question. Let me get to work on it.")
 
     @classmethod
     def results_ready(
@@ -206,6 +243,7 @@ class ThoughtDisplay:
                 body.append(_row(f"    {step[:60]}"))
         body += [_blank(), _row("  Running the waterfall now...")]
         cls._box("Here is my plan before I run the query:", body)
+        cls._emit(f"Found the right data ({table_label}) and worked out the filters -- running the numbers now...")
 
     # ------------------------------------------------------------------
     # Error translation
@@ -221,6 +259,7 @@ class ThoughtDisplay:
             ),
         ]
         cls._box("I ran into an issue and wasn't able to complete this.", body)
+        cls._emit("Hit a snag -- let me explain what happened.")
 
     @classmethod
     def translate_nexus_error(cls, error_summary: str) -> None:

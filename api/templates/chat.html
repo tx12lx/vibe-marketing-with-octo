@@ -711,11 +711,19 @@ body {
     div.innerHTML = `
       <div class="thinking">
         <div class="thinking-dots"><span></span><span></span><span></span></div>
-        <span>Thinking…</span>
+        <span class="thinking-text">Thinking…</span>
       </div>`;
     messagesEl.appendChild(div);
     scrollBottom();
     return div;
+  }
+
+  // Swaps in the latest short, plain-English reasoning line as the tool works through
+  // a request -- progressive disclosure (one line at a time, not a wall of text) rather
+  // than a single silent wait. See /query's streamed response and core/thought_display.py.
+  function updateThinking(message) {
+    const el = document.querySelector('#thinking .thinking-text');
+    if (el) el.textContent = message;
   }
 
   function removeThinking() {
@@ -1156,6 +1164,31 @@ body {
       </div>`;
   };
 
+  // Reads a Server-Sent Events response body incrementally, calling onEvent(obj) for
+  // each "data: {...}" line as it arrives -- not after the whole response finishes.
+  // Used by /query's streamed reasoning (see api/web_app.py's _stream_query_events()).
+  async function readSSEStream(response, onEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop(); // last part may be incomplete -- keep it for the next chunk
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        try {
+          onEvent(JSON.parse(line.slice(5).trim()));
+        } catch (e) {
+          // A malformed chunk is skipped, not fatal -- the final event is what matters.
+        }
+      }
+    }
+  }
+
   // ── Main send ─────────────────────────────────────────
   async function sendMessage() {
     const text = inputEl.value.trim();
@@ -1174,9 +1207,22 @@ body {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, text }),
       });
-      const data = await res.json();
+
+      let data = null;
+      await readSSEStream(res, (evt) => {
+        if (evt.type === 'progress') {
+          updateThinking(evt.message);
+          scrollBottom();
+        } else if (evt.type === 'final') {
+          data = evt.data;
+        }
+      });
 
       removeThinking();
+
+      if (!data) {
+        throw new Error('The response ended without a result.');
+      }
 
       const botDiv = document.createElement('div');
       botDiv.className = 'msg-bot';

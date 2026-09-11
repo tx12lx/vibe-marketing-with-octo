@@ -221,6 +221,7 @@ class NexusAgent(BaseAgent):
         request is None, so the caller has the real failure reason instead of
         a silent None it has to guess about.
         """
+        ThoughtDisplay.progress("Working out exactly who this audience should include...")
         prompt = _NL_PARSE_PROMPT.format(query=query, bq_project=_DEFAULT_BQ_PROJECT, bq_dataset=_DEFAULT_BQ_DATASET)
         return self._parse_to_adhoc_request(prompt)
 
@@ -291,6 +292,7 @@ class NexusAgent(BaseAgent):
         (see _call_with_knowledge) so the answer reflects confirmed knowledge
         rather than the model's own background assumptions.
         """
+        ThoughtDisplay.progress("Looking that up in what we know so far...")
         prompt = (
             f'A consultant asked: "{query}"\n\n'
             "Answer this question using the knowledge base above. "

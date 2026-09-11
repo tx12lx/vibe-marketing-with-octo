@@ -18,14 +18,16 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import os
+import queue
 import secrets
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 from urllib.parse import parse_qs
 
 _API_DIR = Path(__file__).resolve().parent
@@ -38,7 +40,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(_ROOT / ".env")
 
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse  # noqa: E402
 
 from vibe_orchestrator import (  # noqa: E402
     RequestResult,
@@ -50,6 +52,7 @@ from vibe_orchestrator import (  # noqa: E402
 )
 from core.audit_logger import HITL_NO, HITL_REVIEW_NO, HITL_REVIEW_YES, HITL_YES  # noqa: E402
 from core.resilience import run_startup_health_check  # noqa: E402
+from core.thought_display import ThoughtDisplay  # noqa: E402
 from pydantic_schemas import QuantAuditLog  # noqa: E402
 from api.session_store import SessionStore  # noqa: E402
 
@@ -314,7 +317,9 @@ async def index() -> HTMLResponse:
 
 
 @app.post("/query")
-async def query_endpoint(request: Request) -> JSONResponse:
+async def query_endpoint(request: Request) -> StreamingResponse:
+    """Streams the tool's reasoning as it happens (Server-Sent Events), ending with
+    the same result payload /query always returned -- see _stream_query_events()."""
     body = await request.json()
     session_id: str = body.get("session_id", "")
     text: str = body.get("text", "").strip()
@@ -322,13 +327,54 @@ async def query_endpoint(request: Request) -> JSONResponse:
     if not session_id or not text:
         raise HTTPException(status_code=400, detail="session_id and text are required")
     if _runtime is None:
-        return JSONResponse({"type": "error", "message": "The tool is still starting up. Please try again in a moment."})
+        async def _not_ready() -> Iterator[str]:
+            yield _sse_event({
+                "type": "final",
+                "data": {"type": "error", "message": "The tool is still starting up. Please try again in a moment."},
+            })
+        return StreamingResponse(_not_ready(), media_type="text/event-stream")
 
     _session_store.get(session_id).last_sender = _caller_identity(request)
+    return StreamingResponse(_stream_query_events(text, session_id), media_type="text/event-stream")
 
+
+def _sse_event(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+async def _stream_query_events(text: str, session_id: str):
+    """Runs _process_query_sync() in the background exactly as before, but streams
+    each short, plain-English progress line (see core/thought_display.py's stream
+    sink) to the browser as it happens, then a final event carrying the same result
+    dict /query always returned -- api/templates/chat.html renders that final event
+    exactly the way it rendered the old single JSON response.
+    """
+    q: "queue.Queue" = queue.Queue()
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(_executor, _process_query_sync, text, session_id)
-    return JSONResponse(result)
+
+    def _run() -> None:
+        ThoughtDisplay.set_stream_sink(lambda message: q.put({"type": "progress", "message": message}))
+        try:
+            result = _process_query_sync(text, session_id)
+        except Exception as exc:  # noqa: BLE001 -- a request must always end with SOME final event
+            _log.exception("Unhandled error while streaming a query")
+            result = {
+                "type": "error",
+                "message": "I ran into an issue and couldn't complete your request.",
+                "detail": str(exc)[:300],
+            }
+        finally:
+            ThoughtDisplay.clear_stream_sink()
+        q.put({"type": "final", "data": result})
+        q.put(None)  # sentinel -- tells the generator below there's nothing more coming
+
+    future = loop.run_in_executor(_executor, _run)
+    while True:
+        item = await loop.run_in_executor(None, q.get)
+        if item is None:
+            break
+        yield _sse_event(item)
+    await future  # surface a scheduling error, if any; _run() itself never raises past its own try/except
 
 
 @app.post("/hitl")
