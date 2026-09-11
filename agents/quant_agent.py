@@ -172,6 +172,13 @@ def _is_ffh_request(
 _EXTREME_DROP = 0.60
 _HIGH_SCRUB_RATE = 0.80
 
+# Total SQL-generation attempts for one sizing request (1 initial + retries-with-error-hint).
+# Confirmed live that a compound OR/AND condition (e.g. "BYOD, or MTM, or contract ending in
+# 30 days") can produce a syntactically malformed query more than once in a row -- a single
+# retry isn't always enough for that class of correction, even though it's plenty for the
+# simpler mismatched-column-count failures this mechanism was first built for.
+_MAX_SQL_ATTEMPTS = 3
+
 # Anchor labels for waterfall sort: "Base Universe" is always first,
 # "Final Targetable Audience" and the legacy "Universal Control Group" label are always last.
 _WATERFALL_ANCHORS_FIRST = frozenset(["Base Universe"])
@@ -243,6 +250,14 @@ The first character must be 'W' (WITH). Any explanatory text causes a pipeline p
 # being asked to fix (the base population, the counting unit, any other CTE) is free to
 # drift between one run and the next the way it can when the whole query is regenerated
 # from a natural-language description every time.
+#
+# Two distinct kinds of correction need two distinct edits, not one: "also exclude X" is a
+# brand-new restriction (add a CTE on top); "renewal window should also include BYOD and
+# MTM" redefines what an EXISTING CTE already means (that CTE's own WHERE clause has to
+# change) -- inserting an ADDITIONAL narrowing CTE can only ever make a population smaller,
+# so it structurally cannot express a correction that's supposed to widen or redefine one.
+# Confirmed live: a correction of the second kind, forced through the add-only version of
+# this prompt, produced an identical result to before the correction -- silently a no-op.
 _APPLY_CORRECTION_PROMPT = """You already generated and successfully ran this exact BigQuery waterfall query:
 
 {previous_sql}
@@ -251,19 +266,34 @@ The user has now confirmed the following additional correction(s). Apply ONLY th
 change nothing else about the query above:
 {corrections_json}
 
+For EACH correction, first decide which of these two cases it is:
+  ADD    -- a brand-new constraint that isn't already represented by any existing CTE
+            (e.g. "also require X"). Insert exactly one new CTE for it, immediately before
+            the final CTE ("Final Targetable Audience" or equivalent), applying it as a
+            WHERE clause on top of the immediately preceding CTE's output:
+            SELECT * FROM <prior_cte> WHERE <new filter>.
+  MODIFY -- the correction redefines, widens, loosens, or replaces the logic an EXISTING
+            CTE already implements (e.g. it changes what counts as something a CTE already
+            filters on, rather than adding an unrelated new requirement). Find that one CTE
+            by reading its label and WHERE clause, and rewrite ONLY that CTE's WHERE clause
+            to match the corrected definition exactly -- do not insert a new CTE for this
+            case, edit the existing one in place.
+
 Rules — non-negotiable:
-- Copy the "Base Universe" CTE and every other existing CTE forward EXACTLY as they already
-  appear above: same table, same filters, same column names, same counting expression (e.g.
-  COUNT(*) or COUNT(DISTINCT <column>)). Do not redesign, reorder, or "improve" anything that
-  isn't one of the corrections listed above.
-- Insert exactly one new CTE per correction listed above, each immediately before the final
-  CTE ("Final Targetable Audience" or equivalent), applying that correction as a WHERE clause
-  on top of the immediately preceding CTE's output: SELECT * FROM <prior_cte> WHERE <new filter>.
-- Give each new CTE a short, plain-English label describing the correction (not column names).
+- Copy the "Base Universe" CTE and every other existing CTE that isn't the direct subject of
+  a MODIFY forward EXACTLY as they already appear above: same table, same filters, same
+  column names, same counting expression (e.g. COUNT(*) or COUNT(DISTINCT <column>)). Do not
+  redesign, reorder, rename, or "improve" anything that isn't explicitly one of the
+  corrections listed above.
+- At most one existing CTE may be rewritten per MODIFY correction, and nothing else about it
+  (its position, its label, unless the old label no longer fits) changes; every ADD
+  correction gets exactly one new CTE and touches nothing else.
+- Give each new CTE (from an ADD) a short, plain-English label describing the correction (not
+  column names).
 - Renumber step_order sequentially across the whole query and update the final UNION ALL
-  SELECT list to include the new arm(s) in the correct position, in the exact same output
-  shape (step_order, layer_name, audience_count) and the exact same counting expression
-  already used by every other arm above.
+  SELECT list accordingly, in the exact same output shape (step_order, layer_name,
+  audience_count) and the exact same counting expression already used by every other arm
+  above.
 - Return ONLY the complete, updated raw SQL — no markdown, no explanation, no trailing
   semicolon. The first character must be 'W' (WITH). Any explanatory text causes a pipeline
   parse failure."""
@@ -365,25 +395,28 @@ class QuantAgent(BaseAgent):
                 applied_rules=applied_rules,
             )
             ThoughtDisplay.progress("Running the waterfall query now...")
-            try:
-                raw_rows = self._execute_query(sql, request.bq_project)
-            except Exception as exc:
-                # A malformed generated query (e.g. mismatched UNION ALL column counts --
-                # more likely the longer and more accumulated a session's filters get) is
-                # a SQL-quality problem, not a transient one -- retrying the same SQL would
-                # just fail the same way. Regenerate once with BigQuery's own error fed back
-                # as a correction hint, then retry execution exactly once; a second failure
-                # is treated as real and propagates to the except block below as before.
-                from google.api_core.exceptions import GoogleAPICallError  # noqa: PLC0415
+            raw_rows = None
+            for attempt in range(1, _MAX_SQL_ATTEMPTS + 1):
+                try:
+                    raw_rows = self._execute_query(sql, request.bq_project)
+                    break
+                except Exception as exc:
+                    # A malformed generated query (e.g. mismatched UNION ALL column counts,
+                    # or an unbalanced paren/quote on a compound OR/AND condition -- seen
+                    # live to need more than one attempt) is a SQL-quality problem, not a
+                    # transient one -- retrying the same SQL would just fail the same way.
+                    # Regenerate with BigQuery's own error fed back as a correction hint and
+                    # retry execution, up to _MAX_SQL_ATTEMPTS total; the final attempt's
+                    # failure is treated as real and propagates to the except block below.
+                    from google.api_core.exceptions import GoogleAPICallError  # noqa: PLC0415
 
-                if not isinstance(exc, GoogleAPICallError):
-                    raise
-                _log.warning(
-                    "First SQL attempt failed (%s) -- regenerating once with the error as a hint.",
-                    str(exc)[:300],
-                )
-                sql = self._generate_adhoc_waterfall_sql(request, schema, error_hint=str(exc)[:500])
-                raw_rows = self._execute_query(sql, request.bq_project)
+                    if not isinstance(exc, GoogleAPICallError) or attempt == _MAX_SQL_ATTEMPTS:
+                        raise
+                    _log.warning(
+                        "SQL attempt %d/%d failed (%s) -- regenerating with the error as a hint.",
+                        attempt, _MAX_SQL_ATTEMPTS, str(exc)[:300],
+                    )
+                    sql = self._generate_adhoc_waterfall_sql(request, schema, error_hint=str(exc)[:500])
             masked_rows = _mask_pii(raw_rows)
             waterfall = _parse_waterfall(masked_rows)
             note = _optimization_note(waterfall)
