@@ -43,8 +43,15 @@ _MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 # agents/feedback_agent.py's override-decision classifier -- fixed centrally here so every
 # caller of thinking_budget=0 is safe under a model that can't honor it, not just the one
 # call site that happened to get tested.
+#
+# The reserve is ADDED on top of the caller's own max_tokens, not just a flat floor
+# swapped in for a small one -- confirmed live that a flat floor was still too small for a
+# call whose visible-output budget was already large (a chunk of column descriptions,
+# ~1000 tokens of intended JSON): thinking ate into that same flat ceiling and left too
+# little room for the real answer, truncating it mid-string. Adding the reserve on top
+# guarantees the caller's own intended visible-output budget is never reduced.
 _THINKING_UNSUPPORTED_MARKER = "does not support setting thinking_budget"
-_MIN_TOKENS_WHEN_THINKING_FORCED = 2048
+_THINKING_TOKEN_RESERVE = 2048
 
 _client: Optional[genai.Client] = None
 
@@ -114,13 +121,13 @@ def ask_ai(
             ):
                 _log.info(
                     "Model %s can't disable thinking (requested thinking_budget=%s) -- "
-                    "retrying without it, with a higher token floor so thinking can't "
-                    "silently consume the whole budget before writing a visible answer.",
-                    _MODEL, thinking_budget,
+                    "retrying without it, with %d extra tokens of headroom so thinking "
+                    "can't eat into the caller's own visible-output budget.",
+                    _MODEL, thinking_budget, _THINKING_TOKEN_RESERVE,
                 )
                 adapted_for_forced_thinking = True
                 config = _build_config(
-                    system, temperature, max(max_tokens, _MIN_TOKENS_WHEN_THINKING_FORCED), None,
+                    system, temperature, max_tokens + _THINKING_TOKEN_RESERVE, None,
                 )
                 continue
             last_exc = exc
