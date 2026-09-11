@@ -39,3 +39,4 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+scripts/backup_log.txt
