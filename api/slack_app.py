@@ -98,6 +98,7 @@ def _handle_query(text: str, channel: str, thread_ts: str, session: SlackSession
         text, _runtime,
         session_id=channel,
         session_corrections=session.active_corrections or None,
+        transcript=session.transcript or None,
     )
 
     if result.error:
@@ -114,6 +115,7 @@ def _handle_query(text: str, channel: str, thread_ts: str, session: SlackSession
 
     if intent_type == "general_question":
         answer = result.answer_text or "I've answered from the knowledge base. Is there anything else I can help with?"
+        session.record_turn(text, answer)
         _post(client, channel, thread_ts, "Answered from the knowledge base.", blocks=fmt.format_general_answer(answer))
         return
 
@@ -123,6 +125,11 @@ def _handle_query(text: str, channel: str, thread_ts: str, session: SlackSession
         _post(client, channel, thread_ts, "I need a bit more information.", blocks=fmt.format_error(explanation))
         return
 
+    session.record_turn(
+        text,
+        f"Sized \"{result.log.request.target_population}\" -> {result.log.final_count:,} "
+        f"({result.log.request.campaign_name})",
+    )
     blocks = fmt.format_sizing_result(result.log)
     _post(client, channel, thread_ts, f"Result for: {text}", blocks=blocks)
 

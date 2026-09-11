@@ -97,8 +97,27 @@ class KnowledgeContext:
             "EXISTING CONFIRMED BUSINESS RULES\n" + retrieve.get_active_rules_text()
         )
 
-    def get_dynamic_context(self, query: str, session_corrections: Optional[list] = None) -> str:
+    def get_dynamic_context(
+        self,
+        query: str,
+        session_corrections: Optional[list] = None,
+        transcript: Optional[list] = None,
+    ) -> str:
+        """Everything about THIS session (not the permanent knowledge base) that the
+        current turn should be aware of: what's been asked and answered so far, and
+        any corrections confirmed along the way. Injected into Nexus/Quant's prompts
+        via set_session_context() -- see vibe_orchestrator.process_core_request()."""
         lines = []
+        if transcript:
+            lines.append(
+                "RECENT CONVERSATION IN THIS SESSION (most recent last) -- use this to resolve "
+                "a follow-up question that refers back to an earlier one (e.g. \"what about "
+                "Quebec instead?\", \"same thing but for email\") instead of treating it as a "
+                "cold, standalone request:"
+            )
+            for turn in transcript:
+                lines.append(f'- Asked: "{turn["query"]}"')
+                lines.append(f"  Answered: {turn['answer']}")
         if session_corrections:
             lines.append("CORRECTIONS FROM THIS SESSION:")
             lines.extend(f"- {c}" for c in session_corrections)

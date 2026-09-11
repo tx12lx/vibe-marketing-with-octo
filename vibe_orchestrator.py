@@ -348,20 +348,33 @@ def process_core_request(
     session_id: Optional[str] = None,
     user: str = "unknown",
     session_corrections: Optional[list] = None,
+    transcript: Optional[list] = None,
 ) -> RequestResult:
     """Execute the full pipeline for a single query without any terminal I/O.
 
     Suitable for API mode: no input() calls, no interactive retry loop --
     a failed sizing request is returned as-is for the caller to surface.
+
+    transcript is this session's prior turns (see api/session_store.py's
+    SessionState.transcript) -- what makes a follow-up question ("what about
+    Quebec instead?") resolve against the previous turn's criteria rather than
+    being classified and sized as a cold, standalone request.
     """
     _log = logging.getLogger(__name__)
     _start = time.perf_counter()
     try:
-        if rt.knowledge_ctx is not None and session_corrections:
-            ctx = rt.knowledge_ctx.get_dynamic_context(query=query, session_corrections=session_corrections)
-            if ctx:
-                rt.nexus.set_session_context(ctx)
-                rt.quant.set_session_context(ctx)
+        # Always set this, even to "" -- Nexus/Quant are shared across every request and
+        # keep this per-request value in thread-local storage (see agents/nexus_agent.py),
+        # not a per-session object. A worker thread is reused across many different
+        # sessions over its lifetime, so skipping this call on a context-less request
+        # would leave whatever an EARLIER, unrelated session set on that same thread.
+        ctx = ""
+        if rt.knowledge_ctx is not None and (session_corrections or transcript):
+            ctx = rt.knowledge_ctx.get_dynamic_context(
+                query=query, session_corrections=session_corrections, transcript=transcript,
+            )
+        rt.nexus.set_session_context(ctx)
+        rt.quant.set_session_context(ctx)
 
         intent = rt.nexus.classify_intent(query)
         log, answer_text, stuck_reason = route_by_intent(rt.nexus, rt.quant, intent, query)

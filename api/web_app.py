@@ -534,6 +534,7 @@ def _process_query_sync(text: str, session_id: str) -> dict:
         text, _runtime,
         session_id=session_id,
         session_corrections=session.active_corrections if session.active_corrections else None,
+        transcript=session.transcript if session.transcript else None,
     )
 
     if result.error:
@@ -550,10 +551,12 @@ def _process_query_sync(text: str, session_id: str) -> dict:
     intent_type = result.intent.intent_type if result.intent else "general_question"
 
     if intent_type == "general_question":
+        message = result.answer_text or "I've answered from the knowledge base. Is there anything else I can help with?"
+        session.record_turn(text, message)
         return {
             "type": "general_answer",
             "processing_notes": processing_notes,
-            "message": result.answer_text or "I've answered from the knowledge base. Is there anything else I can help with?",
+            "message": message,
         }
 
     # If a sizing request produced nothing useful, use the AI to generate a
@@ -568,6 +571,12 @@ def _process_query_sync(text: str, session_id: str) -> dict:
             "intent_type": intent_type,
         }
 
+    if result.log is not None:
+        session.record_turn(
+            text,
+            f"Sized \"{result.log.request.target_population}\" -> {result.log.final_count:,} "
+            f"({result.log.request.campaign_name})",
+        )
     return _format_result(result, processing_notes)
 
 

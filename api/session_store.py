@@ -31,7 +31,14 @@ class SessionState:
         "awaiting_correction",
         "active_corrections",
         "pending_correction",
+        "transcript",
     )
+
+    # How many past turns get replayed into the model as conversation context (see
+    # get_dynamic_context() in knowledge/context.py). Bounded so the prompt doesn't grow
+    # without limit over a long session -- recent turns matter far more than early ones
+    # for resolving a follow-up like "what about Quebec instead?".
+    _MAX_TRANSCRIPT_TURNS = 8
 
     def __init__(self, space_id: str) -> None:
         self.space_id: str = space_id
@@ -62,6 +69,17 @@ class SessionState:
         # interpretation display and the "Yes, exactly right" click. Dict with keys:
         #   "text": str, "interpretation": str, "rules": list[BusinessRule]
         self.pending_correction: dict = {}
+        # Turn-by-turn conversation history for this session -- what lets a follow-up
+        # question ("what about Quebec instead?") reuse the previous turn's criteria
+        # instead of being answered cold. Each entry: {"query": str, "answer": str}.
+        # Only turns that produced a real answer are recorded (see record_turn()) --
+        # a "stuck, need more info" turn has nothing useful to hand back to the model.
+        self.transcript: list[dict] = []
+
+    def record_turn(self, query: str, answer: str) -> None:
+        self.transcript.append({"query": query, "answer": answer})
+        if len(self.transcript) > self._MAX_TRANSCRIPT_TURNS:
+            del self.transcript[: -self._MAX_TRANSCRIPT_TURNS]
 
     def store_result(
         self,
