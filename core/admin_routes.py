@@ -1,9 +1,8 @@
 """core/admin_routes.py -- shared knowledge-database admin routes.
 
-Registered identically by api/web_app.py (the VM, the one live production
-surface), web_cloud_run.py, and slack_cloud_run.py -- previously each hand-
-copied the same routes/HTML. One version here, registered onto whichever
-FastAPI app owns it.
+Registered identically by api/web_app.py and web_cloud_run.py -- previously
+each hand-copied the same routes/HTML. One version here, registered onto
+whichever FastAPI app owns it.
 """
 from __future__ import annotations
 
@@ -137,9 +136,10 @@ _ADMIN_PAGE_TEMPLATE = """<!doctype html>
 
 <div class="box">
   <h3>Rules awaiting a second reviewer</h3>
-  <p class="muted">A rule scoped to "pattern" or "universal" governs every future user's results, so it
-     sits here inactive until someone other than whoever submitted it approves it. A rule scoped to one
-     campaign isn't listed here -- it already applies immediately, contained to that campaign.</p>
+  <p class="muted">The second-reviewer gate is currently off for every rule scope (2026-09-11
+     decision), so every confirmed correction applies immediately and nothing should appear here.
+     If this list is ever non-empty again, it's because the gate has been turned back on for some
+     scope -- see knowledge/context.py's _SCOPES_REQUIRING_REVIEW.</p>
   <div id="pending-rules">Loading...</div>
 </div>
 

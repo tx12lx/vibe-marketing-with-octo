@@ -14,7 +14,6 @@ SQLite-only feature.
 """
 from __future__ import annotations
 
-import array
 import os
 import sqlite3
 import time
@@ -77,11 +76,10 @@ CREATE TABLE IF NOT EXISTS glossary_terms (
 CREATE TABLE IF NOT EXISTS business_rules (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     rule_text      TEXT NOT NULL,
-    scope          TEXT NOT NULL DEFAULT 'universal',  -- 'table' | 'campaign' | 'pattern' | 'universal'
+    scope          TEXT NOT NULL DEFAULT 'universal',  -- 'table' | 'pattern' | 'universal'
     project        TEXT,  -- set when scope='table': which table this rule applies to
     dataset        TEXT,
     table_name     TEXT,
-    campaign_code  TEXT,
     added_by       TEXT NOT NULL DEFAULT 'unknown',
     added_at       TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'pending_review' | 'rejected' | 'retired'
@@ -91,22 +89,9 @@ CREATE TABLE IF NOT EXISTS business_rules (
     review_note    TEXT
 );
 
-CREATE TABLE IF NOT EXISTS campaign_summaries (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    campaign_code  TEXT NOT NULL,
-    sub_code       TEXT NOT NULL DEFAULT '',
-    summary_text   TEXT NOT NULL,
-    embedding      BLOB NOT NULL,
-    embedding_dim  INTEGER NOT NULL,
-    source_query   TEXT NOT NULL DEFAULT '',
-    created_at     TEXT NOT NULL,
-    confirmed_by   TEXT NOT NULL DEFAULT 'unknown'
-);
-
 CREATE TABLE IF NOT EXISTS feedback_events (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type         TEXT NOT NULL,  -- 'confirm' | 'correction'
-    campaign_code      TEXT,
     raw_text           TEXT NOT NULL DEFAULT '',
     structured_rule_id INTEGER,
     user_identity      TEXT NOT NULL DEFAULT 'unknown',
@@ -125,13 +110,32 @@ _BUSINESS_RULES_MIGRATION_COLUMNS = (
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns to an already-existing database created before this shape
-    existed. ALTER TABLE ... ADD COLUMN is safe to run repeatedly -- each one
-    is skipped once it's already present."""
+    """Bring an already-existing database up to the current shape. Every step
+    here is idempotent -- safe to run on every connection, including one
+    against a database that's already current (each check no-ops).
+
+    2026-09-11: dropped campaign_code from business_rules/feedback_events and
+    the whole campaign_summaries table -- the campaign-tier scaffolding this
+    supported was removed as dead weight (see core/ai_client.py's and
+    agents/nexus_agent.py's module docstrings). Requires SQLite 3.35+ for
+    DROP COLUMN (bundled with Python 3.11+ is well past that)."""
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(business_rules)")}
     for column in _BUSINESS_RULES_MIGRATION_COLUMNS:
         if column not in existing:
             conn.execute(f"ALTER TABLE business_rules ADD COLUMN {column} TEXT")
+
+    if "campaign_code" in existing:
+        conn.execute("ALTER TABLE business_rules DROP COLUMN campaign_code")
+
+    feedback_columns = {row["name"] for row in conn.execute("PRAGMA table_info(feedback_events)")}
+    if "campaign_code" in feedback_columns:
+        conn.execute("ALTER TABLE feedback_events DROP COLUMN campaign_code")
+
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='campaign_summaries'"
+    ).fetchone():
+        conn.execute("DROP TABLE campaign_summaries")
+
     conn.commit()
 
 
@@ -325,7 +329,6 @@ def add_business_rule(
     project: Optional[str] = None,
     dataset: Optional[str] = None,
     table_name: Optional[str] = None,
-    campaign_code: Optional[str] = None,
     added_by: str = "unknown",
     supersedes_id: Optional[int] = None,
     status: str = "active",
@@ -334,18 +337,18 @@ def add_business_rule(
     rule written for one table's conventions (e.g. its default sizing filters) can never
     leak into a different table's query just because both rules are 'active'.
 
-    status defaults to 'active' for a rule contained to the one campaign the
-    submitter is already working on. Callers pass status='pending_review' for
-    a rule whose scope is 'pattern' or 'universal' -- one that would govern
-    every future user's results -- so it sits inert (get_active_rules() only
-    ever returns status='active') until a second person calls approve_rule().
+    status defaults to 'active'. Callers pass status='pending_review' for a
+    rule whose scope requires a second reviewer's approval -- see
+    knowledge/context.py's _SCOPES_REQUIRING_REVIEW -- so it sits inert
+    (get_active_rules() only ever returns status='active') until a second
+    person calls approve_rule().
     """
     with conn:
         cur = conn.execute(
             "INSERT INTO business_rules "
-            "(rule_text, scope, project, dataset, table_name, campaign_code, added_by, added_at, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (rule_text, scope, project, dataset, table_name, campaign_code, added_by, _now(), status),
+            "(rule_text, scope, project, dataset, table_name, added_by, added_at, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (rule_text, scope, project, dataset, table_name, added_by, _now(), status),
         )
         new_id = cur.lastrowid
         if supersedes_id is not None:
@@ -427,82 +430,21 @@ def get_all_business_rules(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def get_active_rules(
     conn: sqlite3.Connection,
     scope: Optional[str] = None,
-    campaign_code: Optional[str] = None,
     table_name: Optional[str] = None,
 ) -> list[sqlite3.Row]:
     """table_name filters to that table's own scope='table' rules, plus every rule that
-    isn't table-scoped at all (universal/campaign/pattern) -- a table-scoped rule for a
-    different table is never returned."""
+    isn't table-scoped at all (universal/pattern) -- a table-scoped rule for a different
+    table is never returned."""
     query = "SELECT * FROM business_rules WHERE status='active'"
     params: list = []
     if scope is not None:
         query += " AND scope=?"
         params.append(scope)
-    if campaign_code is not None:
-        query += " AND (campaign_code=? OR campaign_code IS NULL)"
-        params.append(campaign_code)
     if table_name is not None:
         query += " AND (table_name=? OR table_name IS NULL)"
         params.append(table_name)
     query += " ORDER BY added_at"
     return conn.execute(query, params).fetchall()
-
-
-# ---------------------------------------------------------------------------
-# Campaign summaries -- for similarity search
-# ---------------------------------------------------------------------------
-
-def _pack_embedding(values: list[float]) -> bytes:
-    return array.array("f", values).tobytes()
-
-
-def _unpack_embedding(blob: bytes, dim: int) -> list[float]:
-    arr = array.array("f")
-    arr.frombytes(blob)
-    return list(arr)[:dim]
-
-
-def add_campaign_summary(
-    conn: sqlite3.Connection,
-    campaign_code: str,
-    summary_text: str,
-    embedding: list[float],
-    sub_code: str = "",
-    source_query: str = "",
-    confirmed_by: str = "unknown",
-) -> int:
-    with conn:
-        cur = conn.execute(
-            "INSERT INTO campaign_summaries "
-            "(campaign_code, sub_code, summary_text, embedding, embedding_dim, source_query, created_at, confirmed_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                campaign_code, sub_code, summary_text,
-                _pack_embedding(embedding), len(embedding),
-                source_query, _now(), confirmed_by,
-            ),
-        )
-        return cur.lastrowid
-
-
-def get_all_campaign_summaries(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute(
-        "SELECT id, campaign_code, sub_code, summary_text, embedding, embedding_dim, source_query, created_at, confirmed_by "
-        "FROM campaign_summaries"
-    ).fetchall()
-    return [
-        {
-            "id": r["id"],
-            "campaign_code": r["campaign_code"],
-            "sub_code": r["sub_code"],
-            "summary_text": r["summary_text"],
-            "embedding": _unpack_embedding(r["embedding"], r["embedding_dim"]),
-            "source_query": r["source_query"],
-            "created_at": r["created_at"],
-            "confirmed_by": r["confirmed_by"],
-        }
-        for r in rows
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +454,6 @@ def get_all_campaign_summaries(conn: sqlite3.Connection) -> list[dict]:
 def record_feedback_event(
     conn: sqlite3.Connection,
     event_type: str,
-    campaign_code: Optional[str] = None,
     raw_text: str = "",
     structured_rule_id: Optional[int] = None,
     user_identity: str = "unknown",
@@ -520,27 +461,23 @@ def record_feedback_event(
     with conn:
         cur = conn.execute(
             "INSERT INTO feedback_events "
-            "(event_type, campaign_code, raw_text, structured_rule_id, user_identity, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (event_type, campaign_code, raw_text, structured_rule_id, user_identity, _now()),
+            "(event_type, raw_text, structured_rule_id, user_identity, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (event_type, raw_text, structured_rule_id, user_identity, _now()),
         )
         return cur.lastrowid
 
 
-def get_feedback_events(conn: sqlite3.Connection, campaign_code: Optional[str] = None) -> list[sqlite3.Row]:
-    if campaign_code is not None:
-        return conn.execute(
-            "SELECT * FROM feedback_events WHERE campaign_code=? ORDER BY created_at", (campaign_code,)
-        ).fetchall()
+def get_feedback_events(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM feedback_events ORDER BY created_at").fetchall()
 
 
 # ---------------------------------------------------------------------------
 # Hydration from durable backup -- knowledge/git_store.py holds the durable
-# copy of everything in this section (business rules, glossary, feedback,
-# campaign summaries); a fresh container calls these once at startup to
-# rebuild its local cache from it. Safe to call repeatedly (INSERT OR REPLACE
-# keyed on id) since a fresh container's tables start empty.
+# copy of everything in this section (business rules, glossary, feedback); a
+# fresh container calls these once at startup to rebuild its local cache from
+# it. Safe to call repeatedly (INSERT OR REPLACE keyed on id) since a fresh
+# container's tables start empty.
 # ---------------------------------------------------------------------------
 
 def hydrate_business_rules(conn: sqlite3.Connection, rows: list[dict]) -> None:
@@ -548,9 +485,9 @@ def hydrate_business_rules(conn: sqlite3.Connection, rows: list[dict]) -> None:
         for r in rows:
             conn.execute(
                 "INSERT OR REPLACE INTO business_rules "
-                "(id, rule_text, scope, project, dataset, table_name, campaign_code, "
+                "(id, rule_text, scope, project, dataset, table_name, "
                 "added_by, added_at, status, superseded_by, approved_by, approved_at, review_note) "
-                "VALUES (:id, :rule_text, :scope, :project, :dataset, :table_name, :campaign_code, "
+                "VALUES (:id, :rule_text, :scope, :project, :dataset, :table_name, "
                 ":added_by, :added_at, :status, :superseded_by, :approved_by, :approved_at, :review_note)",
                 r,
             )
@@ -571,28 +508,9 @@ def hydrate_feedback_events(conn: sqlite3.Connection, rows: list[dict]) -> None:
         for r in rows:
             conn.execute(
                 "INSERT OR REPLACE INTO feedback_events "
-                "(id, event_type, campaign_code, raw_text, structured_rule_id, user_identity, created_at) "
-                "VALUES (:id, :event_type, :campaign_code, :raw_text, :structured_rule_id, :user_identity, :created_at)",
+                "(id, event_type, raw_text, structured_rule_id, user_identity, created_at) "
+                "VALUES (:id, :event_type, :raw_text, :structured_rule_id, :user_identity, :created_at)",
                 r,
-            )
-
-
-def hydrate_campaign_summaries(conn: sqlite3.Connection, rows: list[dict]) -> None:
-    """rows come from git_store as the same shape get_all_campaign_summaries() returns
-    (embedding already unpacked to a plain float list) -- re-pack it back to a BLOB here."""
-    with conn:
-        for r in rows:
-            conn.execute(
-                "INSERT OR REPLACE INTO campaign_summaries "
-                "(id, campaign_code, sub_code, summary_text, embedding, embedding_dim, "
-                "source_query, created_at, confirmed_by) "
-                "VALUES (:id, :campaign_code, :sub_code, :summary_text, :embedding, :embedding_dim, "
-                ":source_query, :created_at, :confirmed_by)",
-                {
-                    **r,
-                    "embedding": _pack_embedding(r["embedding"]),
-                    "embedding_dim": len(r["embedding"]),
-                },
             )
 
 

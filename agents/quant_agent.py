@@ -1,7 +1,7 @@
 """
 Vibe OCTO Quant — Technical Auditor Agent
 
-Receives a validated AdHocSizingRequest from Nexus (direct_count) and:
+Receives a validated AudienceSizingRequest from Nexus (direct_count) and:
   1. Generates a BigQuery waterfall SQL query via the knowledge-grounded prompt.
   2. Executes the query against BigQuery using ADC credentials.
   3. Masks customer PII in Python before returning results.
@@ -37,7 +37,7 @@ for _p in [str(_ROOT_DIR)]:
 load_dotenv(_ROOT_DIR / ".env")
 
 from pydantic_schemas import (
-    AdHocSizingRequest,
+    AudienceSizingRequest,
     NexusErrorPayload,
     QuantAuditLog,
     WaterfallLayer,
@@ -158,7 +158,7 @@ First arm label: "Base Universe" (step_order=1). Last arm label: "Final Targetab
 
 
 def _is_ffh_request(
-    request: "AdHocSizingRequest",
+    request: "AudienceSizingRequest",
 ) -> bool:
     """Return True if the request targets the FFH/Home Solutions table."""
     text = " ".join(filter(None, [
@@ -302,7 +302,7 @@ Rules — non-negotiable:
 class QuantAgent(BaseAgent):
     WORKER_ID = "quant_v1"
     HANDLED_INTENTS: frozenset[str] = frozenset({"sizing_request"})
-    INPUT_SCHEMA = AdHocSizingRequest
+    INPUT_SCHEMA = AudienceSizingRequest
     OUTPUT_SCHEMA = QuantAuditLog
 
     def __init__(self) -> None:
@@ -337,7 +337,7 @@ class QuantAgent(BaseAgent):
     # BaseAgent contract
     # ------------------------------------------------------------------
 
-    def subscribe(self, spec: AdHocSizingRequest) -> None:
+    def subscribe(self, spec: AudienceSizingRequest) -> None:
         """Not used — QuantAgent is invoked via direct_count(), not subscribe/execute."""
 
     def execute(self) -> QuantAuditLog:
@@ -358,7 +358,7 @@ class QuantAgent(BaseAgent):
     # Public API — strict gateway, never raises to orchestrator
     # ------------------------------------------------------------------
 
-    def direct_count(self, request: AdHocSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
+    def direct_count(self, request: AudienceSizingRequest) -> Union[QuantAuditLog, NexusErrorPayload]:
         """Path 2 — execute a request-aware waterfall count query for an ad-hoc sizing request."""
         ThoughtDisplay.progress("I'm calculating your audience now...")
         try:
@@ -436,7 +436,7 @@ class QuantAgent(BaseAgent):
             # to find out what actually broke. Now it is at least in the server's own log.
             _log.exception(
                 "direct_count failed for %r (target_population=%r): %s",
-                request.campaign_name, request.target_population, exc,
+                request.audience_label, request.target_population, exc,
             )
             return NexusErrorPayload(
                 error_type="database_error",
@@ -465,7 +465,7 @@ class QuantAgent(BaseAgent):
         except Exception:
             return f"-- Schema unavailable for {project}.{dataset}"
 
-    def _generate_adhoc_waterfall_sql(self, request: AdHocSizingRequest, schema: str, error_hint: str = "") -> str:
+    def _generate_adhoc_waterfall_sql(self, request: AudienceSizingRequest, schema: str, error_hint: str = "") -> str:
         opt_ctx = (request.optimization_context or "").strip()
 
         # Inject FFH column override when the request targets the Home Solutions table.
@@ -572,7 +572,7 @@ class QuantAgent(BaseAgent):
             )
         except Exception as exc:
             _log.exception(
-                "apply_confirmed_correction failed for %r: %s", request.campaign_name, exc,
+                "apply_confirmed_correction failed for %r: %s", request.audience_label, exc,
             )
             return NexusErrorPayload(
                 error_type="database_error",
@@ -586,8 +586,8 @@ class QuantAgent(BaseAgent):
         """Call Fuel iX for SQL generation.
 
         When a KnowledgeContext is bound, pins it as an ephemeral cached block so
-        the GOLD campaign patterns and business rules are cheap to reuse across calls.
-        Falls back to a plain uncached call if no context is available.
+        the confirmed business rules are cheap to reuse across calls. Falls back
+        to a plain uncached call if no context is available.
 
         Extended thinking (budget_tokens=10000) is enabled when FUELIX_EXTENDED_THINKING=1.
         This allows the model to reason through the waterfall step sequence explicitly
@@ -599,12 +599,11 @@ class QuantAgent(BaseAgent):
             else _QUANT_SYSTEM
         )
 
-        # Note: extended-thinking mode and Fuel iX/Anthropic prompt-caching
-        # have no Gemini equivalent wired up here -- this is a plain call.
+        # Note: extended-thinking mode and Fuel iX/Anthropic prompt-caching aren't
+        # wired up here yet -- this is a plain call.
         if self._knowledge_ctx is not None:
             prompt = (
-                "VIBE OCTO PROVEN SQL PATTERNS\n"
-                "(Column patterns and business rules from all GOLD campaigns)\n\n"
+                "VIBE OCTO CONFIRMED BUSINESS RULES\n\n"
                 + self._knowledge_ctx.quant_context
                 + "\n\n"
                 + prompt

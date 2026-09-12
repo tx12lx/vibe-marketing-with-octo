@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vibe-octo"
 version = "4.0.0"
-description = "Vibe Marketing with OCTO — multi-agent AI consultant for TELUS campaign management"
+description = "Vibe Marketing with OCTO — multi-agent AI consultant for ad-hoc audience sizing"
 requires-python = ">=3.11"
 dependencies = [
     # API + data
@@ -16,16 +16,11 @@ dependencies = [
     # BigQuery + Google Auth (Nexus, Quant, knowledge ingestion)
     "google-cloud-bigquery>=3.11.0",
     "google-auth>=2.23.0",
-    # PDF extraction (brief fetcher)
-    "pdfplumber>=0.10.0",
     # HTTP API server (web front end)
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
-    # AI reasoning -- Gemini via Vertex AI
-    "google-genai>=1.0.0",
+    # AI reasoning -- Claude Sonnet 5 via Fuel iX (core/ai_client.py)
     "httpx>=0.27.0",
-    # Slack front end (temporary, laptop-only proof-of-concept)
-    "slack-bolt>=1.18.0",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +31,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "hitl*", "agents*", "api*", "knowledge*"]
+include = ["core*", "agents*", "api*", "knowledge*"]
 
 [project.scripts]
 vibe-octo = "vibe_orchestrator:main"

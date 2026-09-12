@@ -1,7 +1,7 @@
 """
 api/web_app.py -- Vibe OCTO browser chat interface.
 
-Serves a professional HTML chat page and handles campaign queries,
+Serves a professional HTML chat page and handles audience sizing queries,
 HITL button clicks, and correction submissions over HTTP.
 
 Multiple concurrent users are supported via per-session state isolation.
@@ -45,7 +45,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from vibe_orchestrator import (  # noqa: E402
     RequestResult,
     VibeRuntime,
-    _ARTIFACTS_DIR,
     build_runtime,
     generate_stuck_explanation,
     process_core_request,
@@ -237,33 +236,6 @@ def _sync_schema_thread() -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _start_slack_bot_thread(runtime: VibeRuntime) -> None:
-    """Start the Slack bot in a background thread, sharing this process's
-    already-built runtime (and therefore its one KnowledgeContext) instead of
-    letting the Slack side build its own -- that's the whole point of running
-    both front ends in one process: exactly one knowledge database, not two
-    that can drift apart. Only runs if Slack credentials are configured; the
-    import is deferred so a slow or failing Slack import can't block the web
-    app's own startup or health checks (same reasoning as slack_cloud_run.py's
-    existing background-thread pattern this reuses)."""
-    if not (os.getenv("SLACK_BOT_TOKEN") and os.getenv("SLACK_APP_TOKEN")):
-        _log.info("SLACK_BOT_TOKEN/SLACK_APP_TOKEN not set -- Slack front end disabled, serving web chat only.")
-        return
-
-    def _run() -> None:
-        try:
-            from api.slack_app import main as start_slack_bot  # noqa: PLC0415
-
-            start_slack_bot(runtime=runtime)
-        except Exception:
-            # Previously this could fail silently in the background with nothing
-            # but a buried stack trace -- log it loudly instead so a broken Slack
-            # connection is never mistaken for a working one.
-            _log.exception("Slack bot failed to start -- web chat is unaffected, but Slack is not connected.")
-
-    threading.Thread(target=_run, daemon=True).start()
-
-
 @app.on_event("startup")
 async def _startup() -> None:
     global _runtime
@@ -275,14 +247,12 @@ async def _startup() -> None:
     # durable GitHub-backed copy -- this container's own disk never survives a restart,
     # see knowledge/git_store.py. A no-op if GITHUB_TOKEN isn't set.
     await loop.run_in_executor(_executor, _runtime.knowledge_ctx.hydrate_from_github)
-    _start_slack_bot_thread(_runtime)
 
     fuelix_key = os.getenv("FUELIX_API_KEY", "")
     bq_project = os.getenv("BQ_PROJECT_ID", "bi-srv-hsmdet-pr-7b9def")
     run_startup_health_check(
         api_key=fuelix_key,
         bq_project=bq_project,
-        artifacts_dir=_ARTIFACTS_DIR,
     )
     if _auth_enabled():
         _log.info("Shared-password gate is ON (WEB_APP_PASSWORD is set).")
@@ -297,16 +267,16 @@ async def _startup() -> None:
 
 @app.get("/health")
 async def health() -> dict:
-    campaign_count = 0
+    business_rules_count = 0
     if _runtime is not None:
         try:
-            campaign_count = _runtime.knowledge_ctx.campaign_count
+            business_rules_count = _runtime.knowledge_ctx.business_rules_count
         except Exception:
             pass
     return {
         "status": "ok",
         "runtime_ready": _runtime is not None,
-        "campaign_count": campaign_count,
+        "business_rules_count": business_rules_count,
         "active_sessions": len(_session_store._sessions),
         "schema_sync": schema_sync_status,
     }
@@ -314,14 +284,14 @@ async def health() -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    campaign_count = 0
+    business_rules_count = 0
     if _runtime is not None:
         try:
-            campaign_count = _runtime.knowledge_ctx.campaign_count
+            business_rules_count = _runtime.knowledge_ctx.business_rules_count
         except Exception:
             pass
     html = (_TEMPLATES_DIR / "chat.html").read_text(encoding="utf-8")
-    html = html.replace("{{CAMPAIGN_COUNT}}", str(campaign_count))
+    html = html.replace("{{RULES_COUNT}}", str(business_rules_count))
     return HTMLResponse(content=html)
 
 
@@ -519,10 +489,12 @@ async def clarify_query_endpoint(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 # Rule review -- maker-checker gate for 'pattern'/'universal' business rules.
 #
-# A rule scoped to one campaign is contained to the blast radius the submitter
-# is already working in, so it goes live immediately. A rule scoped 'pattern'
-# or 'universal' governs every future user's results, so knowledge_ctx.add_rule()
-# stages it as pending_review instead -- these three endpoints are how a second
+# Currently off for every scope (knowledge/context.py's _SCOPES_REQUIRING_REVIEW
+# is empty -- 2026-09-11 decision, not needed for this MVP yet), so add_rule()
+# always returns 'active' and nothing reaches pending_review today. Left wired
+# up, not deleted, since the whole point is that a second reviewer can be
+# required again later without rebuilding this: knowledge_ctx.add_rule() would
+# stage a rule as pending_review, and these three endpoints are how a second
 # person sees it and approves or rejects it. Reachable only behind whatever
 # already gates this whole app (IAP in production; the shared-password gate
 # otherwise) -- no separate auth layer of its own.
@@ -630,7 +602,7 @@ def _process_query_sync(text: str, session_id: str) -> dict:
         session.record_turn(
             text,
             f"Sized \"{result.log.request.target_population}\" -> {result.log.final_count:,} "
-            f"({result.log.request.campaign_name})",
+            f"({result.log.request.audience_label or 'ad-hoc request'})",
         )
     return _format_result(result, processing_notes)
 
@@ -642,8 +614,7 @@ def _format_result(result: RequestResult, processing_notes: list) -> dict:
         "intent_type": result.intent.intent_type if result.intent else "",
         "error": None,
         # Defaults so the frontend never KeyErrors
-        "campaign_name": "",
-        "campaign_code": "",
+        "audience_label": "",
         "medium": "",
         "cadence": "",
         "audience_count": None,
@@ -653,8 +624,7 @@ def _format_result(result: RequestResult, processing_notes: list) -> dict:
     }
 
     if result.log:
-        out["campaign_name"] = result.log.request.campaign_name
-        out["campaign_code"] = result.log.request.campaign_code
+        out["audience_label"] = result.log.request.audience_label or ""
         out["medium"] = result.log.request.medium
         out["cadence"] = result.log.request.cadence
         out["audience_count"] = result.log.final_count
@@ -691,19 +661,17 @@ def _log_hitl_resolution(session, session_id: str, outcome: str) -> None:
 
     Covers all three buttons -- previously only "yes" was ever logged, so the
     audit trail silently had no record of "something looks wrong" or of
-    someone reviewing the evidence before deciding. campaign_id is best-effort
-    from whatever sizing result is on the session; never blocks the user-facing
-    response on a logging failure.
+    someone reviewing the evidence before deciding. There is no per-request
+    identifier in this ad-hoc-only architecture, so campaign_id is always
+    None; never blocks the user-facing response on a logging failure.
     """
     if _runtime is None or _runtime.audit_logger is None:
         return
-    log = session.last_audit_log
-    campaign_id = log.request.campaign_code if log is not None else None
     try:
         _runtime.audit_logger.log_hitl_resolution(
             session_id=session_id,
             user=getattr(session, "last_sender", "web-unverified"),
-            campaign_id=campaign_id,
+            campaign_id=None,
             hitl_outcome=outcome,
         )
     except Exception:
@@ -720,8 +688,7 @@ def _handle_hitl_yes_sync(session, session_id: str) -> dict:
             "detail": "",
         }
 
-    campaign_code = log.request.campaign_code
-    campaign_name = log.request.campaign_name or "this request"
+    audience_label = log.request.audience_label or "this request"
     confirmation_saved = False
     user_identity = getattr(session, "last_sender", "web-unverified")
 
@@ -729,7 +696,6 @@ def _handle_hitl_yes_sync(session, session_id: str) -> dict:
         if _runtime.knowledge_ctx is not None:
             try:
                 _runtime.knowledge_ctx.record_confirmation(
-                    campaign_code=campaign_code,
                     user_identity=user_identity,
                 )
                 confirmation_saved = True
@@ -743,13 +709,12 @@ def _handle_hitl_yes_sync(session, session_id: str) -> dict:
 
     # This message must describe only what actually happened: a confirmation
     # receipt recorded in the knowledge layer's history (knowledge/store.py's
-    # feedback_events table). There is no GOLD-tier promotion mechanism in the
-    # current architecture -- the old one was removed in the knowledge-layer
-    # rebuild -- so this no longer claims one, even implicitly.
+    # feedback_events table). There is no promotion-tier mechanism in this
+    # architecture, so this never claims one, even implicitly.
     if confirmation_saved:
         return {
             "type": "hitl_confirmed",
-            "message": f"Got it -- I've recorded that '{campaign_name}' was confirmed correct.",
+            "message": f"Got it -- I've recorded that '{audience_label}' was confirmed correct.",
             "detail": "This confirmation is saved in the knowledge layer's history.",
         }
     return {
@@ -847,10 +812,11 @@ def _save_confirmed_correction_sync(session, pending: dict, session_id: str) -> 
             interpretation = pending.get("interpretation", "")
             text = pending.get("text", "")
 
-            # add_rule() stages 'pattern'/'universal' rules as pending_review rather
-            # than applying them immediately -- they'd otherwise govern every future
-            # user's results on this submitter's word alone. A 'campaign'-scoped rule
-            # (contained to the one campaign already being worked on) stays immediate.
+            # add_rule() would stage 'pattern'/'universal' rules as pending_review rather
+            # than applying them immediately, to stop them governing every future user's
+            # results on this submitter's word alone -- currently off for every scope
+            # (see knowledge/context.py's _SCOPES_REQUIRING_REVIEW), so any_pending is
+            # never actually true today, but the branch below stays ready for when it is.
             any_active = False
             any_pending = False
             if rules and _runtime.knowledge_ctx is not None:
@@ -868,10 +834,9 @@ def _save_confirmed_correction_sync(session, pending: dict, session_id: str) -> 
 
             if any_pending and any_active:
                 message = (
-                    "Got it -- I'll apply this for the rest of this session. Part of it only affects "
-                    "this campaign, so that part is already saved for future sessions too; the part "
-                    "that would apply to every future request still needs a second reviewer's approval "
-                    "before it goes live for everyone."
+                    "Got it -- I'll apply this for the rest of this session. Part of it is already "
+                    "saved for future sessions too; the part that would apply to every future request "
+                    "still needs a second reviewer's approval before it goes live for everyone."
                 )
             elif any_pending:
                 message = (
@@ -936,7 +901,7 @@ def _apply_correction_and_retry_sync(
     session.record_turn(
         session.last_query,
         f"Sized \"{result.request.target_population}\" -> {result.final_count:,} "
-        f"({result.request.campaign_name})",
+        f"({result.request.audience_label or 'ad-hoc request'})",
     )
     return _format_result(
         RequestResult(intent=session.last_intent, log=result),

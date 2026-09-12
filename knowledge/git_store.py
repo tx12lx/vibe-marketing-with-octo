@@ -1,7 +1,6 @@
 """knowledge/git_store.py -- durable, version-controlled persistence for the
 knowledge layer's human-contributed knowledge (business rules, glossary
-terms, feedback events, campaign summaries), backed by the GitHub repo
-itself.
+terms, feedback events), backed by the GitHub repo itself.
 
 Why GitHub instead of a cloud database: the app's Cloud Run identity has
 exactly two permissions -- call Google's AI models, and read (never write)
@@ -18,11 +17,11 @@ knowledge/sync_schema.py), so it never needed durable storage in the first
 place.
 
 Storage shape: one JSON file per collection under knowledge_data/ in this
-repo (business_rules.json, glossary_terms.json, feedback_events.json,
-campaign_summaries.json) -- one atomic commit per write, not a directory of
-many small per-record files. Each file's content is exactly the list of rows
-knowledge/store.py's SQLite tables would hold, so the local cache can load
-them directly with no transformation.
+repo (business_rules.json, glossary_terms.json, feedback_events.json) -- one
+atomic commit per write, not a directory of many small per-record files.
+Each file's content is exactly the list of rows knowledge/store.py's SQLite
+tables would hold, so the local cache can load them directly with no
+transformation.
 
 Writes are queued and applied by a single background worker thread (see
 queue_sync()) so a slow GitHub API call never makes a user-facing request
@@ -49,7 +48,7 @@ _DEFAULT_REPO = "tx12lx/vibe-marketing-with-octo"
 _DATA_DIR = "knowledge_data"
 _REQUEST_TIMEOUT_SECONDS = 15
 
-COLLECTIONS = ("business_rules", "glossary_terms", "feedback_events", "campaign_summaries")
+COLLECTIONS = ("business_rules", "glossary_terms", "feedback_events")
 
 
 def _repo() -> str:

@@ -14,17 +14,17 @@ _DEFAULT_BQ_DATASET = os.getenv("BQ_DATASET", "campaign_data")
 class AudienceSizingRequest(BaseModel):
     """Validated payload emitted by Nexus and consumed exclusively by Quant.
 
-    Quant strictly rejects any payload that does not conform to this schema.
-    The strict config prevents silent type coercion — wrong types fail loudly.
+    Every request handled by this tool is ad hoc -- it may or may not relate to
+    a named campaign, and nothing here requires one. Quant strictly rejects any
+    payload that does not conform to this schema. The strict config prevents
+    silent type coercion — wrong types fail loudly.
     """
 
     model_config = ConfigDict(strict=True)
 
-    campaign_name: str
-    campaign_code: str
-    campaign_sub_code: str
-    cadence: str
-    medium: str
+    audience_label: Optional[str] = None
+    cadence: str = "ad-hoc"
+    medium: str = "unspecified"
     target_population: str
     filters: list[str]
     exclusion_layers: Optional[list[str]] = None
@@ -38,14 +38,6 @@ class AudienceSizingRequest(BaseModel):
         if not v:
             raise ValueError("filters must contain at least one entry")
         return v
-
-
-class AdHocSizingRequest(AudienceSizingRequest):
-    """Path 2 variant. Cadence and medium default to safe sentinels instead of requiring
-    values from the caller — avoids validation errors on un-stated campaign attributes."""
-
-    cadence: str = "ad-hoc"
-    medium: str = "unspecified"
 
 
 class WaterfallLayer(BaseModel):
@@ -84,19 +76,10 @@ class IntentClassification(BaseModel):
 
     intent_type is a plain str so new agents can register custom intent types
     via HANDLED_INTENTS without changing this schema.
-
-    campaign_identified/campaign_code are informational context about whether
-    the request named a specific past campaign -- kept for audit-trail quality
-    even though only one intent type (sizing_request) currently exists to act
-    on it, and it does so by translating the request directly from the
-    schema/glossary/business-rules knowledge base rather than by looking up a
-    stored campaign brief (see agents/nexus_agent.py's module docstring).
     """
 
     intent_type: str
     confidence: float
-    campaign_identified: bool
-    campaign_code: Optional[str] = None
     knowledge_sources_consulted: list[str] = []
     business_rules_applied: list[str] = []
     reasoning: str = ""
@@ -106,7 +89,6 @@ class SemanticFailureLog(BaseModel):
     """Structured failure record written on HITL NO responses (terminal and web)."""
 
     timestamp: str
-    campaign_code: str
     worker_id: str
     raw_input: str
     generated_output: str
@@ -135,9 +117,7 @@ class BusinessRule(BaseModel):
     rule_type: str          # filter_add | exclusion_add | lookback_days | population_note | general
     structured_value: dict  # rule-type-specific payload
 
-    scope: str              # campaign | pattern | universal
-    campaign_code: Optional[str] = None
-    campaign_name: Optional[str] = None
+    scope: str              # pattern | universal
     medium: Optional[str] = None
     cadence: Optional[str] = None
     pattern_description: Optional[str] = None
@@ -149,7 +129,7 @@ class BusinessRule(BaseModel):
 
     applies_to_future: bool
     overrides_acc_summary: bool
-    priority: int           # campaign=3, pattern=2, universal=1
+    priority: int           # pattern=2, universal=1
 
     applied_count: int = 0
     last_applied_at: Optional[str] = None
@@ -161,16 +141,18 @@ class FeedbackInput(BaseModel):
     """Input contract for FeedbackAgent — all context needed to interpret a correction."""
 
     raw_correction: str       # User's exact words
-    campaign_code: str
-    campaign_name: str
+    audience_label: Optional[str] = None
     medium: str
     cadence: str
-    campaign_purpose: str
     execution_context: dict   # filters applied, tables used, audience count, waterfall steps
     existing_rules: list[dict]
-    knowledge_tier: str       # GOLD | SILVER | BRONZE
     raw_input_prompt: str     # What user originally asked
     user_identity: str = "unknown"  # who is actually submitting this correction -- carried through to BusinessRule.verified_by
+    # Whether this correction is on a sizing result (True) or a general_question answer
+    # (False, no prior QuantAuditLog) -- set from vibe_orchestrator._run_adhoc_feedback's
+    # own `log is not None` check, so SemanticFailureLog.intent_type reflects what actually
+    # happened rather than a guess.
+    has_prior_result: bool = False
     # Set only when the PREVIOUS correction on this session was blocked because it
     # contradicted an existing confirmed rule -- raw_correction above is then the user's
     # answer to "do you want this to override that rule?", not a fresh correction to

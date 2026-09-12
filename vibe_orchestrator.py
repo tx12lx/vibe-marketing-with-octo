@@ -29,7 +29,6 @@ from typing import Optional
 from dotenv import load_dotenv
 
 _ROOT = Path(__file__).resolve().parent
-_ARTIFACTS_DIR = _ROOT / "knowledge_base" / "artifacts"
 
 # Load the project's .env before any agent code is imported.
 load_dotenv(_ROOT / ".env")
@@ -199,35 +198,30 @@ def _run_adhoc_feedback(
     """Invoke FeedbackAgent to interpret a correction on a sizing result or a
     general-question answer.
 
-    Builds a minimal FeedbackInput from whatever context is available. Every
-    correction is treated as ad-hoc (campaign_code 'AD_HOC' when there is no
-    sizing log to draw a campaign code from) since every sizing request is
-    already built directly from the knowledge base rather than a
-    named-campaign lookup -- see agents/nexus_agent.py's module docstring.
-    Returns FeedbackOutput so callers can surface the interpretation summary
-    or a clarifying question to the user.
+    Builds a minimal FeedbackInput from whatever context is available -- every
+    request this tool handles is ad hoc, so there is no named campaign to look
+    up. Returns FeedbackOutput so callers can surface the interpretation
+    summary or a clarifying question to the user.
 
-    user_identity is whoever is actually submitting this correction (a real
-    Slack user id, or the IAP-authenticated email for the web chat) -- it is
-    carried through to the saved BusinessRule.verified_by so a rule that will
-    govern every future user's results is never attributed to a placeholder
-    string instead of the person who actually approved it.
+    user_identity is whoever is actually submitting this correction (the
+    IAP-authenticated email for the web chat) -- it is carried through to the
+    saved BusinessRule.verified_by so a rule that will govern every future
+    user's results is never attributed to a placeholder string instead of the
+    person who actually approved it.
     """
     try:
         feedback_input = FeedbackInput(
             raw_correction=correction,
-            campaign_code=log.request.campaign_code if log is not None else "AD_HOC",
-            campaign_name=log.request.campaign_name if log is not None else "Ad-Hoc Query",
+            audience_label=log.request.audience_label if log is not None else None,
             medium=log.request.medium if log is not None else "",
             cadence=log.request.cadence if log is not None else "",
-            campaign_purpose="",
+            has_prior_result=log is not None,
             execution_context={
                 "query": query,
                 "final_audience_count": log.final_count if log is not None else None,
                 "waterfall_steps": len(log.waterfall) if log is not None else 0,
             },
             existing_rules=[],
-            knowledge_tier="BRONZE",
             raw_input_prompt=query,
             user_identity=user_identity,
             pending_contradiction_text=pending_contradiction_text,
@@ -292,9 +286,9 @@ def build_runtime() -> VibeRuntime:
     """Initialize all shared runtime objects. Called once at API-server startup.
 
     One KnowledgeContext instance is the single front door for both reading
-    the knowledge layer (schema, glossary, business rules, campaigns) and
-    persisting confirmed HITL feedback -- bound into Nexus and Quant via
-    their existing set_knowledge_context() setters.
+    the knowledge layer (schema, glossary, business rules) and persisting
+    confirmed HITL feedback -- bound into Nexus and Quant via their existing
+    set_knowledge_context() setters.
     """
     from knowledge.context import KnowledgeContext  # noqa: PLC0415
 
@@ -332,7 +326,6 @@ def generate_stuck_explanation(
     """
     intent_type = intent.intent_type if intent else "unknown"
     knowledge_sources = list(intent.knowledge_sources_consulted or []) if intent else []
-    campaign_identified = intent.campaign_identified if intent else False
     error_details = stuck_reason or (
         "" if knowledge_sources else "No matching data sources were found for this request."
     )
@@ -342,7 +335,6 @@ def generate_stuck_explanation(
         intent_type=intent_type,
         knowledge_sources=knowledge_sources,
         error_details=error_details,
-        campaign_identified=campaign_identified,
     )
 
 
@@ -390,7 +382,9 @@ def process_core_request(
                     session_id=session_id or "api",
                     user=user,
                     intent_type=intent.intent_type,
-                    campaign_id=log.request.campaign_code if log else intent.campaign_code,
+                    # No per-request identifier exists in this ad-hoc-only architecture --
+                    # session_id (logged alongside this) is the closest thing to one.
+                    campaign_id=None,
                     sql=log.sql if log else None,
                     agent_called=_agent_called_for_intent(intent.intent_type),
                     hitl_outcome=None,
@@ -404,6 +398,5 @@ def process_core_request(
         _fallback = IntentClassification(
             intent_type="general_question",
             confidence=0.0,
-            campaign_identified=False,
         )
         return RequestResult(intent=_fallback, log=None, error=str(exc))

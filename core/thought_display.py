@@ -140,7 +140,6 @@ class ThoughtDisplay:
         cls,
         intent_type: str,
         query: str,
-        campaign_hint: Optional[str] = None,
         confidence: Optional[float] = None,
         knowledge_sources: Optional[list] = None,
     ) -> None:
@@ -158,12 +157,10 @@ class ThoughtDisplay:
                 body += _label_rows("Confidence", conf_str)
             if sources_str:
                 body += _label_rows("Knowledge", sources_str)
-            cls._box("I'll answer from our campaign knowledge base.", body)
+            cls._box("I'll answer from what we already know.", body)
             cls._emit("Got it -- let me check what we already know about that.")
         else:
             body = [*_label_rows("I heard", short_q)]
-            if campaign_hint:
-                body += _label_rows("Campaign", campaign_hint)
             if conf_str:
                 body += _label_rows("Confidence", conf_str)
             if sources_str:

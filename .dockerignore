@@ -1,0 +1,19 @@
+# Same reasoning as .gcloudignore -- explicit, not relying on defaults, so
+# real secrets in .env can never end up baked into an image by accident.
+# The Dockerfile's COPY lines don't pull these in anyway, but a build
+# context shouldn't include them either.
+.git/
+.gitignore
+.env
+.env.example
+__pycache__/
+*.pyc
+.venv/
+venv/
+knowledge/data/
+logs/
+*.md
+.claude/
+relay/
+Dockerfile
+.dockerignore

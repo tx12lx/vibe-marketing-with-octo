@@ -7,21 +7,21 @@ hardcoded taxonomy:
 
   1. classify_intent() — decide whether a request needs the data queried
      (sizing_request) or can be answered directly from the knowledge base
-     (general_question), and note whether it appears to reference a past
-     campaign (informational only -- see below).
+     (general_question).
 
   2. build_sizing_request_from_nl() — translate a natural-language audience
-     description directly into a validated AdHocSizingRequest for Quant,
+     description directly into a validated AudienceSizingRequest for Quant,
      using the schema/glossary/business-rules context as the authoritative
      reference for what any term means.
 
-Scope note: an earlier version of this agent also looked up named campaigns'
+This tool only ever handles ad hoc requests -- a request may or may not
+mention a named campaign, but nothing here tracks campaigns as first-class
+objects. An earlier version of this agent looked up named campaigns'
 historical briefs from BigQuery and compared them against a curated "gold"
-reference before sizing. That mechanism depended on a gold-tier index that was
-never reconnected after the knowledge-layer rebuild (build_runtime() leaves it
-permanently None), so it was removed rather than left in place to crash the
-moment a campaign was identified. Every sizing request -- named-campaign or
-not -- now goes through the one grounded, working path: build_sizing_request_from_nl().
+reference before sizing; that mechanism, and the campaign-matching/tiering
+scaffolding built around it, were removed during the knowledge-layer cleanup.
+Every sizing request now goes through the one grounded, working path:
+build_sizing_request_from_nl().
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ for _p in [str(_ROOT_DIR)]:
         sys.path.insert(0, _p)
 
 from pydantic_schemas import (
-    AdHocSizingRequest,
+    AudienceSizingRequest,
     IntentClassification,
 )
 from core.base_agent import BaseAgent  # noqa: E402
@@ -95,8 +95,6 @@ _NEXUS_SYSTEM = _NEXUS_IDENTITY + " " + _NEXUS_JSON_MANDATE
 _NL_PARSE_PROMPT = """A consultant has submitted an ad-hoc audience sizing request:
   "{query}"
 
-This is NOT a pre-loaded campaign — do not assign a historical campaign code.
-
 You have the table's full confirmed knowledge above: the real column schema, a glossary of
 business terms, and a set of confirmed business rules. That knowledge is your authoritative
 reference for translating this request into filters — not just the consultant's literal words.
@@ -122,9 +120,7 @@ Instructions:
 
 Return exactly this JSON (no markdown):
 {{
-  "campaign_name": "<short descriptive label for this ad-hoc audience segment>",
-  "campaign_code": "ADHOC",
-  "campaign_sub_code": "ADHOC-001",
+  "audience_label": "<short descriptive label for this audience segment, for display only>",
   "cadence": "<cadence if explicitly stated by consultant, else 'ad-hoc'>",
   "medium": "<medium if explicitly stated by consultant, else 'unspecified'>",
   "target_population": "<precise plain-English restatement of who qualifies>",
@@ -142,46 +138,26 @@ A consultant submitted the following request to a Canadian telecom marketing AI:
 Knowledge context loaded:
   Known glossary terms: {glossary_summary}
 
-Campaigns retrieved from the knowledge layer most relevant to this request:
-{retrieved_campaigns}
-
 Classify this request into exactly one intent type:
 
   "sizing_request"     -- User wants an audience count or headcount, or is
                          otherwise asking something that requires querying the
-                         data. May reference a named campaign or a generic
-                         audience.
+                         data.
 
-  "general_question"   -- User has a question about campaigns, data, or
-                         strategy that does not require querying the data --
-                         it can be answered directly from the knowledge base.
+  "general_question"   -- User has a question about data or strategy that
+                         does not require querying the data -- it can be
+                         answered directly from the knowledge base.
 
-Campaign identification rules:
-  - Read the retrieved campaign records above carefully.
-  - If any retrieved campaign matches what the user is asking about — whether
-    by product name, campaign type, marketing objective, or customer action
-    described in the strategy summary — set campaign_identified to true and
-    return that campaign's camp_id as campaign_code.
-  - Do not require an exact code match. Use the strategy and description text
-    to reason about whether the user's words refer to a campaign in the records.
-  - If no retrieved campaign matches the user's request, set campaign_identified
-    to false and campaign_code to null.
-  - This is informational context only, kept for the audit trail — it does not
-    change how a sizing_request is executed; every sizing_request is translated
-    directly from the knowledge base regardless of whether a campaign was identified.
-
-Note: this classification step only ever consults the glossary summary and the
-retrieved campaign records shown above -- it never sees the confirmed business
-rules text, so it cannot honestly report which rules were applied. Always
-return an empty list for business_rules_applied here; the orchestrator fills
-knowledge_sources_consulted itself from what was actually consulted.
+Note: this classification step only ever consults the glossary summary shown
+above -- it never sees the confirmed business rules text, so it cannot
+honestly report which rules were applied. Always return an empty list for
+business_rules_applied here; the orchestrator fills knowledge_sources_consulted
+itself from what was actually consulted.
 
 Return exactly this JSON (no markdown, no explanation):
 {{
   "intent_type": "<sizing_request or general_question>",
   "confidence": <0.0 to 1.0>,
-  "campaign_identified": <true or false>,
-  "campaign_code": "<camp_id from retrieved records if identified, else null>",
   "knowledge_sources_consulted": [],
   "business_rules_applied": [],
   "reasoning": "<one sentence explaining the classification>"
@@ -191,7 +167,7 @@ Return exactly this JSON (no markdown, no explanation):
 class NexusAgent(BaseAgent):
     WORKER_ID = "nexus_v1"
     HANDLED_INTENTS: frozenset[str] = frozenset({"general_question"})
-    INPUT_SCHEMA = AdHocSizingRequest
+    INPUT_SCHEMA = AudienceSizingRequest
     OUTPUT_SCHEMA = IntentClassification
 
     def subscribe(self, spec) -> None:
@@ -233,7 +209,7 @@ class NexusAgent(BaseAgent):
     # Public API
     # ------------------------------------------------------------------
 
-    def build_sizing_request_from_nl(self, query: str) -> tuple[Optional[AdHocSizingRequest], Optional[str]]:
+    def build_sizing_request_from_nl(self, query: str) -> tuple[Optional[AudienceSizingRequest], Optional[str]]:
         """Translate a natural-language audience description into an ad-hoc sizing request.
 
         Returns (request, error_summary). error_summary is populated only when
@@ -247,10 +223,7 @@ class NexusAgent(BaseAgent):
     def classify_intent(self, query: str) -> IntentClassification:
         """Classify user intent by consulting the knowledge layer.
 
-        Queries the knowledge layer semantically for campaigns relevant to the
-        user's request so the AI can identify campaigns by natural language
-        description rather than exact code. Falls back to a safe default if
-        classification itself fails.
+        Falls back to a safe default if classification itself fails.
         """
         glossary_summary = (
             self._knowledge_ctx.glossary_summary
@@ -259,21 +232,9 @@ class NexusAgent(BaseAgent):
         )
         sources_consulted = ["glossary"]
 
-        # Query the knowledge layer for campaigns relevant to this specific request.
-        # This gives the AI real campaign intelligence to reason over rather than
-        # bare code labels, enabling natural-language campaign identification.
-        retrieved_campaigns_xml = "(knowledge layer not available)"
-        if self._knowledge_ctx is not None:
-            try:
-                retrieved_campaigns_xml = self._knowledge_ctx.retrieve_campaigns_xml(query, top_k=5)
-                sources_consulted.append("knowledge_layer")
-            except Exception:
-                pass
-
         prompt = _INTENT_CLASSIFY_V2_PROMPT.format(
             query=query,
             glossary_summary=glossary_summary,
-            retrieved_campaigns=retrieved_campaigns_xml,
         )
         try:
             raw = self._call_simple(prompt)
@@ -290,7 +251,6 @@ class NexusAgent(BaseAgent):
             classification = IntentClassification(
                 intent_type="sizing_request",
                 confidence=0.5,
-                campaign_identified=False,
                 knowledge_sources_consulted=sources_consulted,
                 reasoning="Classification failed; defaulting to sizing_request",
             )
@@ -298,7 +258,6 @@ class NexusAgent(BaseAgent):
         ThoughtDisplay.intent_classified(
             classification.intent_type,
             query,
-            classification.campaign_code,
             confidence=classification.confidence,
             knowledge_sources=classification.knowledge_sources_consulted,
         )
@@ -332,7 +291,6 @@ class NexusAgent(BaseAgent):
         intent_type: str,
         knowledge_sources: list,
         error_details: str,
-        campaign_identified: bool = False,
     ) -> str:
         """Generate a short, honest explanation for a request the tool could not complete.
 
@@ -348,13 +306,12 @@ class NexusAgent(BaseAgent):
         sources_text = ", ".join(knowledge_sources) if knowledge_sources else "none"
         intent_label = intent_type.replace("_", " ") if intent_type else "unknown"
 
-        # When no campaign was identified, explicitly prevent the AI from borrowing
-        # campaign vocabulary from its background context.
+        # Every request this tool handles is ad hoc -- explicitly prevent the AI
+        # from borrowing campaign vocabulary from its background context.
         scope_instruction = (
-            "IMPORTANT: This is NOT a campaign-specific request. The user did not name "
-            "a specific campaign. Do not use the word 'campaign' in your response. "
-            "Treat this as a general audience or data question.\n\n"
-            if not campaign_identified else ""
+            "IMPORTANT: This is NOT a campaign-specific request. Do not use the word "
+            "'campaign' in your response. Treat this as a general audience or data "
+            "question.\n\n"
         )
 
         if error_details:
@@ -407,11 +364,11 @@ class NexusAgent(BaseAgent):
     # Request construction
     # ------------------------------------------------------------------
 
-    def _parse_to_adhoc_request(self, prompt: str) -> tuple[Optional[AdHocSizingRequest], Optional[str]]:
+    def _parse_to_adhoc_request(self, prompt: str) -> tuple[Optional[AudienceSizingRequest], Optional[str]]:
         try:
             raw = self._call_with_knowledge(prompt)
             data = self._extract_json(raw)
-            return AdHocSizingRequest(**data), None
+            return AudienceSizingRequest(**data), None
         except ValidationError as exc:
             summary = f"Nexus produced an invalid sizing request ({exc.error_count()} field error(s))"
             print(f"  [Nexus] Ad-hoc payload validation failed ({exc.error_count()} field error(s))")
@@ -451,8 +408,7 @@ class NexusAgent(BaseAgent):
         if self._knowledge_ctx is not None:
             cached_text = (
                 "VIBE OCTO KNOWLEDGE BASE\n"
-                f"(Authoritative reference -- {self._knowledge_ctx.campaign_count} stored "
-                "campaigns, confirmed business rules, glossary, and schema)\n\n"
+                "(Authoritative reference -- confirmed business rules, glossary, and schema)\n\n"
                 + self._knowledge_ctx.nexus_context
             )
         else:

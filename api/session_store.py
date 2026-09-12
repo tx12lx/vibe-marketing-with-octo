@@ -1,10 +1,8 @@
 """
-api/session_store.py -- Per-conversation state shared by the web chat and the
-Slack bot (see api/slack_session_store.py for the Slack-specific subclass).
+api/session_store.py -- Per-conversation state for the web chat.
 
-Keyed by a session id (a browser session id for the web UI, a Slack channel
-id for Slack). Holds the last pipeline result and HITL state between the
-result card and the user's button response.
+Keyed by a browser session id. Holds the last pipeline result and HITL state
+between the result card and the user's button response.
 
 Upgrade path: swap the in-memory dict for a SQLite-backed store when the team
 grows past ~10 concurrent users or when multi-process deployment is needed.

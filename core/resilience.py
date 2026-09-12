@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import re
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
@@ -119,12 +118,10 @@ def _check_bq(project: str) -> tuple[str, str]:
         return "WARN", f"The data connection check was inconclusive ({type(exc).__name__}). Try restarting."
 
 
-def _check_knowledge(artifacts_dir: Path) -> tuple[str, str]:
+def _check_knowledge() -> tuple[str, str]:
     """Report the knowledge layer's real, live status. Returns (status, plain-English message).
 
-    `artifacts_dir` is unused -- kept for call-site compatibility with the old
-    signature. The real check is knowledge.store.check_health(): can the
-    database be opened, and does it have synced tables in it.
+    Can the database be opened, and does it have synced tables in it.
     """
     from knowledge.store import check_health  # noqa: PLC0415
     return check_health()
@@ -133,7 +130,6 @@ def _check_knowledge(artifacts_dir: Path) -> tuple[str, str]:
 def run_startup_health_check(
     api_key: str,
     bq_project: str,
-    artifacts_dir: Path,
     base_url: str = "https://api.fuelix.ai",
 ) -> bool:
     """Run all pre-session health checks and print a plain-English status summary.
@@ -144,7 +140,7 @@ def run_startup_health_check(
     checks = [
         _check_fuelix(api_key, base_url),
         _check_bq(bq_project),
-        _check_knowledge(artifacts_dir),
+        _check_knowledge(),
     ]
 
     failures = [(status, msg) for status, msg in checks if status == "FAIL"]

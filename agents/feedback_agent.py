@@ -2,7 +2,7 @@
 Vibe OCTO Feedback — FeedbackAgent Worker
 Worker ID: feedback_v1
 
-Interprets natural language corrections submitted from the web/Slack HITL flow
+Interprets natural language corrections submitted from the web HITL flow
 and extracts them as structured business rules, grounded in the knowledge
 layer (real schema, glossary, and existing confirmed rules) rather than any
 hardcoded taxonomy.
@@ -10,16 +10,17 @@ hardcoded taxonomy.
 A rule is never saved by this agent directly -- it returns rules_confirmed /
 rules_pending in FeedbackOutput, and the caller (api/web_app.py) persists a
 rule to the knowledge layer only after the submitter has explicitly confirmed
-the interpretation shown to them. That confirm-before-save step, plus the
-maker-checker gate on 'pattern'/'universal'-scoped rules (see
-knowledge/context.py's add_rule()), is what keeps a correction from silently
-governing every future user's results on one person's word alone.
+the interpretation shown to them. That confirm-before-save step is what keeps
+a correction from silently governing every future user's results on one
+person's word alone; a second-reviewer gate on top of it (see
+knowledge/context.py's add_rule()) exists but is currently off for every
+scope (2026-09-11 decision -- not needed for this MVP yet).
 
 Pipeline stages:
   1. Interpret        — LLM analysis grounded in the knowledge base
   2. Clarify           — ask one targeted question when a rule is too
                          ambiguous to save as stated
-  3. Scope             — classify each rule as campaign | pattern | universal
+  3. Scope             — classify each rule as pattern | universal
   4. Structure         — package each rule as a BusinessRule for the caller
 """
 from __future__ import annotations
@@ -66,9 +67,9 @@ _FEEDBACK_SYSTEM = (
     "corrections and extracting precise, reusable business rules from them. "
     "Your role is to understand WHAT went wrong in an audience sizing run, "
     "extract each distinct correction as a structured rule, classify its scope "
-    "(campaign-specific, pattern-based, or universal), and identify any unknown "
-    "terms that require clarification. "
-    "You are campaign-agnostic — never hardcode business terms or jargon. "
+    "(pattern-based or universal), and identify any unknown terms that require "
+    "clarification. "
+    "Never hardcode business terms or jargon. "
     "All term understanding must come from the provided knowledge base. "
     "When a term is absent from the knowledge base, flag it as unknown. "
     "Output must be valid JSON matching the required structure exactly. "
@@ -119,7 +120,7 @@ Output a single JSON object with this exact structure — no preamble, no explan
       "clarifying_question": "<targeted question if needs_clarification or contradicts_existing_rule is true, else empty string>",
       "contradicts_existing_rule": <true | false>,
       "contradicting_rule_text": "<exact text of the existing confirmed rule this contradicts, else empty string>",
-      "scope_detected": "<one of: campaign | pattern | universal | unclear>",
+      "scope_detected": "<one of: pattern | universal | unclear>",
       "scope_signals": "<words or context that led to this scope classification>",
       "unknown_terms": ["<term1>", "<term2>"]
     }
@@ -141,9 +142,8 @@ rule_type guide:
   general         — any other correction that does not fit the above
 
 scope_detected guide:
-  campaign  — signals: "this campaign", "this one", "here", "for this run"
-  pattern   — signals: "all X campaigns", "whenever", "every time I run", "always for Y type"
-  universal — signals: "always", "never", "all campaigns", "every campaign", "company standard"
+  pattern   — signals: "whenever", "every time I run", "always for Y type", "when the request is about X"
+  universal — signals: "always", "never", "every request", "company standard", a definition
   unclear   — scope cannot be determined from the text alone
 """
 
@@ -308,12 +308,9 @@ class FeedbackAgent(BaseAgent):
     def _build_dynamic_context(self, inp: FeedbackInput) -> str:
         parts: list[str] = ["=== CURRENT EXECUTION CONTEXT ===\n\n"]
         parts.append(
-            f"Campaign:          {inp.campaign_name}\n"
-            f"Campaign Code:     {inp.campaign_code}\n"
+            f"Audience:          {inp.audience_label or '(none -- general question)'}\n"
             f"Medium:            {inp.medium}\n"
-            f"Cadence:           {inp.cadence}\n"
-            f"Campaign Purpose:  {inp.campaign_purpose}\n"
-            f"Knowledge Tier:    {inp.knowledge_tier}\n\n"
+            f"Cadence:           {inp.cadence}\n\n"
         )
 
         if inp.execution_context:
@@ -404,18 +401,13 @@ class FeedbackAgent(BaseAgent):
             "Determine the scope of this business rule based on its text and context.\n\n"
             f"Rule text: \"{rule.get('raw_text', inp.raw_correction)}\"\n"
             f"AI interpretation: \"{rule.get('understood_as', '')}\"\n"
-            f"Original query context: \"{inp.raw_input_prompt}\"\n"
-            f"Was the original query about a specific campaign: {inp.campaign_code not in ('', 'AD_HOC')}\n"
-            f"Campaign code (if any): {inp.campaign_code}\n\n"
+            f"Original query context: \"{inp.raw_input_prompt}\"\n\n"
             "Scope definitions:\n"
-            "  campaign  — applies only to this specific campaign (signals: 'this campaign', 'this run', 'here')\n"
-            "  pattern   — applies to a type of campaign or context (signals: 'add mob campaigns', 'whenever', 'all X')\n"
-            "  universal — applies to every query always (signals: 'always', 'never', 'all campaigns', a definition)\n\n"
-            "Important: if the original query had no campaign context (campaign code is AD_HOC or empty), "
-            "the scope CANNOT be 'campaign' — choose 'pattern' or 'universal' instead.\n"
+            "  pattern   — applies to a type of request or context (signals: 'whenever', 'all X requests')\n"
+            "  universal — applies to every request always (signals: 'always', 'never', a definition)\n\n"
             "If the rule is defining a term or establishing a business concept, default to 'universal'.\n\n"
             'Output JSON only:\n'
-            '{"scope": "<campaign|pattern|universal>", "confidence": <0.0-1.0>, '
+            '{"scope": "<pattern|universal>", "confidence": <0.0-1.0>, '
             '"pattern_description": "<one phrase describing when this applies, or empty string>", '
             '"reasoning": "<one sentence explaining the scope choice>"}'
         )
@@ -426,9 +418,7 @@ class FeedbackAgent(BaseAgent):
                 return result
         except Exception:
             pass
-        # Fallback: if no campaign context, default universal; else use scope_signals
-        scope = "universal" if inp.campaign_code in ("", "AD_HOC") else "campaign"
-        return {"scope": scope, "confidence": 0.5, "pattern_description": "", "reasoning": "fallback"}
+        return {"scope": "universal", "confidence": 0.5, "pattern_description": "", "reasoning": "fallback"}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -560,11 +550,10 @@ class FeedbackAgent(BaseAgent):
         """Create a BusinessRule directly from the raw correction text.
 
         Used as a fallback when LLM interpretation (Stage 1) is unavailable.
-        Scope defaults to 'universal' for AD_HOC corrections so the rule is
-        applied to all future ad-hoc queries via optimization_context.
+        Every request this tool handles is ad hoc, so this always defaults to
+        'universal' scope.
         """
-        scope = "campaign" if inp.campaign_code not in ("", "AD_HOC") else "universal"
-        priority_map = {"campaign": 3, "pattern": 2, "universal": 1}
+        priority_map = {"pattern": 2, "universal": 1}
         return BusinessRule(
             rule_id=str(uuid.uuid4()),
             created_at=datetime.now(tz=timezone.utc).isoformat(),
@@ -576,12 +565,10 @@ class FeedbackAgent(BaseAgent):
                 "note": inp.raw_correction,
                 "description": "Verbatim user correction from HITL NO response",
             },
-            scope=scope,
-            campaign_code=inp.campaign_code if scope == "campaign" else None,
-            campaign_name=inp.campaign_name if scope == "campaign" else None,
-            medium=inp.medium if scope in ("campaign", "pattern") else None,
-            cadence=inp.cadence if scope in ("campaign", "pattern") else None,
-            priority=priority_map.get(scope, 1),
+            scope="universal",
+            medium=inp.medium,
+            cadence=inp.cadence,
+            priority=priority_map["universal"],
             applies_to_future=True,
             overrides_acc_summary=False,
             clarification_rounds=0,
@@ -590,8 +577,8 @@ class FeedbackAgent(BaseAgent):
         )
 
     def _dict_to_rule(self, rule_dict: dict, inp: FeedbackInput) -> BusinessRule:
-        scope = rule_dict.get("scope_detected", "campaign")
-        priority_map = {"campaign": 3, "pattern": 2, "universal": 1}
+        scope = rule_dict.get("scope_detected", "universal")
+        priority_map = {"pattern": 2, "universal": 1}
         return BusinessRule(
             rule_id=str(uuid.uuid4()),
             created_at=datetime.now(tz=timezone.utc).isoformat(),
@@ -601,10 +588,8 @@ class FeedbackAgent(BaseAgent):
             rule_type=rule_dict.get("rule_type", "general"),
             structured_value=rule_dict.get("structured_value", {}),
             scope=scope,
-            campaign_code=inp.campaign_code if scope == "campaign" else None,
-            campaign_name=inp.campaign_name if scope == "campaign" else None,
-            medium=inp.medium if scope in ("campaign", "pattern") else None,
-            cadence=inp.cadence if scope in ("campaign", "pattern") else None,
+            medium=inp.medium if scope == "pattern" else None,
+            cadence=inp.cadence if scope == "pattern" else None,
             pattern_description=rule_dict.get("pattern_description"),
             pattern_match_logic=rule_dict.get("scope_signals"),
             confidence=rule_dict.get("confidence", 1.0),
@@ -683,14 +668,13 @@ class FeedbackAgent(BaseAgent):
             failure_type = self._infer_failure_type_from_text(inp.raw_correction)
             entry = SemanticFailureLog(
                 timestamp=datetime.now(tz=timezone.utc).isoformat(),
-                campaign_code=inp.campaign_code or "AD_HOC",
                 worker_id="feedback_agent",
                 raw_input=inp.raw_input_prompt or "",
                 generated_output=json.dumps(inp.execution_context, default=str),
                 correction_description=inp.raw_correction,
                 inferred_failure_type=failure_type,
                 glossary_gaps=[],
-                intent_type="general_question" if inp.campaign_code in ("", "AD_HOC") else "sizing_request",
+                intent_type="sizing_request" if inp.has_prior_result else "general_question",
             )
             records: list[dict] = []
             if _FAILURE_LOG_PATH.exists():

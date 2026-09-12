@@ -1,13 +1,51 @@
-"""core/ai_client.py -- shared AI-calling helper (Gemini via Vertex AI).
+"""core/ai_client.py -- shared AI-calling helper.
 
-Replaces the Fuel iX-specific request building and response parsing that
-used to be duplicated, with real variation, across call sites in agents/*.py
-and vibe_orchestrator.py. Every caller now builds a prompt and gets plain
-text back through one function instead of hand-rolling headers, an
-OpenAI-style payload, and its own response-parsing logic.
+ask_ai() calls Claude Sonnet 5 through Fuel iX -- TELUS's internal LLM
+gateway -- via its OpenAI-compatible /v1/chat/completions endpoint. Every
+caller in agents/*.py and knowledge/sync_schema.py builds a prompt and gets
+plain text back through this one function instead of hand-rolling Fuel iX
+request building and response parsing itself (that duplication is what this
+file replaced the first time Fuel iX was wired in).
 
-Auth: relies on Application Default Credentials -- the attached service
-account when running on a GCE VM, no separate API key needed.
+This file previously also called Gemini/Vertex AI for embeddings
+(embed_text()), to support a campaign-similarity-search feature. That
+feature (knowledge/store.py's campaign_summaries table and
+knowledge/retrieve.py's find_similar_campaigns()) was removed during the
+2026-09-11 knowledge-layer cleanup as dead weight from a scope this tool no
+longer has -- it never held a real record and was retrieved on every single
+request for nothing. embed_text() was its only caller, so it went too, and
+with it the google-genai dependency and every GEMINI_* env var. Fuel iX is
+now the sole model provider for this app.
+
+Auth, direct mode (FUELIX_RELAY_URL unset): FUELIX_API_KEY (bearer token),
+sent straight to Fuel iX. Works from anywhere with normal internet access
+(e.g. a developer's laptop).
+
+Auth, relayed mode (FUELIX_RELAY_URL set): this app's production compute (a
+VM whose network only reaches Google-owned destinations -- the same
+restriction that already blocks it from GitHub) cannot reach api.fuelix.ai
+directly, confirmed live 2026-09-11. It can reach any *.run.app URL, since
+Cloud Run is itself Google infrastructure -- so requests go instead to a
+small relay service (fuelix_relay/) deployed on Cloud Run, which holds the
+real FUELIX_API_KEY (this process never needs it) and forwards the request
+to Fuel iX unchanged. Calls to the relay are authenticated with a
+Google-signed identity token for this VM's own attached service account,
+fetched fresh per call from the metadata server -- Cloud Run's own IAM layer
+(the relay is deployed without --allow-unauthenticated) verifies that token
+before the request ever reaches the relay's code; nothing in this app needs
+to check auth itself.
+
+Verified live against Fuel iX's real endpoint (2026-09-11) before wiring
+this in: FUELIX_MODEL defaults to claude-sonnet-5 -- current-generation
+Sonnet, both newer and cheaper than claude-sonnet-4/4.5/4.6 (Fuel iX silently
+serves a newer snapshot for those older aliases anyway, e.g. requesting
+claude-sonnet-4 actually returns claude-sonnet-4-6). Claude 3.5/3.7 Sonnet
+are listed in Fuel iX's /v1/models catalog but are NOT actually callable for
+this org: claude-3-7-sonnet returns 404 (publisher model not found/not
+accessible), claude-3-5-haiku returns 403 (not enabled for this org), and no
+claude-3-5-sonnet variant is listed at all. Don't reintroduce a 3.x model
+string here without re-checking the live catalog first -- it may still list
+models that no longer resolve to anything callable.
 """
 from __future__ import annotations
 
@@ -17,8 +55,8 @@ import time
 from typing import Optional
 
 import httpx
-from google import genai
-from google.genai import errors, types
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import id_token as google_id_token
 
 _log = logging.getLogger(__name__)
 
@@ -29,49 +67,35 @@ _log = logging.getLogger(__name__)
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1.0
 
-# GEMINI_LOCATION's fallback must stay a Canadian region -- data-residency
-# requirement (confirmed with Alex Everitt) -- even if the env var is unset.
-_PROJECT = os.getenv("GEMINI_PROJECT_ID", "cdo-hsm-adobe-fda-np-9fbb44")
-_LOCATION = os.getenv("GEMINI_LOCATION", "northamerica-northeast1")
-_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
-# Some models (confirmed live: gemini-2.5-pro) reject thinking_budget=0 outright rather
-# than just ignoring it -- "thinking" isn't optional for them. When that happens, ask_ai
-# retries once without asking to disable it, but that means thinking now silently spends
-# part of max_tokens the caller never budgeted for (that call was written assuming
-# thinking was off). This is the same failure mode already fixed once in
-# agents/feedback_agent.py's override-decision classifier -- fixed centrally here so every
-# caller of thinking_budget=0 is safe under a model that can't honor it, not just the one
-# call site that happened to get tested.
-#
-# The reserve is ADDED on top of the caller's own max_tokens, not just a flat floor
-# swapped in for a small one -- confirmed live that a flat floor was still too small for a
-# call whose visible-output budget was already large (a chunk of column descriptions,
-# ~1000 tokens of intended JSON): thinking ate into that same flat ceiling and left too
-# little room for the real answer, truncating it mid-string. Adding the reserve on top
-# guarantees the caller's own intended visible-output budget is never reduced.
-_THINKING_UNSUPPORTED_MARKER = "does not support setting thinking_budget"
-_THINKING_TOKEN_RESERVE = 2048
+# ---------------------------------------------------------------------------
+# Fuel iX (ask_ai) -- text generation via Claude Sonnet 5
+# ---------------------------------------------------------------------------
 
-_client: Optional[genai.Client] = None
+_FUELIX_BASE = os.getenv("FUELIX_BASE_URL", "https://api.fuelix.ai")
+_FUELIX_API_KEY = os.getenv("FUELIX_API_KEY", "")
+_FUELIX_MODEL = os.getenv("FUELIX_MODEL", "claude-sonnet-5")
+
+# Set only on compute that can't reach api.fuelix.ai directly -- see the module
+# docstring's "Auth, relayed mode" section. Unset (the common case for local dev,
+# where normal internet access works) means calls go straight to Fuel iX.
+_FUELIX_RELAY_URL = os.getenv("FUELIX_RELAY_URL", "").rstrip("/")
 
 
-def _get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        _client = genai.Client(vertexai=True, project=_PROJECT, location=_LOCATION)
-    return _client
+def _fuelix_request_target() -> tuple[str, dict]:
+    """(base_url, auth_header) for this call.
 
-
-def _build_config(
-    system: Optional[str], temperature: float, max_tokens: int, thinking_budget: Optional[int],
-) -> types.GenerateContentConfig:
-    return types.GenerateContentConfig(
-        system_instruction=system,
-        temperature=temperature,
-        max_output_tokens=max_tokens,
-        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget) if thinking_budget is not None else None,
-    )
+    Relayed mode: a fresh Google-signed identity token for this instance's own
+    attached service account, audience-scoped to the relay's URL -- fetched from
+    the metadata server, a local call with negligible overhead next to the AI
+    request itself, so no caching is needed. Cloud Run verifies this token
+    before the request reaches the relay; the relay itself never checks auth.
+    Direct mode: the real Fuel iX API key as a bearer token, same as always.
+    """
+    if _FUELIX_RELAY_URL:
+        token = google_id_token.fetch_id_token(GoogleAuthRequest(), _FUELIX_RELAY_URL)
+        return _FUELIX_RELAY_URL, {"Authorization": f"Bearer {token}"}
+    return _FUELIX_BASE, {"Authorization": f"Bearer {_FUELIX_API_KEY}"}
 
 
 def ask_ai(
@@ -84,109 +108,62 @@ def ask_ai(
 ) -> str:
     """Ask the AI a question and get plain text back.
 
-    Replaces the old pattern of building a Fuel iX chat-completions request
-    by hand (headers, OpenAI-style payload) and then parsing
-    choices[0].message.content out of the JSON response -- Gemini's own
-    response.text already gives back clean, assembled text.
-
-    thinking_budget: Gemini 2.5 models spend part of max_tokens on hidden
-    "thinking" tokens before writing the visible response -- for straightforward
-    formatting tasks (e.g. "reply with only this JSON shape") that hidden spend
-    can silently truncate the real output. Pass thinking_budget=0 to disable it
-    for calls that don't need deliberation; leave unset (default) for anything
-    that benefits from it, like SQL generation or intent classification. Not every
-    model allows disabling it -- see _THINKING_UNSUPPORTED_MARKER above for what
-    happens then.
+    thinking_budget: kept for call-site compatibility with every existing
+    caller's signature (agents/*.py, knowledge/sync_schema.py already pass
+    thinking_budget=0 or omit it). Claude Sonnet 5 has no fixed token budget
+    for thinking -- that mechanism is removed on this model generation, and
+    Fuel iX rejects the old {"type": "enabled", "budget_tokens": N} shape
+    outright (400, confirmed live) -- so this only supports on/off:
+      thinking_budget == 0  -> send {"type": "disabled"} (verified accepted)
+      anything else (None, or any other value) -> omit the field entirely,
+        which runs Sonnet 5's own default (adaptive) reasoning.
+    Verified directly against Fuel iX with a reasoning-heavy prompt under a
+    tight max_tokens: completion-token counts and output were identical
+    across "omitted", "disabled", and "adaptive" -- unlike the Gemini path
+    this replaced, there's no evidence hidden thinking tokens eat into the
+    caller's own max_tokens budget through this endpoint.
     """
-    config = _build_config(system, temperature, max_tokens, thinking_budget)
-    adapted_for_forced_thinking = False
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    payload: dict = {
+        "model": _FUELIX_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if thinking_budget == 0:
+        payload["thinking"] = {"type": "disabled"}
 
     last_exc: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES + 1):
+        retryable = False
         try:
-            response = _get_client().models.generate_content(
-                model=_MODEL,
-                contents=prompt,
-                config=config,
+            base_url, auth_header = _fuelix_request_target()
+            resp = httpx.post(
+                f"{base_url}/v1/chat/completions",
+                headers={**auth_header, "Content-Type": "application/json"},
+                json=payload,
+                timeout=180,
             )
-            return (response.text or "").strip()
-        except errors.ServerError as exc:
-            last_exc = exc
-            retryable = True
-        except errors.ClientError as exc:
-            if (
-                thinking_budget is not None
-                and not adapted_for_forced_thinking
-                and _THINKING_UNSUPPORTED_MARKER in str(exc)
-            ):
-                _log.info(
-                    "Model %s can't disable thinking (requested thinking_budget=%s) -- "
-                    "retrying without it, with %d extra tokens of headroom so thinking "
-                    "can't eat into the caller's own visible-output budget.",
-                    _MODEL, thinking_budget, _THINKING_TOKEN_RESERVE,
-                )
-                adapted_for_forced_thinking = True
-                config = _build_config(
-                    system, temperature, max_tokens + _THINKING_TOKEN_RESERVE, None,
-                )
-                continue
-            last_exc = exc
-            retryable = exc.code == 429  # rate limited -- worth retrying
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             last_exc = exc
-            retryable = True  # network drop / unresponsive -- worth retrying
+            retryable = True
+        else:
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"].strip()
+            last_exc = RuntimeError(
+                f"Fuel iX call failed ({resp.status_code}): {resp.text[:500]}"
+            )
+            retryable = resp.status_code == 429 or resp.status_code >= 500
+
         if not retryable or attempt == _MAX_RETRIES:
             raise last_exc
         delay = _BACKOFF_BASE * (2 ** attempt)
         _log.warning(
-            "Gemini call failed on attempt %d/%d (%s) -- retrying in %.0fs",
-            attempt + 1, _MAX_RETRIES, type(last_exc).__name__, delay,
-        )
-        time.sleep(delay)
-
-    raise last_exc  # pragma: no cover -- loop always returns or raises above
-
-
-_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
-_EMBEDDING_DIMENSIONALITY = 768
-
-
-def embed_text(text: str) -> list[float]:
-    """Turn a sentence into a set of numbers that captures its meaning.
-
-    Used by the knowledge layer to find similar past campaigns, rules, or
-    glossary terms by what they mean rather than by matching stray words.
-    Same Gemini/Vertex AI client, project, and region as ask_ai() -- this is
-    purely the "find related things" piece working alongside it, not a
-    separate AI system. Truncated to 768 dimensions (Matryoshka-style output
-    truncation, confirmed supported by this model) -- plenty for a corpus of
-    this size, at a fraction of the storage/compute of the full 3072.
-    """
-    config = types.EmbedContentConfig(output_dimensionality=_EMBEDDING_DIMENSIONALITY)
-
-    last_exc: Optional[Exception] = None
-    for attempt in range(_MAX_RETRIES + 1):
-        try:
-            response = _get_client().models.embed_content(
-                model=_EMBEDDING_MODEL,
-                contents=[text],
-                config=config,
-            )
-            return list(response.embeddings[0].values)
-        except errors.ServerError as exc:
-            last_exc = exc
-            retryable = True
-        except errors.ClientError as exc:
-            last_exc = exc
-            retryable = exc.code == 429
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            last_exc = exc
-            retryable = True
-        if not retryable or attempt == _MAX_RETRIES:
-            raise last_exc
-        delay = _BACKOFF_BASE * (2 ** attempt)
-        _log.warning(
-            "Gemini embedding call failed on attempt %d/%d (%s) -- retrying in %.0fs",
+            "Fuel iX call failed on attempt %d/%d (%s) -- retrying in %.0fs",
             attempt + 1, _MAX_RETRIES, type(last_exc).__name__, delay,
         )
         time.sleep(delay)
@@ -197,6 +174,7 @@ def embed_text(text: str) -> list[float]:
 def check_ai_reachable() -> tuple[str, str]:
     """Startup health check -- mirrors core/resilience.py's old _check_fuelix.
 
+    Now genuinely checks Fuel iX (ask_ai's real backend again), not Gemini.
     Returns (status, plain-English message), matching the existing
     (status, message) contract used by run_startup_health_check.
     """
@@ -206,4 +184,4 @@ def check_ai_reachable() -> tuple[str, str]:
             return "OK", ""
         return "WARN", "The AI service returned an empty response. Try again in a few minutes."
     except Exception as exc:  # noqa: BLE001 -- surfacing any failure as a plain-English health check result
-        return "FAIL", f"We can't reach the AI service (Gemini): {exc}"
+        return "FAIL", f"We can't reach the AI service (Fuel iX): {exc}"

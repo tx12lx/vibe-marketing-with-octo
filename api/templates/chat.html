@@ -621,7 +621,7 @@ body {
   </div>
   <div class="header-status" id="status-pill">
     <div class="header-status-dot"></div>
-    <span id="status-text">{{CAMPAIGN_COUNT}} campaigns ready</span>
+    <span id="status-text">{{RULES_COUNT}} business rules loaded</span>
   </div>
 </header>
 
@@ -634,7 +634,7 @@ body {
 <main class="messages" id="messages" role="log" aria-live="polite" aria-label="Conversation">
   <div class="welcome">
     <div class="welcome-title">Vibe Marketing with OCTO is ready</div>
-    <div class="welcome-sub">Type a campaign name or question below. The tool will size the audience, generate a brief, and walk you through confirmation.</div>
+    <div class="welcome-sub">Describe an audience or ask a question below. The tool will size the audience and walk you through confirmation.</div>
   </div>
 </main>
 
@@ -642,7 +642,7 @@ body {
 <footer class="input-area">
   <div class="input-row">
     <div class="input-wrap">
-      <textarea id="user-input" rows="1" placeholder="Type a campaign name or question…" aria-label="Your message"></textarea>
+      <textarea id="user-input" rows="1" placeholder="Describe an audience or ask a question…" aria-label="Your message"></textarea>
     </div>
     <button class="send-btn" id="send-btn" aria-label="Send" title="Send (Enter)">
       <svg viewBox="0 0 20 20"><path d="M2.3 10.7L17 3 9.3 17.7l-1.6-5.1-5.4-1.9zm2.5-.1l3.2 1.1.9 2.8L15 5.3 4.8 10.6z"/></svg>
@@ -746,8 +746,7 @@ body {
   // "couldn't complete this" case are rendered separately, above.
   function buildResultCard(data) {
     const metaRows = [];
-    if (data.campaign_name) metaRows.push(['Campaign', esc(data.campaign_name)]);
-    if (data.campaign_code) metaRows.push(['Code', `<span class="code-val">${esc(data.campaign_code)}</span>`]);
+    if (data.audience_label) metaRows.push(['Audience', esc(data.audience_label)]);
     if (data.medium)  metaRows.push(['Medium', esc(data.medium)]);
     if (data.cadence) metaRows.push(['Cadence', esc(data.cadence)]);
 

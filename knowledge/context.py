@@ -3,7 +3,7 @@ through to reach the knowledge layer.
 
 One KnowledgeContext instance, built once in vibe_orchestrator.build_runtime()
 and bound into every agent via set_knowledge_context(), is the single object
-for both "knowledge to read" (schema, glossary, business rules, campaigns) and
+for both "knowledge to read" (schema, glossary, business rules) and
 "feedback to persist" (confirmations, corrections, rule approvals) -- see
 VibeRuntime.knowledge_ctx.
 
@@ -23,45 +23,33 @@ from knowledge.store import (
     add_glossary_term,
     approve_rule,
     connect,
+    get_active_rules,
     get_all_business_rules,
-    get_all_campaign_summaries,
     get_feedback_events,
     get_glossary_terms,
     get_pending_rules,
     hydrate_business_rules,
-    hydrate_campaign_summaries,
     hydrate_feedback_events,
     hydrate_glossary_terms,
     record_feedback_event,
     reject_rule,
 )
 
-# Rules scoped this way govern every future user's results, not just the one
-# campaign the submitter is already working on -- they are staged for a
-# second person's approval rather than taking effect immediately. A
-# 'campaign'-scoped rule stays immediate: its blast radius is the same
-# campaign the submitter is already working on right now.
-_SCOPES_REQUIRING_REVIEW = frozenset({"universal", "pattern"})
+# No scope currently requires a second reviewer's approval before taking
+# effect -- corrections apply immediately (2026-09-11 decision: single-
+# reviewer friction wasn't needed for this MVP). approve_rule()/reject_rule()
+# and the /admin/pending-rules endpoints stay in place for when this changes;
+# they simply see nothing queued while this set is empty.
+_SCOPES_REQUIRING_REVIEW: frozenset[str] = frozenset()
 
 _log = logging.getLogger(__name__)
 
 
 class KnowledgeContext:
     """The single front door to the knowledge layer, for both agents to read
-    from and the web/Slack front ends to persist confirmed feedback through."""
+    from and the web front end to persist confirmed feedback through."""
 
     # -- read side, used by NexusAgent and QuantAgent ------------------------
-
-    def retrieve_campaigns_xml(self, query: str, top_k: int = 5) -> str:
-        matches = retrieve.find_similar_campaigns(query, top_k=top_k)
-        if not matches:
-            return "<campaigns>(no past campaigns stored yet)</campaigns>"
-        items = "\n".join(
-            f'  <campaign code="{m["campaign_code"]}" similarity="{m["similarity"]:.2f}">'
-            f'{m["summary_text"]}</campaign>'
-            for m in matches
-        )
-        return f"<campaigns>\n{items}\n</campaigns>"
 
     @property
     def glossary_summary(self) -> str:
@@ -70,9 +58,11 @@ class KnowledgeContext:
         return retrieve.get_glossary_summary()
 
     @property
-    def campaign_count(self) -> int:
+    def business_rules_count(self) -> int:
+        """Count of active confirmed business rules -- used as the readiness
+        indicator on the web UI (see api/web_app.py)."""
         with connect() as conn:
-            return len({s["campaign_code"] for s in retrieve.get_all_campaign_summaries(conn)})
+            return len(get_active_rules(conn))
 
     @property
     def nexus_context(self) -> str:
@@ -142,12 +132,11 @@ class KnowledgeContext:
             hydrate_business_rules(conn, data.get("business_rules", []))
             hydrate_glossary_terms(conn, data.get("glossary_terms", []))
             hydrate_feedback_events(conn, data.get("feedback_events", []))
-            hydrate_campaign_summaries(conn, data.get("campaign_summaries", []))
         _log.info(
             "Knowledge layer hydrated from GitHub: %d business rule(s), %d glossary term(s), "
-            "%d feedback event(s), %d campaign summary/summaries.",
+            "%d feedback event(s).",
             len(data.get("business_rules", [])), len(data.get("glossary_terms", [])),
-            len(data.get("feedback_events", [])), len(data.get("campaign_summaries", [])),
+            len(data.get("feedback_events", [])),
         )
 
     def _sync_business_rules_and_feedback(self, conn, message: str) -> None:
@@ -163,11 +152,10 @@ class KnowledgeContext:
         """Save a rule extracted from a HITL correction.
 
         Returns {"rule_id": int, "status": "active" | "pending_review"} so the
-        caller can tell the submitter which happened -- a 'campaign'-scoped
-        rule (contained to the one campaign they're already working on) goes
-        live immediately; a 'pattern' or 'universal' rule (governs every
-        future user's results) is staged as pending_review until a different
-        person calls approve_rule() on it.
+        caller can tell the submitter which happened -- currently always
+        "active" since no scope requires review right now (see
+        _SCOPES_REQUIRING_REVIEW above), but a rule staged as pending_review
+        stays that way until a different person calls approve_rule() on it.
         """
         status = "pending_review" if rule.scope in _SCOPES_REQUIRING_REVIEW else "active"
         with connect() as conn:
@@ -175,14 +163,12 @@ class KnowledgeContext:
                 conn,
                 rule_text=rule.rule_description,
                 scope=rule.scope,
-                campaign_code=rule.campaign_code,
                 added_by=rule.verified_by,
                 status=status,
             )
             record_feedback_event(
                 conn,
                 event_type="correction",
-                campaign_code=rule.campaign_code,
                 raw_text=rule.raw_correction,
                 structured_rule_id=rule_id,
                 user_identity=rule.verified_by,
@@ -208,20 +194,18 @@ class KnowledgeContext:
             reject_rule(conn, rule_id, approved_by=approver_identity, note=note)
             self._sync_business_rules_and_feedback(conn, f"Reject rule #{rule_id} (by {approver_identity})")
 
-    def record_confirmation(self, campaign_code: Optional[str], user_identity: str = "unknown") -> None:
+    def record_confirmation(self, user_identity: str = "unknown") -> None:
         """Permanently record a 'looks good' confirmation -- called from
-        api/web_app.py's _handle_hitl_yes_sync, shared by the web and Slack
-        front ends."""
+        api/web_app.py's _handle_hitl_yes_sync."""
         with connect() as conn:
             record_feedback_event(
                 conn,
                 event_type="confirm",
-                campaign_code=campaign_code,
                 user_identity=user_identity,
             )
             git_store.queue_sync(
                 "feedback_events", [dict(r) for r in get_feedback_events(conn)],
-                f"Confirmation from {user_identity}" + (f" on {campaign_code}" if campaign_code else ""),
+                f"Confirmation from {user_identity}",
             )
 
     def add_glossary_term(self, term: str, definition: str, added_by: str = "unknown", source: str = "hitl") -> None:
