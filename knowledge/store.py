@@ -337,11 +337,14 @@ def add_business_rule(
     rule written for one table's conventions (e.g. its default sizing filters) can never
     leak into a different table's query just because both rules are 'active'.
 
-    status defaults to 'active'. Callers pass status='pending_review' for a
-    rule whose scope requires a second reviewer's approval -- see
-    knowledge/context.py's _SCOPES_REQUIRING_REVIEW -- so it sits inert
-    (get_active_rules() only ever returns status='active') until a second
-    person calls approve_rule().
+    status defaults to 'active' and every caller now leaves it that way -- the
+    second-reviewer "pending_review" gate this schema originally supported was
+    removed (see knowledge/context.py's add_rule()) since a person who corrects
+    this tool already understands SQL, the business rules, and the campaign
+    data well enough to be trusted immediately; a rule only ever sits un-applied
+    now if it's actively 'retired' by a later supersedes_id. Historical rows from
+    before the removal may still carry 'pending_review' or 'rejected' -- nothing
+    reads those statuses as meaningful anymore, they're just kept for the record.
     """
     with conn:
         cur = conn.execute(
@@ -359,66 +362,35 @@ def add_business_rule(
         return new_id
 
 
-class MakerCheckerViolation(RuntimeError):
-    """Raised when the same identity that submitted a rule tries to approve it."""
-
-
-def get_pending_rules(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Every rule staged for a second reviewer's approval, oldest first."""
-    return conn.execute(
-        "SELECT * FROM business_rules WHERE status='pending_review' ORDER BY added_at"
-    ).fetchall()
-
-
-def get_rule(conn: sqlite3.Connection, rule_id: int) -> Optional[sqlite3.Row]:
-    return conn.execute("SELECT * FROM business_rules WHERE id=?", (rule_id,)).fetchone()
-
-
-def approve_rule(
+def retire_business_rule(
     conn: sqlite3.Connection,
     rule_id: int,
-    approved_by: str,
-    note: str = "",
-) -> None:
-    """Move a pending_review rule to active. Refuses (raises) when the approver
-    is the same identity that submitted it -- maker-checker enforced in code,
-    not just left as a convention someone could forget to follow."""
-    row = get_rule(conn, rule_id)
-    if row is None:
-        raise ValueError(f"No business rule with id {rule_id}.")
-    if row["status"] != "pending_review":
-        raise ValueError(f"Rule {rule_id} is not pending review (status={row['status']!r}).")
-    if (row["added_by"] or "").strip().lower() == (approved_by or "").strip().lower():
-        raise MakerCheckerViolation(
-            f"Rule {rule_id} was submitted by {row['added_by']!r} -- it must be approved "
-            "by someone else, not the same person who submitted it."
-        )
-    with conn:
-        conn.execute(
-            "UPDATE business_rules SET status='active', approved_by=?, approved_at=?, review_note=? "
-            "WHERE id=?",
-            (approved_by, _now(), note, rule_id),
-        )
+    retired_by: str,
+    reason: str = "",
+) -> bool:
+    """Retire a rule with no replacement -- the sibling of add_business_rule's
+    supersedes_id path (retire-and-replace), for the plain "this was wrong, remove
+    it, nothing takes its place" case. The row and its full history (added_by,
+    added_at, the correction that created it) are left exactly as they are; only
+    status flips to 'retired', so get_active_rules() stops returning it immediately
+    and everything about why it existed and why it was removed stays on the record.
 
+    reason is stored in review_note (the same free-text column the old
+    second-reviewer gate used for its sign-off notes) so a plain-English "why this
+    was retired" is attached right on the row, not left to be reconstructed later
+    from a git log or a person's memory.
 
-def reject_rule(
-    conn: sqlite3.Connection,
-    rule_id: int,
-    approved_by: str,
-    note: str = "",
-) -> None:
-    """Move a pending_review rule to rejected -- it never becomes active."""
-    row = get_rule(conn, rule_id)
-    if row is None:
-        raise ValueError(f"No business rule with id {rule_id}.")
-    if row["status"] != "pending_review":
-        raise ValueError(f"Rule {rule_id} is not pending review (status={row['status']!r}).")
+    Returns False (no-op) if rule_id doesn't exist or isn't currently 'active' --
+    retiring something already retired/rejected would silently overwrite whoever
+    retired it first.
+    """
     with conn:
-        conn.execute(
-            "UPDATE business_rules SET status='rejected', approved_by=?, approved_at=?, review_note=? "
-            "WHERE id=?",
-            (approved_by, _now(), note, rule_id),
+        cur = conn.execute(
+            "UPDATE business_rules SET status='retired', approved_by=?, approved_at=?, review_note=? "
+            "WHERE id=? AND status='active'",
+            (retired_by, _now(), reason, rule_id),
         )
+        return cur.rowcount > 0
 
 
 def get_all_business_rules(conn: sqlite3.Connection) -> list[sqlite3.Row]:

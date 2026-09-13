@@ -46,7 +46,6 @@ class AuditLogger:
         session_id: str,
         user: str,
         intent_type: str,
-        campaign_id: Optional[str],
         sql: Optional[str],
         agent_called: Optional[str],
         hitl_outcome: Optional[str],
@@ -65,7 +64,6 @@ class AuditLogger:
             "session_id": session_id,
             "user": user,
             "intent_type": intent_type,
-            "campaign_id": campaign_id,
             "bq_query_hash": _sql_hash(sql) if sql else None,
             "agent_called": agent_called,
             "hitl_outcome": hitl_outcome,
@@ -80,7 +78,6 @@ class AuditLogger:
         *,
         session_id: str,
         user: str,
-        campaign_id: Optional[str],
         hitl_outcome: str,
     ) -> None:
         """Append a HITL resolution entry (API mode only).
@@ -97,7 +94,6 @@ class AuditLogger:
             "session_id": session_id,
             "user": user,
             "intent_type": "hitl_resolution",
-            "campaign_id": campaign_id,
             "bq_query_hash": None,
             "agent_called": None,
             "hitl_outcome": hitl_outcome,

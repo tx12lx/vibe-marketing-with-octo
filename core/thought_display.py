@@ -142,8 +142,14 @@ class ThoughtDisplay:
         query: str,
         confidence: Optional[float] = None,
         knowledge_sources: Optional[list] = None,
+        narration: Optional[str] = None,
     ) -> None:
-        """Display what intent was understood, what knowledge was consulted, and confidence."""
+        """Display what intent was understood, what knowledge was consulted, and confidence.
+
+        narration, when given, is a one-off line the AI wrote for this specific
+        request (see core.router.IntentRouter.classify()) and is what's streamed
+        to the user -- the hardcoded lines below are only a fallback for when the
+        AI didn't return one (e.g. routing itself failed)."""
         short_q = f'"{query[:50]}..."' if len(query) > 50 else f'"{query}"'
         conf_str = f"  {confidence:.0%}" if confidence is not None else ""
         sources_str = ", ".join(knowledge_sources) if knowledge_sources else ""
@@ -158,7 +164,7 @@ class ThoughtDisplay:
             if sources_str:
                 body += _label_rows("Knowledge", sources_str)
             cls._box("I'll answer from what we already know.", body)
-            cls._emit("Got it -- let me check what we already know about that.")
+            cls._emit(narration or "Got it -- let me check what we already know about that.")
         else:
             body = [*_label_rows("I heard", short_q)]
             if conf_str:
@@ -166,7 +172,7 @@ class ThoughtDisplay:
             if sources_str:
                 body += _label_rows("Knowledge", sources_str)
             cls._box("Understood. Let me find the best audience for your request...", body)
-            cls._emit("Got it -- that's an audience sizing question. Let me get to work on it.")
+            cls._emit(narration or "Got it -- that's an audience sizing question. Let me get to work on it.")
 
     @classmethod
     def results_ready(
@@ -220,6 +226,7 @@ class ThoughtDisplay:
         filters: Optional[list[str]] = None,
         skipped_steps: Optional[list[str]] = None,
         applied_rules: Optional[list[str]] = None,
+        narration: Optional[str] = None,
     ) -> None:
         """Show the table selection and key filters before the waterfall query executes."""
         body = [
@@ -240,7 +247,7 @@ class ThoughtDisplay:
                 body.append(_row(f"    {step[:60]}"))
         body += [_blank(), _row("  Running the waterfall now...")]
         cls._box("Here is my plan before I run the query:", body)
-        cls._emit(f"Found the right data ({table_label}) and worked out the filters -- running the numbers now...")
+        cls._emit(narration or f"Found the right data ({table_label}) and worked out the filters -- running the numbers now...")
 
     # ------------------------------------------------------------------
     # Error translation

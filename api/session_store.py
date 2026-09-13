@@ -30,8 +30,10 @@ class SessionState:
         "active_corrections",
         "pending_correction",
         "transcript",
-        "pending_contradiction_text",
-        "pending_contradiction_rule",
+        "pending_clarification_question",
+        "clarification_history",
+        "clarification_round",
+        "original_correction_text",
     )
 
     # How many past turns get replayed into the model as conversation context (see
@@ -75,14 +77,26 @@ class SessionState:
         # Only turns that produced a real answer are recorded (see record_turn()) --
         # a "stuck, need more info" turn has nothing useful to hand back to the model.
         self.transcript: list[dict] = []
-        # Set when the last correction was blocked for contradicting an existing
-        # confirmed rule -- the next /correction submission is then the user's answer to
-        # that question, not a fresh correction (see FeedbackAgent.
-        # _resolve_pending_contradiction()). Cleared as soon as it's resolved either way.
-        self.pending_contradiction_text: str = ""
-        # The blocked rule dict that goes with pending_contradiction_text -- see
-        # FeedbackOutput.contradiction_new_rule.
-        self.pending_contradiction_rule: Optional[dict] = None
+        # Open clarification conversation state -- non-empty question means a
+        # correction is mid-conversation and the next /correction submission is the
+        # user's reply to it, not a fresh correction. See FeedbackAgent's confidence-gate
+        # check (agents/feedback_agent.py) and api/web_app.py's _process_correction_sync.
+        self.pending_clarification_question: str = ""
+        # Accumulated {"question", "answer"} pairs for the open thread, oldest first.
+        self.clarification_history: list[dict] = []
+        # How many clarification round-trips have happened on the open thread -- passed
+        # to FeedbackInput.clarification_round so FeedbackAgent can enforce the round cap.
+        self.clarification_round: int = 0
+        # The first raw correction text of the open thread ("" if none open) -- what
+        # FeedbackAgent re-derives everything from on every round, alongside the
+        # accumulated history, rather than assuming only the latest reply matters.
+        self.original_correction_text: str = ""
+
+    def clear_pending_clarification(self) -> None:
+        self.pending_clarification_question = ""
+        self.clarification_history = []
+        self.clarification_round = 0
+        self.original_correction_text = ""
 
     def record_turn(self, query: str, answer: str) -> None:
         self.transcript.append({"query": query, "answer": answer})

@@ -390,8 +390,14 @@ async def hitl_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(result)
 
     if action == "review":
-        session.reviewed_this_result = True
-        return JSONResponse(_build_review_response(session))
+        # reviewed_this_result is only set once real SQL was actually returned to look
+        # at -- if _build_review_response falls through to its "no detail available"
+        # branch, the person never actually saw a query, so "yes" must still refuse them
+        # (see the review-required check above).
+        review = _build_review_response(session)
+        if review.get("type") == "review_sql":
+            session.reviewed_this_result = True
+        return JSONResponse(review)
 
     # action == "no"
     _log_hitl_resolution(session, session_id, HITL_REVIEW_NO if session.reviewed_this_result else HITL_NO)
@@ -484,71 +490,6 @@ async def clarify_query_endpoint(request: Request) -> JSONResponse:
         session,
     )
     return JSONResponse(result)
-
-
-# ---------------------------------------------------------------------------
-# Rule review -- maker-checker gate for 'pattern'/'universal' business rules.
-#
-# Currently off for every scope (knowledge/context.py's _SCOPES_REQUIRING_REVIEW
-# is empty -- 2026-09-11 decision, not needed for this MVP yet), so add_rule()
-# always returns 'active' and nothing reaches pending_review today. Left wired
-# up, not deleted, since the whole point is that a second reviewer can be
-# required again later without rebuilding this: knowledge_ctx.add_rule() would
-# stage a rule as pending_review, and these three endpoints are how a second
-# person sees it and approves or rejects it. Reachable only behind whatever
-# already gates this whole app (IAP in production; the shared-password gate
-# otherwise) -- no separate auth layer of its own.
-# ---------------------------------------------------------------------------
-
-@app.get("/admin/pending-rules")
-async def list_pending_rules() -> JSONResponse:
-    if _runtime is None or _runtime.knowledge_ctx is None:
-        return JSONResponse({"rules": []})
-    try:
-        rules = _runtime.knowledge_ctx.get_pending_rules()
-    except Exception as exc:
-        _log.warning("Listing pending rules failed: %s", exc)
-        return JSONResponse({"rules": [], "error": str(exc)})
-    return JSONResponse({"rules": rules})
-
-
-@app.post("/admin/pending-rules/approve")
-async def approve_pending_rule(request: Request) -> JSONResponse:
-    body = await request.json()
-    rule_id = body.get("rule_id")
-    if rule_id is None:
-        raise HTTPException(status_code=400, detail="rule_id is required")
-    if _runtime is None or _runtime.knowledge_ctx is None:
-        return JSONResponse({"status": "error", "message": "Runtime not available."}, status_code=503)
-
-    approver = _caller_identity(request)
-    with _write_lock:
-        try:
-            _runtime.knowledge_ctx.approve_rule(int(rule_id), approver_identity=approver)
-        except Exception as exc:
-            # Includes knowledge.store.MakerCheckerViolation when the approver is the
-            # same person who submitted the rule -- surfaced plainly, not swallowed.
-            return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
-    return JSONResponse({"status": "approved", "approved_by": approver})
-
-
-@app.post("/admin/pending-rules/reject")
-async def reject_pending_rule(request: Request) -> JSONResponse:
-    body = await request.json()
-    rule_id = body.get("rule_id")
-    note = body.get("note", "")
-    if rule_id is None:
-        raise HTTPException(status_code=400, detail="rule_id is required")
-    if _runtime is None or _runtime.knowledge_ctx is None:
-        return JSONResponse({"status": "error", "message": "Runtime not available."}, status_code=503)
-
-    approver = _caller_identity(request)
-    with _write_lock:
-        try:
-            _runtime.knowledge_ctx.reject_rule(int(rule_id), approver_identity=approver, note=note)
-        except Exception as exc:
-            return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
-    return JSONResponse({"status": "rejected", "rejected_by": approver})
 
 
 # ---------------------------------------------------------------------------
@@ -661,9 +602,8 @@ def _log_hitl_resolution(session, session_id: str, outcome: str) -> None:
 
     Covers all three buttons -- previously only "yes" was ever logged, so the
     audit trail silently had no record of "something looks wrong" or of
-    someone reviewing the evidence before deciding. There is no per-request
-    identifier in this ad-hoc-only architecture, so campaign_id is always
-    None; never blocks the user-facing response on a logging failure.
+    someone reviewing the evidence before deciding. Never blocks the
+    user-facing response on a logging failure.
     """
     if _runtime is None or _runtime.audit_logger is None:
         return
@@ -671,7 +611,6 @@ def _log_hitl_resolution(session, session_id: str, outcome: str) -> None:
         _runtime.audit_logger.log_hitl_resolution(
             session_id=session_id,
             user=getattr(session, "last_sender", "web-unverified"),
-            campaign_id=None,
             hitl_outcome=outcome,
         )
     except Exception:
@@ -746,32 +685,47 @@ def _process_correction_sync(
     query: str,
     session=None,
 ) -> dict:
+    """Runs every /correction submission through FeedbackAgent, whether it's a brand-new
+    correction or a reply continuing an open clarification conversation. When a
+    clarification is already open (session.pending_clarification_question is set),
+    `correction` is the person's latest reply -- it gets appended to
+    session.clarification_history and the ORIGINAL correction text plus the full history
+    are sent through again, so FeedbackAgent re-derives all four confidence gates fresh
+    rather than assuming only the just-asked gap is now resolved (see
+    agents/feedback_agent.py)."""
+    had_pending = bool(session is not None and session.pending_clarification_question)
+    original_correction = session.original_correction_text if had_pending else correction
+    history = list(session.clarification_history) if (session is not None and had_pending) else []
+    if had_pending:
+        history.append({"question": session.pending_clarification_question, "answer": correction})
+    round_num = session.clarification_round if session is not None else 0
+
     try:
         from vibe_orchestrator import _run_adhoc_feedback  # noqa: PLC0415
-        pending_contradiction_text = (
-            getattr(session, "pending_contradiction_text", "") if session is not None else ""
-        )
-        pending_contradiction_rule = (
-            getattr(session, "pending_contradiction_rule", None) if session is not None else None
-        )
         feedback_output = _run_adhoc_feedback(
             log, query, correction,
             knowledge_ctx=_runtime.knowledge_ctx,
             user_identity=getattr(session, "last_sender", "web-unverified") if session is not None else "web-unverified",
-            pending_contradiction_text=pending_contradiction_text,
-            pending_contradiction_new_rule=pending_contradiction_rule,
+            original_correction=original_correction,
+            clarification_history=history,
+            clarification_round=round_num,
         )
 
         if session is not None:
-            # Cleared by default; re-set below only if THIS turn raised a new
-            # contradiction that needs the same yes/no resolution on the next turn.
-            session.pending_contradiction_text = ""
-            session.pending_contradiction_rule = None
+            session.clear_pending_clarification()
+
+        if feedback_output is not None and feedback_output.gave_up:
+            return {
+                "type": "correction_abandoned",
+                "message": feedback_output.interpretation_summary,
+            }
 
         if feedback_output is not None and feedback_output.clarifying_question:
-            if session is not None and feedback_output.contradiction_existing_rule_text:
-                session.pending_contradiction_text = feedback_output.contradiction_existing_rule_text
-                session.pending_contradiction_rule = feedback_output.contradiction_new_rule
+            if session is not None:
+                session.original_correction_text = original_correction
+                session.clarification_history = history
+                session.clarification_round = round_num + 1
+                session.pending_clarification_question = feedback_output.clarifying_question
             return {
                 "type": "correction_clarifying",
                 "question": feedback_output.clarifying_question,
@@ -795,6 +749,8 @@ def _process_correction_sync(
         }
     except Exception as exc:
         _log.warning("Correction sync failed: %s", exc)
+        if session is not None:
+            session.clear_pending_clarification()
         return {
             "type": "correction_error",
             "message": "I had trouble processing that feedback. Could you rephrase it and try again?",
@@ -812,37 +768,36 @@ def _save_confirmed_correction_sync(session, pending: dict, session_id: str) -> 
             interpretation = pending.get("interpretation", "")
             text = pending.get("text", "")
 
-            # add_rule() would stage 'pattern'/'universal' rules as pending_review rather
-            # than applying them immediately, to stop them governing every future user's
-            # results on this submitter's word alone -- currently off for every scope
-            # (see knowledge/context.py's _SCOPES_REQUIRING_REVIEW), so any_pending is
-            # never actually true today, but the branch below stays ready for when it is.
-            any_active = False
-            any_pending = False
+            # Only a rule the person confirmed should last forever (applies_to_future)
+            # ever gets written to the permanent knowledge layer -- a rule that was
+            # clearly meant just for the current request/conversation (they said "for
+            # this one", "just for now", etc.) is never saved there at all; it only
+            # ever applies via session.active_corrections below, for this session only.
+            any_permanent = False
+            any_session_only = False
             if rules and _runtime.knowledge_ctx is not None:
                 for rule in rules:
-                    outcome = _runtime.knowledge_ctx.add_rule(rule)
-                    if outcome.get("status") == "pending_review":
-                        any_pending = True
-                    else:
-                        any_active = True
+                    if not rule.applies_to_future:
+                        any_session_only = True
+                        continue
+                    _runtime.knowledge_ctx.add_rule(rule)
+                    any_permanent = True
                 _runtime.knowledge_ctx.reload_rules()
 
             record = text + (f" [Understood: {interpretation}]" if interpretation else "")
             session.active_corrections.append(record)
             session.pending_correction = {}
 
-            if any_pending and any_active:
+            if any_permanent and any_session_only:
                 message = (
-                    "Got it -- I'll apply this for the rest of this session. Part of it is already "
-                    "saved for future sessions too; the part that would apply to every future request "
-                    "still needs a second reviewer's approval before it goes live for everyone."
+                    "Got it -- I'll apply all of this for the rest of this conversation. Part of it "
+                    "is also saved as a standing rule for every future conversation; the rest was just "
+                    "for this one, so it won't be remembered afterward."
                 )
-            elif any_pending:
+            elif any_session_only:
                 message = (
-                    "Got it -- I'll apply this for the rest of this session. Since this would change "
-                    "behavior for every future request across the whole team, it's saved as pending "
-                    "review and needs a second person to approve it before it applies more broadly."
+                    "Got it -- I'll apply this for the rest of this conversation, but won't save it as "
+                    "a standing rule since you meant it just for this request."
                 )
             else:
                 message = "Perfect, I've got it! I'll apply this from now on -- for the rest of this session and every future session."
@@ -936,8 +891,11 @@ def _process_clarification_sync(clarification: str, session_id: str, session) ->
             interpretation = feedback_output.interpretation_summary or ""
             with _write_lock:
                 if rules and _runtime.knowledge_ctx is not None:
+                    # Same applies_to_future gate as _save_confirmed_correction_sync --
+                    # a rule meant just for this request is never written permanently.
                     for rule in rules:
-                        _runtime.knowledge_ctx.add_rule(rule)
+                        if rule.applies_to_future:
+                            _runtime.knowledge_ctx.add_rule(rule)
                     _runtime.knowledge_ctx.reload_rules()
             record = clarification + (f" [Understood: {interpretation}]" if interpretation else "")
             session.active_corrections.append(record)

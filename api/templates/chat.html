@@ -970,6 +970,14 @@ body {
       return;
     }
 
+    if (data.type === 'correction_abandoned') {
+      zone.innerHTML = `
+        <div class="flywheel">
+          <div class="flywheel-title">${esc(data.message || "I wasn't able to confirm that, so nothing was saved.")}</div>
+        </div>`;
+      return;
+    }
+
     if (data.type === 'correction_error') {
       zone.innerHTML = `
         <div class="hitl" style="border-top:none; padding-top:0;">

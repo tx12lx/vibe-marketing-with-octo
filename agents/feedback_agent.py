@@ -12,22 +12,45 @@ rules_pending in FeedbackOutput, and the caller (api/web_app.py) persists a
 rule to the knowledge layer only after the submitter has explicitly confirmed
 the interpretation shown to them. That confirm-before-save step is what keeps
 a correction from silently governing every future user's results on one
-person's word alone; a second-reviewer gate on top of it (see
-knowledge/context.py's add_rule()) exists but is currently off for every
-scope (2026-09-11 decision -- not needed for this MVP yet).
+person's word alone.
+
+Nothing is ever saved on a guess. Before a correction can be confirmed, this
+agent has to be genuinely confident about four things: what's being corrected,
+whether it should last forever or just apply to the current request, who/what
+it applies to, and whether it conflicts with anything already confirmed. If
+any of those is unclear, execute() returns exactly one plain, specific
+question about that one gap instead of a rule -- the caller re-invokes this
+agent with the reply added to FeedbackInput.clarification_history, and Stage 1
+re-derives all four gates fresh from the ORIGINAL correction plus the full
+Q&A history so far, not just the one thing that was just asked. This repeats
+for as many rounds as it takes, up to _MAX_CLARIFICATION_ROUNDS -- past that,
+execute() gives up honestly (FeedbackOutput.gave_up=True) rather than loop
+forever or fall back to saving an unreviewed guess.
+
+The existing knowledge base is not treated as untouchable ground truth a new
+correction has to fight past -- it can be wrong, and often that's exactly why
+someone is correcting it. When a new correction conflicts with something
+already confirmed, this agent's job is to work that out with the person (ask,
+listen, reconsider), not to defensively protect the older rule. When the
+person confirms an override, the rule this agent returns carries
+supersedes_rule_id so the caller retires the old rule in the same step the
+new one is saved (see knowledge/context.py's add_rule()) -- the knowledge
+base should never end up holding two rules that quietly contradict each other.
 
 Pipeline stages:
-  1. Interpret        — LLM analysis grounded in the knowledge base
-  2. Clarify           — ask one targeted question when a rule is too
-                         ambiguous to save as stated
-  3. Scope             — classify each rule as pattern | universal
-  4. Structure         — package each rule as a BusinessRule for the caller
+  1. Interpret              — LLM analysis grounded in the knowledge base; also
+                               checks for contradictions against EXISTING
+                               CONFIRMED BUSINESS RULES
+  2. Confidence-gate check  — ask one targeted question when any rule in the
+                               batch is unclear on what/duration/scope/conflict;
+                               skips straight through when all four are clear
+  3. Scope                  — classify each rule as pattern | universal
+  4. Structure               — package each rule as a BusinessRule for the caller
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import tempfile
 import uuid
@@ -58,6 +81,11 @@ from core.base_agent import BaseAgent  # noqa: E402
 
 _FAILURE_LOG_PATH = _ROOT_DIR / "semantic_failure_log.json"
 
+# After this many clarification round-trips on one correction without reaching enough
+# confidence to save anything, _run_pipeline gives up honestly (FeedbackOutput.gave_up)
+# rather than keep the conversation open forever or fall back to a guess.
+_MAX_CLARIFICATION_ROUNDS = 4
+
 # ---------------------------------------------------------------------------
 # System prompt — identity anchor
 # ---------------------------------------------------------------------------
@@ -84,21 +112,38 @@ _FEEDBACK_SYSTEM = (
 _INTERPRETATION_INSTRUCTIONS = """\
 Analyse the user's correction and extract ALL distinct business rules it contains.
 
-For each rule:
-1. Identify exactly what is being corrected (in plain business language)
-2. Determine what correct behaviour should be
-3. Check it against EXISTING CONFIRMED BUSINESS RULES in the knowledge base context above --
-   if this rule would contradict or reverse one of those (e.g. an existing rule says to
-   exclude something and this one would stop excluding it, or vice versa), do NOT propose it
-   as a normal new rule. Instead set contradicts_existing_rule to true, quote the exact
-   existing rule text in contradicting_rule_text, and phrase clarifying_question as a direct
-   question asking the user to confirm they mean to override that existing rule (quoting it),
-   rather than a general ambiguity question. This check is independent of confidence -- a rule
-   can be a clear, confident interpretation of the user's words and still contradict something
-   already confirmed; both cases must be flagged.
-4. Flag any other ambiguities requiring clarification
-5. Classify scope from available signals
-6. List any terms not found in the provided knowledge base
+Before proposing anything as ready to save, you must be genuinely confident about all
+four of these for each rule -- if any one of them is unclear, do not guess: set
+needs_clarification to true and ask about that specific gap.
+  (a) WHAT is actually being corrected, in plain business language
+  (b) DURATION -- should this last forever, or does the person mean it just for the
+      current request/conversation? Read the wording carefully: phrases like "for this
+      one", "just this time", "for now", "on this occasion" mean session_only; phrases
+      like "always", "every time", "from now on", "going forward", or a flat definition
+      of a term, mean permanent. If genuinely neither kind of signal is present, that is
+      itself a reason to ask, not a reason to default to permanent.
+  (c) SCOPE -- who or what this applies to (see scope_detected guide below). "unclear"
+      is not a resolvable default here either -- it must also set needs_clarification.
+  (d) CONFLICT -- check this rule against EXISTING CONFIRMED BUSINESS RULES in the
+      knowledge base context above. If this rule would contradict or reverse one of
+      those (e.g. an existing rule says to exclude something and this one would stop
+      excluding it, or vice versa), do NOT propose it as a normal new rule. Instead set
+      contradicts_existing_rule to true, quote the exact existing rule's id number from
+      its "[id=N]" marker in contradicting_rule_id and its text in
+      contradicting_rule_text, and phrase clarifying_question as a direct question
+      asking the user to confirm they mean to override that existing rule (quoting it),
+      rather than a general ambiguity question. This check is independent of
+      confidence -- a rule can be a clear, confident interpretation of the user's words
+      and still contradict something already confirmed; both cases must be flagged.
+
+If a "=== CLARIFICATION SO FAR ===" section is present in the context above, this is not
+a brand-new correction -- it is a continuing conversation. Re-derive all four gates above
+fresh from the ORIGINAL correction plus every question-and-answer pair together, as one
+complete picture. Do not assume that only the most recently-asked gap is now resolved;
+a reply can also change what you understand about the other three gates.
+
+Also:
+5. List any terms not found in the provided knowledge base
 
 Output a single JSON object with this exact structure — no preamble, no explanation:
 {
@@ -106,7 +151,7 @@ Output a single JSON object with this exact structure — no preamble, no explan
   "rules": [
     {
       "raw_text": "<exact user words for this specific rule>",
-      "understood_as": "<plain English: what this rule requires going forward>",
+      "understood_as": "<plain English: what this rule requires>",
       "rule_type": "<one of: filter_add | exclusion_add | lookback_days | population_note | general>",
       "structured_value": {
         "sql": "<SQL fragment if rule_type is filter_add or exclusion_add, else omit>",
@@ -117,8 +162,10 @@ Output a single JSON object with this exact structure — no preamble, no explan
       },
       "confidence": <float 0.0 to 1.0>,
       "needs_clarification": <true | false>,
-      "clarifying_question": "<targeted question if needs_clarification or contradicts_existing_rule is true, else empty string>",
+      "clarifying_question": "<targeted question about whichever single gap (a/b/c/d) is unclear, if any, else empty string>",
+      "duration_scope": "<one of: permanent | session_only | unclear>",
       "contradicts_existing_rule": <true | false>,
+      "contradicting_rule_id": <integer id of the existing confirmed rule this contradicts, from its "[id=N]" marker, or null>,
       "contradicting_rule_text": "<exact text of the existing confirmed rule this contradicts, else empty string>",
       "scope_detected": "<one of: pattern | universal | unclear>",
       "scope_signals": "<words or context that led to this scope classification>",
@@ -144,7 +191,7 @@ rule_type guide:
 scope_detected guide:
   pattern   — signals: "whenever", "every time I run", "always for Y type", "when the request is about X"
   universal — signals: "always", "never", "every request", "company standard", a definition
-  unclear   — scope cannot be determined from the text alone
+  unclear   — scope cannot be determined from the text alone -- must set needs_clarification
 """
 
 
@@ -157,22 +204,16 @@ class FeedbackAgent(BaseAgent):
     """
 
     WORKER_ID = "feedback_v1"
-    HANDLED_INTENTS: frozenset[str] = frozenset()  # feedback is invoked explicitly, not intent-routed
+    CAPABILITIES = []  # feedback is invoked explicitly, not intent-routed -- inherits BaseAgent's empty default
     INPUT_SCHEMA = FeedbackInput
     OUTPUT_SCHEMA = FeedbackOutput
 
     def __init__(self) -> None:
         self._input: Optional[FeedbackInput] = None
         self._knowledge_ctx: Optional["KnowledgeContext"] = None
+        # Set by _stage2_check_confidence_gates when any rule in the batch has an
+        # unresolved confidence gate; read and cleared by _run_pipeline.
         self._pending_clarification: str = ""
-        # Set alongside _pending_clarification only when stage 2 blocked a rule for
-        # contradicting an existing confirmed rule -- lets _run_pipeline's early return
-        # tell the caller which existing rule text triggered it (see FeedbackOutput.
-        # contradiction_existing_rule_text and _resolve_pending_contradiction() below).
-        self._pending_contradiction_rule_text: str = ""
-        # The full Stage 1 rule dict that got blocked, alongside the two above -- see
-        # FeedbackOutput.contradiction_new_rule.
-        self._pending_contradiction_new_rule: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Injection points
@@ -209,52 +250,41 @@ class FeedbackAgent(BaseAgent):
     def _run_pipeline(self, inp: FeedbackInput) -> FeedbackOutput:
         self._write_failure_log_entry(inp)
 
-        # The previous turn on this session was blocked by a contradiction with an
-        # existing confirmed rule -- inp.raw_correction here is the user's answer to
-        # "do you want this to override that rule?", not a fresh correction. Resolve it
-        # directly rather than running it through stage 1 again, which would just
-        # re-extract the same rule and flag the same contradiction a second time.
-        if inp.pending_contradiction_text:
-            return self._resolve_pending_contradiction(inp)
+        if inp.clarification_round >= _MAX_CLARIFICATION_ROUNDS:
+            return self._give_up()
 
-        # Stage 1 — LLM interpretation
+        # Stage 1 — LLM interpretation. When a clarification is already in progress,
+        # _build_dynamic_context (below) feeds in the original correction plus every
+        # question-and-answer pair so far, and _INTERPRETATION_INSTRUCTIONS tells the
+        # model to re-derive all four confidence gates fresh from that whole picture --
+        # not just resolve the one gap it most recently asked about.
         interpretation = self._stage1_interpret(inp)
         if interpretation is None:
-            fallback_rule = self._make_verbatim_rule(inp)
             return FeedbackOutput(
-                rules_extracted=[fallback_rule],
-                rules_confirmed=[fallback_rule],
-                rules_pending=[],
-                new_glossary_terms=[],
-                interpretation_summary="I wasn't able to fully interpret this correction automatically. I've recorded it exactly as you wrote it and will use it going forward.",
-                success=True,
+                rules_extracted=[], rules_confirmed=[], rules_pending=[],
+                new_glossary_terms=[], interpretation_summary="", success=False,
+                clarifying_question=(
+                    "I wasn't able to understand that clearly enough to save it safely. "
+                    "Could you rephrase your correction in a sentence or two?"
+                ),
             )
 
         rules_raw: list[dict] = interpretation.get("rules", [])
         if not rules_raw:
             return self._error_output("No rules could be extracted from the correction.")
 
-        # Stage 2 — clarification: ask one targeted question when a rule is
-        # too ambiguous to save as stated (skips straight through otherwise).
-        rules_raw = self._stage2_clarify(rules_raw)
+        # Stage 2 — confidence-gate check: ask one targeted question when ANY rule in
+        # the batch is unclear on what/duration/scope/conflict (skips straight through
+        # only when every rule is clear on all four).
+        rules_raw = self._stage2_check_confidence_gates(rules_raw)
 
         if self._pending_clarification:
             question = self._pending_clarification
-            contradiction_text = self._pending_contradiction_rule_text
-            contradiction_rule = self._pending_contradiction_new_rule
             self._pending_clarification = ""
-            self._pending_contradiction_rule_text = ""
-            self._pending_contradiction_new_rule = None
             return FeedbackOutput(
-                rules_extracted=[],
-                rules_confirmed=[],
-                rules_pending=[],
-                new_glossary_terms=[],
-                interpretation_summary="",
-                success=False,
+                rules_extracted=[], rules_confirmed=[], rules_pending=[],
+                new_glossary_terms=[], interpretation_summary="", success=False,
                 clarifying_question=question,
-                contradiction_existing_rule_text=contradiction_text,
-                contradiction_new_rule=contradiction_rule,
             )
 
         # Stage 3 — scope classification
@@ -309,8 +339,8 @@ class FeedbackAgent(BaseAgent):
         parts: list[str] = ["=== CURRENT EXECUTION CONTEXT ===\n\n"]
         parts.append(
             f"Audience:          {inp.audience_label or '(none -- general question)'}\n"
-            f"Medium:            {inp.medium}\n"
-            f"Cadence:           {inp.cadence}\n\n"
+            f"Medium:            {inp.medium or '(not specified)'}\n"
+            f"Cadence:           {inp.cadence or '(not specified)'}\n\n"
         )
 
         if inp.execution_context:
@@ -325,47 +355,74 @@ class FeedbackAgent(BaseAgent):
                 parts.append(f"  - {rule.get('rule_description', str(rule))}\n")
             parts.append("\n")
 
-        parts.append(f"=== USER CORRECTION ===\n\n\"{inp.raw_correction}\"\n\n")
+        if inp.clarification_history or inp.original_correction:
+            original = inp.original_correction or inp.raw_correction
+            parts.append(f"=== ORIGINAL CORRECTION BEING CLARIFIED ===\n\n\"{original}\"\n\n")
+            if inp.clarification_history:
+                parts.append("=== CLARIFICATION SO FAR (question -> answer) ===\n\n")
+                for turn in inp.clarification_history:
+                    parts.append(f"Q: {turn.get('question', '')}\nA: {turn.get('answer', '')}\n\n")
+            parts.append(f"=== MOST RECENT REPLY ===\n\n\"{inp.raw_correction}\"\n\n")
+        else:
+            parts.append(f"=== USER CORRECTION ===\n\n\"{inp.raw_correction}\"\n\n")
         return "".join(parts)
 
     # ------------------------------------------------------------------
-    # Stage 2: Clarification
+    # Stage 2: Confidence-gate check
     #
-    # Only asks the user something when the model itself flagged low
-    # confidence -- otherwise the rule is accepted as interpreted, since there
-    # is no terminal session to run a multi-turn clarification dialog in.
+    # Checks every rule in the batch against all four gates (what/duration/
+    # scope/conflict). If ANY rule has an open gap, asks about the single
+    # highest-priority one found and marks EVERY rule in the batch skipped --
+    # a multi-rule correction never partially auto-confirms one rule while a
+    # sibling from the same sentence still has an open question.
     # ------------------------------------------------------------------
 
-    def _stage2_clarify(self, rules_raw: list[dict]) -> list[dict]:
-        updated = list(rules_raw)
-        for i, rule in enumerate(updated):
-            # A contradiction with an already-confirmed rule is forced to clarification
-            # regardless of confidence -- unlike plain ambiguity, high confidence in the
-            # interpretation says nothing about whether the user actually meant to reverse
-            # something already confirmed, so it must never silently pass through into a
-            # second, contradicting rule the way it did before this check existed.
-            if rule.get("contradicts_existing_rule") and not self._pending_clarification:
+    def _stage2_check_confidence_gates(self, rules_raw: list[dict]) -> list[dict]:
+        """Priority when multiple gaps exist across the batch: contradiction (most
+        consequential -- risks silently reversing something already confirmed) >
+        duration unclear > scope unclear > general ambiguity the model itself flagged
+        with low confidence."""
+        for rule in rules_raw:
+            if rule.get("contradicts_existing_rule"):
                 existing = rule.get("contradicting_rule_text", "")
                 question = rule.get("clarifying_question") or (
                     f"This looks like it conflicts with a rule you already confirmed: "
                     f"\"{existing}\". Do you want this new correction to replace that rule?"
                 )
                 self._pending_clarification = question
-                self._pending_contradiction_rule_text = existing
-                self._pending_contradiction_new_rule = rule
-                updated[i] = {**rule, "_skipped": True}
-                continue
+                return [{**r, "_skipped": True} for r in rules_raw]
 
-            if not rule.get("needs_clarification"):
-                continue
-            question = rule.get("clarifying_question", "")
-            confidence = rule.get("confidence", 1.0)
-            if question and confidence < 0.5 and not self._pending_clarification:
+        for rule in rules_raw:
+            if rule.get("duration_scope", "unclear") == "unclear":
+                label = rule.get("understood_as") or rule.get("raw_text", "this")
+                question = rule.get("clarifying_question") or (
+                    f'Just to make sure I remember this correctly: should "{label}" apply '
+                    "from now on, or just to your current question?"
+                )
                 self._pending_clarification = question
-                updated[i] = {**rule, "_skipped": True}
-            else:
-                updated[i] = {**rule, "needs_clarification": False}
-        return updated
+                return [{**r, "_skipped": True} for r in rules_raw]
+
+        for rule in rules_raw:
+            if rule.get("scope_detected", "unclear") == "unclear":
+                label = rule.get("understood_as") or rule.get("raw_text", "this")
+                question = rule.get("clarifying_question") or (
+                    f'Should "{label}" apply to every request, or only to a specific type '
+                    "of request?"
+                )
+                self._pending_clarification = question
+                return [{**r, "_skipped": True} for r in rules_raw]
+
+        for rule in rules_raw:
+            if (
+                rule.get("needs_clarification")
+                and rule.get("clarifying_question")
+                and rule.get("confidence", 1.0) < 0.5
+            ):
+                self._pending_clarification = rule["clarifying_question"]
+                return [{**r, "_skipped": True} for r in rules_raw]
+
+        # No open gaps anywhere in the batch -- every rule proceeds to Stage 3 as-is.
+        return [{**r, "needs_clarification": False} for r in rules_raw]
 
     # ------------------------------------------------------------------
     # Stage 3: Scope classification — AI-driven reasoning
@@ -374,6 +431,13 @@ class FeedbackAgent(BaseAgent):
     def _stage3_classify_scope(
         self, rules_raw: list[dict], inp: FeedbackInput
     ) -> list[dict]:
+        """Invariant: Stage 2 already marks every rule with a genuinely 'unclear' scope
+        as _skipped (see _stage2_check_confidence_gates), so the "still unclear, ask the
+        AI to guess" branch below is only ever reached for rules Stage 1 already scoped
+        with real confidence -- its remaining job there is just filling in
+        pattern_description. Do not remove Stage 2's scope-unclear check on the
+        assumption this method already handles it; that would silently re-open the
+        guess-instead-of-ask path this whole rework removed."""
         updated = list(rules_raw)
         for i, rule in enumerate(updated):
             if rule.get("scope_detected", "unclear") != "unclear":
@@ -425,155 +489,21 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _read_affirmation(reply: str) -> Optional[bool]:
-        """Deterministically read a plain yes/no opening (case-insensitive, allowing simple
-        leading punctuation/quotes). Returns None when the reply doesn't clearly start
-        either way, so the caller can fall back to an AI read for genuinely unclear text."""
-        text = reply.strip().lstrip("\"'").lower()
-        if re.match(r"^yes\b", text) or re.match(r"^yep\b", text) or re.match(r"^yeah\b", text):
-            return True
-        if re.match(r"^no\b", text) or re.match(r"^nope\b", text):
-            return False
-        return None
-
-    def _resolve_pending_contradiction(self, inp: FeedbackInput) -> FeedbackOutput:
-        """Resolve the user's answer to "do you want this to override that existing rule?"
-        instead of re-running the full interpretation pipeline on it -- which would just
-        re-extract the same correction and flag the same contradiction again, trapping the
-        user in a loop.
-
-        Live testing found real replies rarely open with a literal "yes"/"no" -- a user is
-        just as likely to restate their intent ("the exclusion is not a default", "remove it
-        entirely") as to answer the question directly. A prompt that only recognizes literal
-        yes/no wording misread "the exclusion is not a default" as declining the override --
-        the exact opposite of what the user meant, and a silent wrong answer is worse than
-        asking again: getting this wrong means a rule keeps applying (or stops applying)
-        opposite to what the user actually asked for, with no visible sign anything went
-        wrong. So the deterministic yes/no opening is still read first (cheap, unambiguous
-        cases need no model call at all), but anything else goes to a three-way read --
-        override / keep / genuinely unclear -- and "unclear" asks again in plainer words
-        instead of silently defaulting to "keep."
-        """
-        existing_text = inp.pending_contradiction_text
-        decision = self._read_affirmation(inp.raw_correction)
-        if decision is None:
-            decision = self._ask_ai_override_decision(existing_text, inp.raw_correction)
-
-        if decision is None:
-            return FeedbackOutput(
-                rules_extracted=[], rules_confirmed=[], rules_pending=[],
-                new_glossary_terms=[],
-                interpretation_summary="",
-                success=False,
-                clarifying_question=(
-                    f'Sorry, I want to make sure I get this right before changing anything. '
-                    f'You already have this rule saved: "{existing_text}". Should I keep '
-                    f'applying it as-is, or stop applying it based on what you just told me?'
-                ),
-                contradiction_existing_rule_text=existing_text,
-                contradiction_new_rule=inp.pending_contradiction_new_rule,
-            )
-
-        if not decision:
-            return FeedbackOutput(
-                rules_extracted=[], rules_confirmed=[], rules_pending=[],
-                new_glossary_terms=[],
-                interpretation_summary="Okay, I'll leave the existing rule as it is -- no changes made.",
-                success=True,
-            )
-
-        # Build the rule from the ORIGINAL correction's own clean interpretation (Stage 1's
-        # understood_as, structured_value, scope, etc. -- everything _dict_to_rule already
-        # knows how to read), not from the user's short confirming reply -- that reply
-        # confirms intent, it isn't itself the substance of what should be saved.
-        pending_rule_dict = inp.pending_contradiction_new_rule
-        rule = (
-            self._dict_to_rule(pending_rule_dict, inp)
-            if pending_rule_dict
-            else self._make_verbatim_rule(inp)
-        )
+    def _give_up() -> FeedbackOutput:
+        """The clarification round cap (_MAX_CLARIFICATION_ROUNDS) was reached without
+        ever getting confident enough to save something safely. Stop the conversation,
+        say so plainly, and save nothing -- never fall back to a guess, and never loop
+        forever. The caller (api/web_app.py) clears its clarification session state on
+        this same turn, so a fresh correction later starts clean."""
         return FeedbackOutput(
-            rules_extracted=[rule], rules_confirmed=[rule], rules_pending=[],
+            rules_extracted=[], rules_confirmed=[], rules_pending=[],
             new_glossary_terms=[],
             interpretation_summary=(
-                f"{rule.rule_description} (confirmed to override an earlier rule: "
-                f'"{existing_text}")'
+                "I still wasn't able to confirm exactly what should be saved after a few "
+                "tries, so I haven't remembered anything from this conversation. Feel free "
+                "to try again whenever you'd like, maybe with a bit more detail."
             ),
-            success=True,
-        )
-
-    @staticmethod
-    def _ask_ai_override_decision(existing_text: str, reply: str) -> Optional[bool]:
-        """Read a reply to the override question as OVERRIDE / KEEP / genuinely UNCLEAR.
-
-        Explicitly told to recognize restated intent, not just literal yes/no -- this is
-        what the plain yes/no version got wrong live (see _resolve_pending_contradiction).
-        Returns True (override), False (keep), or None (ask again) -- never guesses when
-        the model itself isn't sure, since a wrong guess here silently does the opposite of
-        what the user asked for.
-        """
-        check_prompt = (
-            f'A user previously confirmed this rule: "{existing_text}"\n\n'
-            "They then submitted a correction that conflicts with it, and were asked whether "
-            "the new correction should replace/override that existing rule.\n\n"
-            f'Their reply: "{reply}"\n\n'
-            "Read their reply carefully -- they may not say \"yes\" or \"no\" directly; they "
-            "may restate their own intent in different words instead (for example, saying the "
-            "existing rule \"is not a default\", should be \"removed\", or \"doesn't apply\" all "
-            "clearly mean they want to OVERRIDE it, even without the word \"yes\"). Decide:\n"
-            "  OVERRIDE -- they want the existing rule replaced, removed, or no longer applied by default\n"
-            "  KEEP     -- they want the existing rule to stay exactly as it is\n"
-            "  UNCLEAR  -- you genuinely cannot tell either way from their reply\n\n"
-            "Answer with exactly one word: OVERRIDE, KEEP, or UNCLEAR."
-        )
-        try:
-            # thinking_budget=0: this model spends part of max_tokens on hidden
-            # "thinking" tokens by default -- confirmed live that a small max_tokens (10)
-            # with thinking left on silently consumed the whole budget before ever writing
-            # the visible answer, so ask_ai returned "" every time and this always fell
-            # through to None. No deliberation is needed for a single-word classification,
-            # so thinking is disabled outright rather than just raising max_tokens, which
-            # would only mask the same risk at a higher token count.
-            raw = ask_ai(
-                check_prompt, system=_FEEDBACK_SYSTEM, temperature=0,
-                max_tokens=20, thinking_budget=0,
-            ).strip().upper()
-        except Exception:
-            return None
-        if raw.startswith("OVERRIDE"):
-            return True
-        if raw.startswith("KEEP"):
-            return False
-        return None
-
-    def _make_verbatim_rule(self, inp: FeedbackInput) -> BusinessRule:
-        """Create a BusinessRule directly from the raw correction text.
-
-        Used as a fallback when LLM interpretation (Stage 1) is unavailable.
-        Every request this tool handles is ad hoc, so this always defaults to
-        'universal' scope.
-        """
-        priority_map = {"pattern": 2, "universal": 1}
-        return BusinessRule(
-            rule_id=str(uuid.uuid4()),
-            created_at=datetime.now(tz=timezone.utc).isoformat(),
-            verified_by=inp.user_identity or "unknown",
-            raw_correction=inp.raw_correction,
-            rule_description=inp.raw_correction,
-            rule_type="general",
-            structured_value={
-                "note": inp.raw_correction,
-                "description": "Verbatim user correction from HITL NO response",
-            },
-            scope="universal",
-            medium=inp.medium,
-            cadence=inp.cadence,
-            priority=priority_map["universal"],
-            applies_to_future=True,
-            overrides_acc_summary=False,
-            clarification_rounds=0,
-            source="hitl_feedback_verbatim",
-            confidence=0.7,
+            success=False, gave_up=True,
         )
 
     def _dict_to_rule(self, rule_dict: dict, inp: FeedbackInput) -> BusinessRule:
@@ -594,9 +524,9 @@ class FeedbackAgent(BaseAgent):
             pattern_match_logic=rule_dict.get("scope_signals"),
             confidence=rule_dict.get("confidence", 1.0),
             source="hitl_feedback",
-            clarification_rounds=rule_dict.get("clarification_rounds", 0),
-            applies_to_future=True,
-            overrides_acc_summary=False,
+            clarification_rounds=inp.clarification_round,
+            applies_to_future=(rule_dict.get("duration_scope", "permanent") == "permanent"),
+            supersedes_rule_id=rule_dict.get("contradicting_rule_id"),
             priority=priority_map.get(scope, 1),
         )
 

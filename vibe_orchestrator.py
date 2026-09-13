@@ -3,20 +3,23 @@ vibe_orchestrator.py — Vibe Marketing with OCTO
 Central decoupled router.
 
 Design principle: this file is the only wiring layer. It knows which agents
-exist and which request maps to which agent method — nothing else. Agent cores
-are fully independent and test in isolation.
+exist -- nothing else. It does NOT know what any specific agent is good for or
+which request maps to which agent; that decision belongs to core.router.
+IntentRouter, reasoning over each agent's own self-declared CAPABILITIES (see
+pydantic_schemas.AgentCapability, core/base_agent.py). Agent cores are fully
+independent and test in isolation.
 
-Adding a new agent or capability:
+Adding a new agent or capability now requires ZERO changes to this file:
   1. Drop a new agents/<name>.py file defining a BaseAgent subclass with
-     WORKER_ID and HANDLED_INTENTS set (see _discover_agents() below) --
-     it is auto-discovered and instantiated at startup with zero changes
-     needed to this file or to any existing agent.
-  2. If the new capability needs a new intent type handled, add one case to
-     route_by_intent() below -- that is the only place request dispatch
-     happens, and it stays a deliberate, explicit case per intent rather than
-     a generic lookup, since agents don't share a uniform call signature (see
-     _discover_agents()'s docstring for why) and some intents (sizing_request)
-     are a real multi-agent handoff, not a single agent call.
+     WORKER_ID and CAPABILITIES set (see _discover_agents() below) -- it is
+     auto-discovered and instantiated at startup.
+  2. Implement handle(intent_type, query, context) on it (see BaseAgent.handle()'s
+     docstring) -- this is the uniform entrypoint route_by_intent() below calls
+     once IntentRouter has decided this agent should handle the request. An
+     agent invoked explicitly rather than routed (e.g. FeedbackAgent) can skip
+     this and keep CAPABILITIES empty.
+That's it -- IntentRouter's classification menu and route_by_intent()'s dispatch
+are both built from the registry, not from anything hardcoded per-agent here.
 """
 from __future__ import annotations
 
@@ -43,6 +46,8 @@ from agents.nexus_agent import NexusAgent  # noqa: E402
 from agents.quant_agent import QuantAgent  # noqa: E402
 from agents.feedback_agent import FeedbackAgent  # noqa: E402
 from pydantic_schemas import FeedbackInput, FeedbackOutput, IntentClassification, QuantAuditLog  # noqa: E402
+from core.base_agent import BaseAgent  # noqa: E402
+from core.router import IntentRouter  # noqa: E402
 from core.thought_display import ThoughtDisplay  # noqa: E402
 from core.audit_logger import AuditLogger  # noqa: E402
 
@@ -52,34 +57,20 @@ from core.audit_logger import AuditLogger  # noqa: E402
 # Adding a new agent requires only one new file in agents/.
 # ---------------------------------------------------------------------------
 
-def _discover_agents(agents_dir: Path) -> tuple[dict[str, type], dict[str, type]]:
-    """Scan agents/ for BaseAgent subclasses and build registries.
-
-    Returns:
-      agent_registry   — {worker_id: AgentClass} for direct instantiation.
-      intent_routing   — {intent_type: AgentClass}, informational only (used for
-                         audit/introspection, e.g. listing what handles what) --
-                         NOT a dispatch table route_by_intent() below can call
-                         generically. Nexus and Quant each expose their own
-                         specific methods (classify_intent, build_sizing_request_
-                         from_nl, direct_count, answer_general_question) rather
-                         than a uniform execute(), and sizing_request is a real
-                         two-agent handoff (Nexus builds the request, Quant runs
-                         it) that no single {intent: one_agent} entry could
-                         express anyway. Making a new agent's intent route
-                         automatically would need a uniform agent-execution
-                         interface first -- a bigger, separate change, not
-                         something this registry can paper over safely.
-    """
+def _discover_agents(agents_dir: Path) -> dict[str, type]:
+    """Scan agents/ for BaseAgent subclasses and build {worker_id_stem: AgentClass}
+    for direct instantiation. Which intent(s) each agent handles is read straight
+    off its own CAPABILITIES at dispatch time (see _agent_owning_intent() and
+    core/router.py) -- this function only needs to find the agent classes
+    themselves, not pre-compute anything about what they're good for."""
     import importlib
     import inspect
     from core.base_agent import BaseAgent as _BaseAgent
 
     agent_registry: dict[str, type] = {}
-    intent_routing: dict[str, type] = {}
 
     if not agents_dir.exists():
-        return agent_registry, intent_routing
+        return agent_registry
 
     for fpath in sorted(agents_dir.glob("*.py")):
         if fpath.name.startswith("_"):
@@ -97,20 +88,14 @@ def _discover_agents(agents_dir: Path) -> tuple[dict[str, type], dict[str, type]
                 and hasattr(obj, "WORKER_ID")
                 and obj.__module__ == module_name
             ):
-                worker_id = obj.WORKER_ID
                 # Use the worker_id stem (strip version suffix) as registry key
-                key = worker_id.split("_")[0]
-                agent_registry[key] = obj
-                for intent in (obj.HANDLED_INTENTS or frozenset()):
-                    # Prefer higher-priority (longer WORKER_ID) if two agents handle the same intent
-                    if intent not in intent_routing:
-                        intent_routing[intent] = obj
+                agent_registry[obj.WORKER_ID.split("_")[0]] = obj
 
-    return agent_registry, intent_routing
+    return agent_registry
 
 
 _AGENTS_DIR = _ROOT / "agents"
-_AGENT_REGISTRY, _ = _discover_agents(_AGENTS_DIR)
+_AGENT_REGISTRY = _discover_agents(_AGENTS_DIR)
 
 # Verify all required agents were discovered; fall back to explicit import if not.
 _REQUIRED = {"nexus": NexusAgent, "quant": QuantAgent, "feedback": FeedbackAgent}
@@ -121,16 +106,24 @@ for _k, _cls in _REQUIRED.items():
 
 
 # ---------------------------------------------------------------------------
-# Audit helpers
+# Capability lookup — which registered agent owns a given intent type, read
+# live off each agent's own CAPABILITIES rather than a hand-maintained map.
 # ---------------------------------------------------------------------------
 
-def _agent_called_for_intent(intent_type: str) -> str:
-    """Map intent type to the agent WORKER_ID that handles it."""
-    _map = {
-        "sizing_request": "quant_v1",
-        "general_question": "nexus_v1",
-    }
-    return _map.get(intent_type, "nexus_v1")
+def _agent_owning_intent(rt: "VibeRuntime", intent_type: str) -> Optional[BaseAgent]:
+    for agent in rt.agents.values():
+        for cap in getattr(agent, "CAPABILITIES", None) or []:
+            if cap.intent_type == intent_type:
+                return agent
+    return None
+
+
+def _agent_called_for_intent(rt: "VibeRuntime", intent_type: str) -> str:
+    """WORKER_ID of whichever agent owns this intent, for audit logging -- a
+    router_v1 fallback covers the (rare) case where routing itself produced an
+    intent type nothing is actually registered to handle."""
+    agent = _agent_owning_intent(rt, intent_type)
+    return agent.WORKER_ID if agent is not None else "router_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -138,48 +131,45 @@ def _agent_called_for_intent(intent_type: str) -> str:
 # ---------------------------------------------------------------------------
 
 def route_by_intent(
-    nexus: NexusAgent,
-    quant: QuantAgent,
+    rt: "VibeRuntime",
     intent: IntentClassification,
     query: str,
 ) -> tuple[Optional[QuantAuditLog], Optional[str], Optional[str]]:
-    """Route a classified request to the agent that can act on it.
+    """Route a classified request to whichever registered agent's CAPABILITIES
+    claim this intent type, via its uniform handle() entrypoint -- a real table
+    lookup, not a hardcoded per-intent branch (see _agent_owning_intent()).
 
-    Intent routing:
-      sizing_request    -> Nexus translates the request into filters directly
-                            from the knowledge base, Quant executes it.
-      general_question  -> Nexus answers directly from the knowledge base,
-                            no query execution.
-
-    Nexus and Quant already have the knowledge layer bound (see
-    build_runtime()'s set_knowledge_context() calls), so nothing needs to be
-    passed through here beyond the query itself.
+    A "handoff" result (e.g. Nexus translating a sizing request, then handing
+    the built AudienceSizingRequest to Quant to actually run) is followed
+    exactly once: whichever agent is registered under handoff_to gets called
+    next with the handoff payload in its context. This is a genuine, explicit
+    two-agent pipeline step, not something a plain {intent: one_agent} lookup
+    could express on its own -- see NexusAgent.handle()'s sizing_request case.
 
     Returns (log, answer_text, stuck_reason). Exactly one of log/answer_text is
     populated on success; both are None when nothing could be produced, and
-    stuck_reason then carries the real failure reason (a technical error from
-    Nexus's request-building step or from Quant) so the caller can tell the
-    user what actually went wrong instead of falling back to a guess --
+    stuck_reason then carries the real failure reason so the caller can tell
+    the user what actually went wrong instead of falling back to a guess --
     see generate_stuck_explanation().
     """
     it = intent.intent_type
+    owner = _agent_owning_intent(rt, it)
+    if owner is None:
+        ThoughtDisplay.error(f"Unrecognised intent type '{it}'")
+        return None, None, f"Unrecognised intent type '{it}'"
 
-    if it == "sizing_request":
-        request, build_error = nexus.build_sizing_request_from_nl(query)
-        if request is None:
-            return None, None, build_error
-        result = quant.direct_count(request)
-        if isinstance(result, QuantAuditLog):
-            return result, None, None
-        ThoughtDisplay.translate_nexus_error(result.error_summary)
-        return None, None, result.error_summary
+    result = owner.handle(it, query)
+    if result.kind == "handoff":
+        next_agent = rt.agents.get(result.handoff_to) if result.handoff_to else None
+        if next_agent is None:
+            return None, None, f"No agent registered for handoff target '{result.handoff_to}'."
+        result = next_agent.handle(it, query, context={"prebuilt_request": result.handoff_payload})
 
-    if it == "general_question":
-        answer = nexus.answer_general_question(query)
-        return None, (answer or None), None
-
-    ThoughtDisplay.error(f"Unrecognised intent type '{it}'")
-    return None, None, f"Unrecognised intent type '{it}'"
+    if result.kind == "log":
+        return result.log, None, None
+    if result.kind == "answer":
+        return None, (result.answer_text or None), None
+    return None, None, result.stuck_reason
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +182,9 @@ def _run_adhoc_feedback(
     correction: str,
     knowledge_ctx: Optional["KnowledgeContext"] = None,
     user_identity: str = "unknown",
-    pending_contradiction_text: str = "",
-    pending_contradiction_new_rule: Optional[dict] = None,
+    original_correction: str = "",
+    clarification_history: Optional[list[dict]] = None,
+    clarification_round: int = 0,
 ) -> Optional[FeedbackOutput]:
     """Invoke FeedbackAgent to interpret a correction on a sizing result or a
     general-question answer.
@@ -213,8 +204,8 @@ def _run_adhoc_feedback(
         feedback_input = FeedbackInput(
             raw_correction=correction,
             audience_label=log.request.audience_label if log is not None else None,
-            medium=log.request.medium if log is not None else "",
-            cadence=log.request.cadence if log is not None else "",
+            medium=log.request.medium if log is not None else None,
+            cadence=log.request.cadence if log is not None else None,
             has_prior_result=log is not None,
             execution_context={
                 "query": query,
@@ -224,8 +215,9 @@ def _run_adhoc_feedback(
             existing_rules=[],
             raw_input_prompt=query,
             user_identity=user_identity,
-            pending_contradiction_text=pending_contradiction_text,
-            pending_contradiction_new_rule=pending_contradiction_new_rule,
+            original_correction=original_correction,
+            clarification_history=clarification_history or [],
+            clarification_round=clarification_round,
         )
         agent = FeedbackAgent()
         if knowledge_ctx is not None:
@@ -242,22 +234,41 @@ def _run_adhoc_feedback(
 # ---------------------------------------------------------------------------
 
 class VibeRuntime:
-    """All shared objects initialized once at startup, shared across all requests."""
+    """All shared objects initialized once at startup, shared across all requests.
+
+    Agents are held generically in `agents` (registry-key -> instance), so a
+    brand-new agent type is fully wired up here with zero code changes to this
+    class or to build_runtime() below -- it just needs to exist in
+    _AGENT_REGISTRY (see _discover_agents()). `nexus`/`quant` stay available as
+    convenience properties on top of that same dict, since every existing call
+    site (api/web_app.py, this file's own route_by_intent()) already refers to
+    them by name -- this is purely additive, not a breaking rename.
+    """
 
     def __init__(
         self,
-        nexus: NexusAgent,
-        quant: QuantAgent,
+        agents: dict[str, BaseAgent],
         knowledge_ctx: "KnowledgeContext",
         audit_logger: Optional[AuditLogger] = None,
     ) -> None:
-        self.nexus = nexus
-        self.quant = quant
+        self.agents = agents
         # The knowledge layer is the single front door for both reading
         # confirmed knowledge and persisting confirmed HITL feedback -- see
         # knowledge/context.py's KnowledgeContext.
         self.knowledge_ctx = knowledge_ctx
         self.audit_logger = audit_logger
+        # Stateless (just holds a reference to `agents`) -- built once here rather
+        # than per-request. Reasons over whichever agents are actually registered,
+        # so a newly-added agent becomes routable with no change here.
+        self.router = IntentRouter(agents)
+
+    @property
+    def nexus(self) -> NexusAgent:
+        return self.agents["nexus"]
+
+    @property
+    def quant(self) -> QuantAgent:
+        return self.agents["quant"]
 
 
 class RequestResult:
@@ -287,26 +298,25 @@ def build_runtime() -> VibeRuntime:
 
     One KnowledgeContext instance is the single front door for both reading
     the knowledge layer (schema, glossary, business rules) and persisting
-    confirmed HITL feedback -- bound into Nexus and Quant via their existing
-    set_knowledge_context() setters.
+    confirmed HITL feedback -- bound into every agent that exposes
+    set_knowledge_context() (all three do today). Every class in
+    _AGENT_REGISTRY is instantiated here, generically -- a new agent type
+    needs nothing added to this function to be wired up at startup.
     """
     from knowledge.context import KnowledgeContext  # noqa: PLC0415
 
-    nexus: NexusAgent = _AGENT_REGISTRY["nexus"]()
-    quant: QuantAgent = _AGENT_REGISTRY["quant"]()
-
     knowledge_ctx = KnowledgeContext()
-    nexus.set_knowledge_context(knowledge_ctx)
-    quant.set_knowledge_context(knowledge_ctx)
+    agents: dict[str, BaseAgent] = {}
+    for key, cls in _AGENT_REGISTRY.items():
+        instance = cls()
+        set_ctx = getattr(instance, "set_knowledge_context", None)
+        if set_ctx is not None:
+            set_ctx(knowledge_ctx)
+        agents[key] = instance
 
     audit_logger = AuditLogger(logs_dir=_ROOT / "logs")
 
-    return VibeRuntime(
-        nexus=nexus,
-        quant=quant,
-        knowledge_ctx=knowledge_ctx,
-        audit_logger=audit_logger,
-    )
+    return VibeRuntime(agents=agents, knowledge_ctx=knowledge_ctx, audit_logger=audit_logger)
 
 
 def generate_stuck_explanation(
@@ -369,11 +379,20 @@ def process_core_request(
             ctx = rt.knowledge_ctx.get_dynamic_context(
                 query=query, session_corrections=session_corrections, transcript=transcript,
             )
-        rt.nexus.set_session_context(ctx)
-        rt.quant.set_session_context(ctx)
+        for agent in rt.agents.values():
+            agent.set_session_context(ctx)
 
-        intent = rt.nexus.classify_intent(query)
-        log, answer_text, stuck_reason = route_by_intent(rt.nexus, rt.quant, intent, query)
+        intent = rt.router.classify(query)
+        if intent.needs_clarification and intent.clarifying_question:
+            # The router itself isn't confident which specialist fits -- ask, don't
+            # guess. Forced to "general_question" shape and surfaced as a plain
+            # answer (not routed anywhere) so the existing rendering path shows it
+            # directly, rather than falling through to the (separate, AI-driven)
+            # stuck-explanation path and generating a second, redundant question.
+            intent = intent.model_copy(update={"intent_type": "general_question"})
+            log, answer_text, stuck_reason = None, intent.clarifying_question, None
+        else:
+            log, answer_text, stuck_reason = route_by_intent(rt, intent, query)
         result = RequestResult(intent=intent, log=log, answer_text=answer_text, stuck_reason=stuck_reason)
 
         if rt.audit_logger is not None:
@@ -382,11 +401,8 @@ def process_core_request(
                     session_id=session_id or "api",
                     user=user,
                     intent_type=intent.intent_type,
-                    # No per-request identifier exists in this ad-hoc-only architecture --
-                    # session_id (logged alongside this) is the closest thing to one.
-                    campaign_id=None,
                     sql=log.sql if log else None,
-                    agent_called=_agent_called_for_intent(intent.intent_type),
+                    agent_called=_agent_called_for_intent(rt, intent.intent_type),
                     hitl_outcome=None,
                     duration_ms=int((time.perf_counter() - _start) * 1000),
                 )

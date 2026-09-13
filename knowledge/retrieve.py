@@ -23,11 +23,15 @@ def get_active_rules_text(
     scope: Optional[str] = None,
     table_name: Optional[str] = None,
 ) -> str:
+    """Each line carries the rule's own ID (e.g. "[id=8]") ahead of its scope and text --
+    this is what lets FeedbackAgent's contradiction check point at exactly which existing
+    rule a new correction is meant to replace, so it can be retired by ID rather than by
+    matching free text (see agents/feedback_agent.py, knowledge/context.py's add_rule())."""
     with connect() as conn:
         rules = get_active_rules(conn, scope=scope, table_name=table_name)
     if not rules:
         return "(no confirmed business rules yet)"
-    return "\n".join(f"- [{r['scope']}] {r['rule_text']}" for r in rules)
+    return "\n".join(f"- [id={r['id']}] [{r['scope']}] {r['rule_text']}" for r in rules)
 
 
 def get_table_schema_text(table_names: Optional[list[str]] = None) -> str:

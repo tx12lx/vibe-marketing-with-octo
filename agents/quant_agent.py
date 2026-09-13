@@ -24,6 +24,7 @@ from typing import Optional, Union
 from dotenv import load_dotenv
 from core.resilience import resilient_bq_query
 from core.ai_client import ask_ai
+from core.composer import compose
 
 _log = logging.getLogger(__name__)
 
@@ -37,6 +38,8 @@ for _p in [str(_ROOT_DIR)]:
 load_dotenv(_ROOT_DIR / ".env")
 
 from pydantic_schemas import (
+    AgentCapability,
+    AgentResult,
     AudienceSizingRequest,
     NexusErrorPayload,
     QuantAuditLog,
@@ -301,7 +304,12 @@ Rules — non-negotiable:
 
 class QuantAgent(BaseAgent):
     WORKER_ID = "quant_v1"
-    HANDLED_INTENTS: frozenset[str] = frozenset({"sizing_request"})
+    # Deliberately empty, not a "sizing_request" entry -- Quant is never the router's
+    # direct pick; it's only ever reached via NexusAgent's handoff (see
+    # NexusAgent.CAPABILITIES and NexusAgent.handle()'s sizing_request case). Declaring
+    # a capability here too would give the router two different descriptions of the
+    # same intent type to choose between, which is confusing, not helpful.
+    CAPABILITIES = []
     INPUT_SCHEMA = AudienceSizingRequest
     OUTPUT_SCHEMA = QuantAuditLog
 
@@ -346,6 +354,23 @@ class QuantAgent(BaseAgent):
             "QuantAgent does not use the subscribe/execute interface. Call direct_count() directly."
         )
 
+    def handle(self, intent_type: str, query: str, context: Optional[dict] = None) -> AgentResult:
+        """Uniform entrypoint the router (via vibe_orchestrator.route_by_intent) calls after
+        NexusAgent hands off a built request -- Quant is only ever reached this way, never
+        directly from a raw query string, since sizing genuinely needs Nexus's translation
+        step first."""
+        request = (context or {}).get("prebuilt_request")
+        if request is None:
+            return AgentResult(
+                kind="stuck",
+                stuck_reason="QuantAgent.handle() was called without a prebuilt sizing request.",
+            )
+        result = self.direct_count(request)
+        if isinstance(result, QuantAuditLog):
+            return AgentResult(kind="log", log=result)
+        ThoughtDisplay.translate_nexus_error(result.error_summary)
+        return AgentResult(kind="stuck", stuck_reason=result.error_summary)
+
     def set_session_context(self, context: str) -> None:
         """Receive dynamic glossary/catalog context from the orchestrator for prompt injection.
 
@@ -387,12 +412,19 @@ class QuantAgent(BaseAgent):
             if opt_ctx and applied_rules is None:
                 applied_rules = [l.strip() for l in opt_ctx.splitlines() if l.strip()][:3]
 
+            plan_filters = [f for f in (request.filters or []) if f][:4]
+            narration = self._narrate_execution_plan(
+                target_population=request.target_population or "unspecified",
+                table_label=table_label,
+                filters=plan_filters,
+            )
             ThoughtDisplay.execution_plan(
                 target_population=request.target_population or "unspecified",
                 table_label=table_label,
-                filters=[f for f in (request.filters or []) if f][:4],
+                filters=plan_filters,
                 skipped_steps=skipped_steps,
                 applied_rules=applied_rules,
+                narration=narration or None,
             )
             ThoughtDisplay.progress("Running the waterfall query now...")
             raw_rows = None
@@ -612,6 +644,27 @@ class QuantAgent(BaseAgent):
         text = ask_ai(prompt, system=system, temperature=0, max_tokens=4096)
         return _clean_sql(text)
 
+    def _narrate_execution_plan(
+        self, target_population: str, table_label: str, filters: Optional[list[str]]
+    ) -> str:
+        """Ask the AI for a short, warm, plain-English line describing the plan
+        about to run, tailored to this specific request. Never raises -- an
+        empty string tells the caller to fall back to its own default line."""
+        filters_text = "; ".join(filters) if filters else "no extra filters"
+        prompt = (
+            f'A person asked for this audience: "{target_population}"\n\n'
+            f"Behind the scenes, the data source being used is: {table_label}, "
+            f"with these filters being applied: {filters_text}.\n\n"
+            "Write one short sentence (max ~20 words), in warm plain English, telling "
+            "them you've found the right data and are running the numbers now. "
+            "Do not mention table names, column names, filter syntax, SQL, or any "
+            "other technical term -- describe what's being targeted in everyday language only."
+        )
+        try:
+            return ask_ai(prompt, temperature=0.4, max_tokens=100).strip()
+        except Exception:
+            return ""
+
     def _execute_query(self, sql: str, project: str) -> list[dict]:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -694,12 +747,18 @@ def _final_audience_count(waterfall: list[WaterfallLayer]) -> int:
 
 
 def _optimization_note(waterfall: list[WaterfallLayer]) -> Optional[str]:
+    """Computes the real, concrete facts about any extreme drops in the waterfall
+    (which layer, by how much, the combined scrub rate) deterministically -- that
+    math is the trustworthy part and stays exact. The sentence(s) describing those
+    facts to the person are composed by the AI fresh each time (see core/composer.py),
+    grounded strictly in the numbers computed here, rather than a fixed sentence that
+    assumes every result is destined for an outbound campaign send."""
     if len(waterfall) < 2:
         return None
 
     base = waterfall[0].audience_count
     final = waterfall[-1].audience_count
-    notes: list[str] = []
+    drop_facts: list[str] = []
 
     for i in range(1, len(waterfall)):
         prev = waterfall[i - 1].audience_count
@@ -707,24 +766,24 @@ def _optimization_note(waterfall: list[WaterfallLayer]) -> Optional[str]:
         if prev > 0:
             drop = (prev - curr) / prev
             if drop > _EXTREME_DROP:
-                notes.append(
-                    f"'{waterfall[i].layer_name}' removes {drop:.0%} of upstream audience "
-                    f"({prev:,} -> {curr:,}) — verify this filter is correctly calibrated."
+                drop_facts.append(
+                    f"the '{waterfall[i].layer_name}' step removed {drop:.0%} of the "
+                    f"audience at that point ({prev:,} -> {curr:,})"
                 )
 
-    if base > 0:
-        total_scrub = (base - final) / base
-        if total_scrub > _HIGH_SCRUB_RATE:
-            notes.append(
-                f"Total scrub rate is {total_scrub:.0%} ({base:,} -> {final:,}). "
-                "The combined filter stack is highly restrictive — consider relaxing "
-                "criteria or phasing the campaign across multiple sends."
-            )
+    total_scrub = (base - final) / base if base > 0 else 0.0
+    high_scrub = total_scrub > _HIGH_SCRUB_RATE
 
-    if not notes:
+    if not drop_facts and not high_scrub:
         return "Waterfall clean — no extreme audience drops detected across filter layers."
 
-    return "Optimization Note: " + " | ".join(notes)
+    facts = {
+        "base_count": f"{base:,}",
+        "final_count": f"{final:,}",
+        "total_scrub_rate": f"{total_scrub:.0%}",
+        "steps_with_extreme_drops": "; ".join(drop_facts) if drop_facts else "none individually, but the combined effect is large",
+    }
+    return compose("optimization_note", facts, max_sentences=2)
 
 
 # Matches the first line that is recognisably SQL (WITH/SELECT or a SQL comment).

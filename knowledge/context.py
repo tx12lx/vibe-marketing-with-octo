@@ -21,26 +21,17 @@ from knowledge import git_store, retrieve
 from knowledge.store import (
     add_business_rule,
     add_glossary_term,
-    approve_rule,
     connect,
     get_active_rules,
     get_all_business_rules,
     get_feedback_events,
     get_glossary_terms,
-    get_pending_rules,
     hydrate_business_rules,
     hydrate_feedback_events,
     hydrate_glossary_terms,
     record_feedback_event,
-    reject_rule,
+    retire_business_rule,
 )
-
-# No scope currently requires a second reviewer's approval before taking
-# effect -- corrections apply immediately (2026-09-11 decision: single-
-# reviewer friction wasn't needed for this MVP). approve_rule()/reject_rule()
-# and the /admin/pending-rules endpoints stay in place for when this changes;
-# they simply see nothing queued while this set is empty.
-_SCOPES_REQUIRING_REVIEW: frozenset[str] = frozenset()
 
 _log = logging.getLogger(__name__)
 
@@ -149,22 +140,29 @@ class KnowledgeContext:
     # -- write side, used by api/web_app.py's HITL/correction persistence ----
 
     def add_rule(self, rule) -> dict:
-        """Save a rule extracted from a HITL correction.
+        """Save a rule extracted from a HITL correction. Always goes straight to
+        active -- there is no second-reviewer waiting pile anymore (removed: it
+        was how an early correction sat stuck and forgotten for months, since
+        nothing ever notified anyone it was waiting). Someone correcting this
+        tool already understands SQL, the confirmed business rules, and the
+        campaign data well enough to be trusted immediately; what keeps a
+        correction from going in half-baked is the conversation-until-both-sides-
+        understand-it loop in agents/feedback_agent.py, not a second rubber stamp.
 
-        Returns {"rule_id": int, "status": "active" | "pending_review"} so the
-        caller can tell the submitter which happened -- currently always
-        "active" since no scope requires review right now (see
-        _SCOPES_REQUIRING_REVIEW above), but a rule staged as pending_review
-        stays that way until a different person calls approve_rule() on it.
+        When rule.supersedes_rule_id is set (this correction was confirmed to
+        replace an existing rule), that old rule is retired in the very same
+        write -- see knowledge/store.py's add_business_rule(supersedes_id=...).
+
+        Returns {"rule_id": int, "status": "active", "superseded_rule_id": int | None}.
         """
-        status = "pending_review" if rule.scope in _SCOPES_REQUIRING_REVIEW else "active"
+        supersedes_id = getattr(rule, "supersedes_rule_id", None)
         with connect() as conn:
             rule_id = add_business_rule(
                 conn,
                 rule_text=rule.rule_description,
                 scope=rule.scope,
                 added_by=rule.verified_by,
-                status=status,
+                supersedes_id=supersedes_id,
             )
             record_feedback_event(
                 conn,
@@ -173,26 +171,35 @@ class KnowledgeContext:
                 structured_rule_id=rule_id,
                 user_identity=rule.verified_by,
             )
-            self._sync_business_rules_and_feedback(conn, f"New rule #{rule_id} ({rule.scope}) from {rule.verified_by}")
-        return {"rule_id": rule_id, "status": status}
+            message = f"New rule #{rule_id} ({rule.scope}) from {rule.verified_by}"
+            if supersedes_id:
+                message += f", superseding #{supersedes_id}"
+            self._sync_business_rules_and_feedback(conn, message)
+        return {"rule_id": rule_id, "status": "active", "superseded_rule_id": supersedes_id}
 
-    def get_pending_rules(self) -> list[dict]:
-        """Every rule awaiting a second reviewer's approval, as plain dicts."""
-        with connect() as conn:
-            return [dict(r) for r in get_pending_rules(conn)]
+    def retire_rule(self, rule_id: int, retired_by: str, reason: str = "") -> dict:
+        """Remove a rule with no replacement -- the sibling of add_rule()'s
+        supersedes-and-replace path, for "this was wrong, take it out, nothing
+        takes its place." The row and its full history stay exactly as they are
+        (see knowledge/store.py's retire_business_rule()); only its status changes,
+        so it stops being applied to anything from this point on.
 
-    def approve_rule(self, rule_id: int, approver_identity: str, note: str = "") -> None:
-        """Move a pending rule to active. Raises knowledge.store.MakerCheckerViolation
-        if approver_identity is the same person who submitted it -- this is the
-        maker-checker gate, enforced here in code rather than left to convention."""
+        Returns {"rule_id": int, "status": "retired" | "not_found_or_not_active"}.
+        """
         with connect() as conn:
-            approve_rule(conn, rule_id, approved_by=approver_identity, note=note)
-            self._sync_business_rules_and_feedback(conn, f"Approve rule #{rule_id} (by {approver_identity})")
-
-    def reject_rule(self, rule_id: int, approver_identity: str, note: str = "") -> None:
-        with connect() as conn:
-            reject_rule(conn, rule_id, approved_by=approver_identity, note=note)
-            self._sync_business_rules_and_feedback(conn, f"Reject rule #{rule_id} (by {approver_identity})")
+            retired = retire_business_rule(conn, rule_id, retired_by=retired_by, reason=reason)
+            if retired:
+                record_feedback_event(
+                    conn,
+                    event_type="retirement",
+                    raw_text=reason,
+                    structured_rule_id=rule_id,
+                    user_identity=retired_by,
+                )
+                self._sync_business_rules_and_feedback(
+                    conn, f"Retired rule #{rule_id} (by {retired_by}): {reason}",
+                )
+        return {"rule_id": rule_id, "status": "retired" if retired else "not_found_or_not_active"}
 
     def record_confirmation(self, user_identity: str = "unknown") -> None:
         """Permanently record a 'looks good' confirmation -- called from

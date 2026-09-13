@@ -23,8 +23,12 @@ class AudienceSizingRequest(BaseModel):
     model_config = ConfigDict(strict=True)
 
     audience_label: Optional[str] = None
-    cadence: str = "ad-hoc"
-    medium: str = "unspecified"
+    # No fake non-empty default (e.g. "ad-hoc"/"unspecified") -- these are genuinely
+    # optional descriptive metadata, only meaningful when the consultant actually
+    # stated a cadence/medium. A placeholder default would get displayed to the user
+    # as if it were real information (see agents/nexus_agent.py's _NL_PARSE_PROMPT).
+    cadence: Optional[str] = None
+    medium: Optional[str] = None
     target_population: str
     filters: list[str]
     exclusion_layers: Optional[list[str]] = None
@@ -72,10 +76,10 @@ class NexusErrorPayload(BaseModel):
 
 
 class IntentClassification(BaseModel):
-    """Intent classification emitted by NexusAgent.classify_intent().
+    """Routing decision emitted by core.router.IntentRouter.classify().
 
     intent_type is a plain str so new agents can register custom intent types
-    via HANDLED_INTENTS without changing this schema.
+    via CAPABILITIES without changing this schema.
     """
 
     intent_type: str
@@ -83,6 +87,45 @@ class IntentClassification(BaseModel):
     knowledge_sources_consulted: list[str] = []
     business_rules_applied: list[str] = []
     reasoning: str = ""
+    narration: str = ""
+    # Set when the router genuinely isn't confident which agent fits -- the caller
+    # must ask clarifying_question instead of guessing/routing anywhere.
+    needs_clarification: bool = False
+    clarifying_question: str = ""
+
+
+class AgentCapability(BaseModel):
+    """One task-type an agent can perform, described so core.router.IntentRouter
+    can build its classification prompt entirely from the live set of registered
+    agents -- no agent name or intent type is ever hardcoded into the router
+    itself. Written the way you'd describe a new teammate's job to the rest of
+    the team: a short, plain description plus a couple of realistic examples."""
+
+    intent_type: str
+    description: str
+    examples: list[str] = []
+
+
+class AgentResult(BaseModel):
+    """Uniform envelope any routed agent's handle() call returns, so the
+    dispatcher (vibe_orchestrator.route_by_intent) reacts the same way no
+    matter which agent produced it.
+
+    kind:
+      "answer"  -- answer_text is the final answer, nothing more to do.
+      "log"     -- log is a completed QuantAuditLog (a sizing result).
+      "stuck"   -- stuck_reason explains what went wrong or what's missing.
+      "handoff" -- this agent's part is done; hand handoff_payload to the
+                   agent registered under handoff_to and call its handle()
+                   next (see NexusAgent.handle()'s sizing_request case).
+    """
+
+    kind: Literal["answer", "log", "stuck", "handoff"]
+    answer_text: Optional[str] = None
+    log: Optional[QuantAuditLog] = None
+    stuck_reason: Optional[str] = None
+    handoff_to: Optional[str] = None
+    handoff_payload: Optional[AudienceSizingRequest] = None
 
 
 class SemanticFailureLog(BaseModel):
@@ -102,7 +145,7 @@ class SemanticFailureLog(BaseModel):
         "general_answer",
     ]
     glossary_gaps: list[str]
-    intent_type: str = ""  # sizing_request | general_question
+    intent_type: str = ""  # any registered intent type, e.g. sizing_request | general_question
 
 
 class BusinessRule(BaseModel):
@@ -128,8 +171,13 @@ class BusinessRule(BaseModel):
     clarification_rounds: int
 
     applies_to_future: bool
-    overrides_acc_summary: bool
     priority: int           # pattern=2, universal=1
+
+    # Set when this rule is meant to replace an existing confirmed rule -- the ID (not
+    # just the text) of the rule being retired, so knowledge/context.py's add_rule() can
+    # atomically mark that old rule 'retired' in the same step this one is saved. None
+    # for a rule that isn't overriding anything.
+    supersedes_rule_id: Optional[int] = None
 
     applied_count: int = 0
     last_applied_at: Optional[str] = None
@@ -140,10 +188,10 @@ class BusinessRule(BaseModel):
 class FeedbackInput(BaseModel):
     """Input contract for FeedbackAgent — all context needed to interpret a correction."""
 
-    raw_correction: str       # User's exact words
+    raw_correction: str       # User's exact words -- the most recent reply if a clarification is in progress
     audience_label: Optional[str] = None
-    medium: str
-    cadence: str
+    medium: Optional[str] = None
+    cadence: Optional[str] = None
     execution_context: dict   # filters applied, tables used, audience count, waterfall steps
     existing_rules: list[dict]
     raw_input_prompt: str     # What user originally asked
@@ -153,17 +201,19 @@ class FeedbackInput(BaseModel):
     # own `log is not None` check, so SemanticFailureLog.intent_type reflects what actually
     # happened rather than a guess.
     has_prior_result: bool = False
-    # Set only when the PREVIOUS correction on this session was blocked because it
-    # contradicted an existing confirmed rule -- raw_correction above is then the user's
-    # answer to "do you want this to override that rule?", not a fresh correction to
-    # interpret from scratch. See FeedbackAgent._resolve_pending_contradiction().
-    pending_contradiction_text: str = ""
-    # The specific rule dict that was blocked (Stage 1's raw interpretation of the
-    # ORIGINAL correction, before the contradiction check skipped it) -- if the user
-    # confirms they want to override, this is what actually gets saved, so the saved
-    # rule reflects the original correction's own clean interpretation rather than the
-    # user's short "yes, go ahead" reply to the follow-up question.
-    pending_contradiction_new_rule: Optional[dict] = None
+    # Non-empty only when a clarification conversation is already in progress on this
+    # session -- the very first correction that kicked it off. Stage 1 re-derives
+    # everything (what/duration/scope/conflict) from this plus clarification_history
+    # plus the latest reply every round, rather than assuming only the just-asked gap
+    # was resolved. Empty means raw_correction above is a brand-new correction.
+    original_correction: str = ""
+    # Accumulated {"question": str, "answer": str} pairs for the open clarification
+    # thread on this session, oldest first. Empty when no clarification is in progress.
+    clarification_history: list[dict] = []
+    # How many clarification round-trips have already happened on this thread -- the
+    # caller (session state) owns and increments this; FeedbackAgent only reads it to
+    # decide whether the round cap (see agents/feedback_agent.py) has been reached.
+    clarification_round: int = 0
 
 
 class FeedbackOutput(BaseModel):
@@ -175,14 +225,8 @@ class FeedbackOutput(BaseModel):
     new_glossary_terms: list[dict]
     interpretation_summary: str
     success: bool
-    clarifying_question: str = ""  # Non-empty when AI needs more info before saving a rule
-    # Set alongside clarifying_question only when the question is specifically about a
-    # contradiction with an existing confirmed rule (not general ambiguity) -- the caller
-    # persists this so the user's next reply can be resolved as a yes/no answer instead of
-    # being re-run through the full interpretation pipeline, which would just flag the same
-    # contradiction again.
-    contradiction_existing_rule_text: str = ""
-    # The blocked rule dict (Stage 1's raw interpretation) -- persisted by the caller
-    # alongside contradiction_existing_rule_text so it can be handed back in as
-    # FeedbackInput.pending_contradiction_new_rule if the user confirms the override.
-    contradiction_new_rule: Optional[dict] = None
+    clarifying_question: str = ""  # Non-empty when AI needs more info before saving anything
+    # Set when the clarification round cap was hit without ever reaching enough
+    # confidence to save something safely -- the caller must stop the conversation,
+    # say so plainly, and save nothing, rather than loop forever or fall back to a guess.
+    gave_up: bool = False
