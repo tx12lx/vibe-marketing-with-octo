@@ -92,15 +92,15 @@
   {
     "added_at": "2026-09-10T23:55:04Z",
     "added_by": "web-unverified",
-    "approved_at": null,
-    "approved_by": null,
+    "approved_at": "2026-09-13T03:37:06Z",
+    "approved_by": "tian.xia@telus.com",
     "dataset": null,
     "id": 7,
     "project": null,
-    "review_note": null,
+    "review_note": "Retired: this rule over-generalized a narrower complaint (\"the query failed to filter for all postpaid LOBs\" -- i.e. some postpaid customers were being missed) into a blanket \"only ever count postpaid\" restriction applied to every request. Same over-generalization pattern as the month-to-month rule retired earlier. Pending a fuller knowledge-base review.",
     "rule_text": "The audience should include all subscribers belonging to postpaid Lines of Business (LOBs).",
     "scope": "universal",
-    "status": "pending_review",
+    "status": "retired",
     "superseded_by": null,
     "table_name": null
   },
@@ -114,9 +114,9 @@
     "project": null,
     "review_note": null,
     "rule_text": "Exclude subscribers who are on a month-to-month contract.",
-    "scope": "universal",
-    "status": "active",
-    "superseded_by": null,
+    "scope": "campaign",
+    "status": "retired",
+    "superseded_by": 10,
     "table_name": null
   },
   {
@@ -130,7 +130,7 @@
     "review_note": null,
     "rule_text": "Do not filter on `commit_end_date` unless customer lifecycle is explicitly mentioned in the prompt.",
     "scope": "pattern",
-    "status": "pending_review",
+    "status": "active",
     "superseded_by": null,
     "table_name": null
   },
@@ -145,7 +145,7 @@
     "review_note": null,
     "rule_text": "Do not exclude subscribers who are on a month-to-month contract unless explicitly requested by the campaign prompt.",
     "scope": "universal",
-    "status": "pending_review",
+    "status": "active",
     "superseded_by": null,
     "table_name": null
   },
@@ -176,6 +176,21 @@
     "rule_text": "Exclude subscribers who are on a month-to-month contract.",
     "scope": "universal",
     "status": "rejected",
+    "superseded_by": null,
+    "table_name": null
+  },
+  {
+    "added_at": "2026-09-13T04:25:05Z",
+    "added_by": "tian.xia@telus.com",
+    "approved_at": null,
+    "approved_by": null,
+    "dataset": null,
+    "id": 26,
+    "project": null,
+    "review_note": null,
+    "rule_text": "Do not filter on `lob_desc` unless the request explicitly names a mobility line of business, brand, or service type (e.g. postpaid, prepaid, Koodo, Public Mobile, EPP). When none of these are mentioned, leave the filter out entirely -- that is the correct behavior, not a gap to fill in. If filtering is needed, only use one of the values already confirmed for this column (Telus Postpaid, Telus Prepaid, Telus EPP, Koodo Postpaid, Koodo Prepaid, Public Mobile) -- never invent a new value.",
+    "scope": "universal",
+    "status": "active",
     "superseded_by": null,
     "table_name": null
   }

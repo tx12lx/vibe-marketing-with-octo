@@ -70,5 +70,133 @@
     "raw_text": "exclude customers under the age of 18",
     "structured_rule_id": 15,
     "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T04:09:56Z",
+    "event_type": "correction",
+    "id": 10,
+    "raw_text": "and the default renewal window is BYOD, MTM or contract end date in the next 30 days.",
+    "structured_rule_id": 16,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T04:15:20Z",
+    "event_type": "correction",
+    "id": 11,
+    "raw_text": "exclude month-to-month customers, only count people on a term contract",
+    "structured_rule_id": 17,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T04:17:08Z",
+    "event_type": "correction",
+    "id": 12,
+    "raw_text": "and the default renewal window is BYOD, MTM or contract end date in the next 30 days.",
+    "structured_rule_id": 18,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T04:21:24Z",
+    "event_type": "correction",
+    "id": 13,
+    "raw_text": "Actually the geography filter should include Quebec as well as Ontario, not just Ontario",
+    "structured_rule_id": 19,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T04:27:23Z",
+    "event_type": "correction",
+    "id": 14,
+    "raw_text": "MTM should be included in the renewal window",
+    "structured_rule_id": 20,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T05:01:19Z",
+    "event_type": "correction",
+    "id": 15,
+    "raw_text": "only include customers on the TELUS brand, not Koodo",
+    "structured_rule_id": 21,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T05:02:02Z",
+    "event_type": "confirm",
+    "id": 16,
+    "raw_text": "",
+    "structured_rule_id": null,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T05:03:52Z",
+    "event_type": "correction",
+    "id": 17,
+    "raw_text": "the geography filter should include Quebec as well as Ontario",
+    "structured_rule_id": 22,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T05:09:20Z",
+    "event_type": "correction",
+    "id": 18,
+    "raw_text": "The query shouldn't exclude month to month customers since the lifecycle was not mentioned in the prompt.",
+    "structured_rule_id": 23,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T05:10:18Z",
+    "event_type": "confirm",
+    "id": 19,
+    "raw_text": "",
+    "structured_rule_id": null,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T23:40:13Z",
+    "event_type": "correction",
+    "id": 20,
+    "raw_text": "exclude month-to-month customers, only count people on a term contract",
+    "structured_rule_id": 24,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T23:41:44Z",
+    "event_type": "correction",
+    "id": 21,
+    "raw_text": "Actually the geography filter should include Quebec as well as Ontario",
+    "structured_rule_id": 25,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-11T23:42:19Z",
+    "event_type": "confirm",
+    "id": 22,
+    "raw_text": "",
+    "structured_rule_id": null,
+    "user_identity": "web-unverified"
+  },
+  {
+    "created_at": "2026-09-12T22:46:40Z",
+    "event_type": "confirm",
+    "id": 23,
+    "raw_text": "",
+    "structured_rule_id": null,
+    "user_identity": "slack:U023718CSCV"
+  },
+  {
+    "created_at": "2026-09-13T03:37:06Z",
+    "event_type": "retirement",
+    "id": 24,
+    "raw_text": "Retired: this rule over-generalized a narrower complaint (\"the query failed to filter for all postpaid LOBs\" -- i.e. some postpaid customers were being missed) into a blanket \"only ever count postpaid\" restriction applied to every request. Same over-generalization pattern as the month-to-month rule retired earlier. Pending a fuller knowledge-base review.",
+    "structured_rule_id": 7,
+    "user_identity": "tian.xia@telus.com"
+  },
+  {
+    "created_at": "2026-09-13T04:25:05Z",
+    "event_type": "correction",
+    "id": 25,
+    "raw_text": "Observed: a plain headcount question that named no line of business, brand, or service type caused the tool to invent a non-existent 'MOBILITY' filter value on lob_desc instead of correctly leaving that column unfiltered.",
+    "structured_rule_id": 26,
+    "user_identity": "tian.xia@telus.com"
   }
 ]
