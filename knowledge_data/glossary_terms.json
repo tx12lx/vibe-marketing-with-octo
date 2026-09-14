@@ -134,13 +134,5 @@
     "id": 17,
     "source": "seed",
     "term": "MRC"
-  },
-  {
-    "added_at": "2026-09-14T00:00:00Z",
-    "added_by": "verification-script",
-    "definition": "Temporary row to verify the GitHub backup round-trip -- safe to ignore, will be removed within the minute.",
-    "id": 9999,
-    "source": "sync_verification",
-    "term": "SYNC_TEST"
   }
 ]
