@@ -35,3 +35,4 @@ Thumbs.db
 .vscode/
 *.swp
 scripts/backup_log.txt
+scripts/backup_status.txt
