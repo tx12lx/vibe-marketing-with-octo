@@ -17,18 +17,15 @@ Then open http://localhost:3000 in any browser on the same network.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import os
 import queue
-import secrets
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator, Optional
-from urllib.parse import parse_qs
 
 _API_DIR = Path(__file__).resolve().parent
 _ROOT = _API_DIR.parent
@@ -40,7 +37,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(_ROOT / ".env")
 
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse  # noqa: E402
 
 from vibe_orchestrator import (  # noqa: E402
     RequestResult,
@@ -85,30 +82,12 @@ register_knowledge_db_admin_routes(app)
 register_admin_status_page(app, get_schema_sync_status=lambda: schema_sync_status)
 
 
-# ---------------------------------------------------------------------------
-# Shared-password gate
-#
-# This is a lightweight pilot-stage lock, not real per-user authentication --
-# everyone who is given the password shares one "door." It only activates if
-# WEB_APP_PASSWORD is set in .env, so it's opt-in and doesn't change behavior
-# for anyone already running this locally without it.
-# ---------------------------------------------------------------------------
-
-_WEB_APP_PASSWORD = os.getenv("WEB_APP_PASSWORD", "")
-_AUTH_COOKIE_NAME = "octo_auth"
-_AUTH_SECRET = os.getenv("WEB_APP_SECRET") or secrets.token_hex(32)
-_PUBLIC_PATHS = {"/health", "/login", "/favicon.ico", "/favicon.svg"}
-
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">'
     '<rect width="20" height="20" rx="4" fill="#4B2E8C"/>'
     '<path fill="#fff" d="M10 4a6 6 0 100 12A6 6 0 0010 4zm0 1.5a4.5 4.5 0 110 9 4.5 4.5 0 010-9zm0 2a1 1 0 100 2 1 1 0 000-2zm-.75 3v3h1.5v-3H9.25z"/>'
     "</svg>"
 )
-
-
-def _auth_enabled() -> bool:
-    return bool(_WEB_APP_PASSWORD)
 
 
 def _caller_identity(request: Request) -> str:
@@ -128,60 +107,6 @@ def _caller_identity(request: Request) -> str:
     if raw:
         return raw.split(":", 1)[-1] or "web-unverified"
     return "web-unverified"
-
-
-def _expected_auth_cookie_value() -> str:
-    return hmac.new(_AUTH_SECRET.encode(), b"vibe-octo-authenticated", "sha256").hexdigest()
-
-
-def _is_authenticated(request: Request) -> bool:
-    if not _auth_enabled():
-        return True
-    cookie_value = request.cookies.get(_AUTH_COOKIE_NAME, "")
-    return hmac.compare_digest(cookie_value, _expected_auth_cookie_value())
-
-
-@app.middleware("http")
-async def _require_shared_password(request: Request, call_next):
-    if not _auth_enabled() or request.url.path in _PUBLIC_PATHS:
-        return await call_next(request)
-
-    if not _is_authenticated(request):
-        if request.url.path == "/" or request.method == "GET":
-            return RedirectResponse(url="/login")
-        return JSONResponse({"type": "error", "message": "Session expired. Please refresh the page and sign in again."}, status_code=401)
-
-    return await call_next(request)
-
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_form(error: str = "") -> HTMLResponse:
-    html = (_TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
-    error_html = '<div class="login-error">Incorrect password. Please try again.</div>' if error else ""
-    html = html.replace("{{ERROR}}", error_html)
-    return HTMLResponse(content=html)
-
-
-@app.post("/login")
-async def login_submit(request: Request) -> RedirectResponse:
-    # Parsed manually (rather than via request.form()) so this doesn't need
-    # the python-multipart package installed -- the login form is a plain
-    # application/x-www-form-urlencoded POST with a single field.
-    body = (await request.body()).decode("utf-8", errors="ignore")
-    submitted = parse_qs(body).get("password", [""])[0]
-
-    if _auth_enabled() and hmac.compare_digest(submitted, _WEB_APP_PASSWORD):
-        response = RedirectResponse(url="/", status_code=303)
-        response.set_cookie(
-            _AUTH_COOKIE_NAME,
-            _expected_auth_cookie_value(),
-            httponly=True,
-            samesite="lax",
-            max_age=60 * 60 * 24 * 30,
-        )
-        return response
-
-    return RedirectResponse(url="/login?error=1", status_code=303)
 
 
 @app.get("/favicon.svg", include_in_schema=False)
@@ -254,10 +179,6 @@ async def _startup() -> None:
         api_key=fuelix_key,
         bq_project=bq_project,
     )
-    if _auth_enabled():
-        _log.info("Shared-password gate is ON (WEB_APP_PASSWORD is set).")
-    else:
-        _log.warning("Shared-password gate is OFF -- anyone who can reach this address can use the tool. Set WEB_APP_PASSWORD in .env before sharing this beyond your own machine.")
     _log.info("Vibe OCTO web server ready.")
 
 
@@ -284,14 +205,7 @@ async def health() -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    business_rules_count = 0
-    if _runtime is not None:
-        try:
-            business_rules_count = _runtime.knowledge_ctx.business_rules_count
-        except Exception:
-            pass
     html = (_TEMPLATES_DIR / "chat.html").read_text(encoding="utf-8")
-    html = html.replace("{{RULES_COUNT}}", str(business_rules_count))
     return HTMLResponse(content=html)
 
 
