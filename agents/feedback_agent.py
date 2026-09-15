@@ -136,6 +136,22 @@ needs_clarification to true and ask about that specific gap.
       confidence -- a rule can be a clear, confident interpretation of the user's words
       and still contradict something already confirmed; both cases must be flagged.
 
+      IMPORTANT -- resolving a conflict you already asked about: if "=== CLARIFICATION SO
+      FAR ===" already contains a Q/A pair where you (or a prior round) asked the user to
+      confirm overriding this exact existing rule, read their answer carefully before
+      flagging contradicts_existing_rule again:
+        - If they said no/declined the override AND described a narrower condition instead
+          ("only when...", "except for...", "but not when...", "just for X requests"), this
+          is NOT a repeat conflict -- it is a new rule that coexists alongside the existing
+          universal one, scoped to that narrower case. Set contradicts_existing_rule to
+          false, set scope_detected to "pattern", and describe the narrower condition in
+          pattern_description. The existing universal rule is left standing for every other
+          case; this new rule only carves out the specific case the user described.
+        - If they said no without giving any narrower condition, treat the correction as
+          withdrawn: do not propose a rule for it at all.
+        - Only flag contradicts_existing_rule again if the user's reply actually confirms
+          the override (e.g. "yes", "replace it").
+
 If a "=== CLARIFICATION SO FAR ===" section is present in the context above, this is not
 a brand-new correction -- it is a continuing conversation. Re-derive all four gates above
 fresh from the ORIGINAL correction plus every question-and-answer pair together, as one
@@ -281,6 +297,12 @@ class FeedbackAgent(BaseAgent):
         if self._pending_clarification:
             question = self._pending_clarification
             self._pending_clarification = ""
+            # Defense in depth against the prompt-level fix above missing some case: if
+            # this is word-for-word the same question already asked (and answered) in this
+            # thread, asking it again would trap the person in a loop with no way out.
+            # Give up honestly instead of repeating -- see _give_up()'s docstring.
+            if self._is_repeat_question(question, inp.clarification_history):
+                return self._give_up()
             return FeedbackOutput(
                 rules_extracted=[], rules_confirmed=[], rules_pending=[],
                 new_glossary_terms=[], interpretation_summary="", success=False,
@@ -487,6 +509,17 @@ class FeedbackAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_repeat_question(question: str, history: list[dict]) -> bool:
+        """True if `question` is essentially the same one already asked in this
+        thread -- a normalized exact match, not fuzzy, so a genuinely different
+        follow-up question is never mistaken for a repeat."""
+        normalized = " ".join(question.lower().split())
+        return any(
+            normalized == " ".join(str(turn.get("question", "")).lower().split())
+            for turn in history
+        )
 
     @staticmethod
     def _give_up() -> FeedbackOutput:
