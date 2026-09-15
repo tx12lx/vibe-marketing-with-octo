@@ -24,6 +24,20 @@ request to the real Slack user's TELUS email when Slack will give it to us
 Slack-specific identity string so at least something identifiable is
 recorded.
 
+Once a thread has started (via that first @mention), every later reply in
+the same thread is handled too -- no re-mention needed. This requires the
+Slack app to actually be told about those plain messages, which needs its
+own scope/subscription pair granted in the Slack app's own settings (not
+something this code can do for itself): "channels:history" (or
+"groups:history" for a private channel) as a bot token scope, plus the
+matching "message.channels" ("message.groups") bot event subscription.
+Without both, Slack simply never delivers those messages here at all, and a
+reply with no @mention gets no response -- a Slack-side gap, not a bug in
+this file. A message that DOES mention the bot arrives twice (Slack sends
+both a "message" and an "app_mention" event for it) -- handle_message()
+recognizes and skips those, since handle_mention() already processes them,
+to avoid answering twice.
+
 Human-in-the-loop review and corrections (previously out of scope) are now
 wired up here too: buttons ("Show me how you got this", "Something looks
 wrong") call the same /hitl, /correction, and /confirm-correction endpoints
@@ -90,6 +104,12 @@ _MENTION_RE = re.compile(r"<@[A-Z0-9]+>\s*")
 _MAX_VISIBLE_PROGRESS_LINES = 4
 
 app = App(token=_BOT_TOKEN, token_verification_enabled=False)
+# This bot's own Slack user id -- resolved once at startup, so a later message
+# that mentions the bot can be recognized and skipped in handle_message()
+# (see that function's docstring for why: Slack delivers such a message as
+# BOTH a "message" and an "app_mention" event, and handle_mention() already
+# answers it).
+_BOT_USER_ID: str = app.client.auth_test()["user_id"]
 
 # ---------------------------------------------------------------------------
 # Ephemeral, per-thread UI-only state.
@@ -99,9 +119,14 @@ app = App(token=_BOT_TOKEN, token_verification_enabled=False)
 # only tracks what this relay itself needs to know to route the next Slack
 # event correctly. Scoped strictly to one session_id (one Slack thread) and
 # never read across threads.
+#
+# A session_id appears here from the moment its thread's first @mention is
+# handled, and stays here for the life of the thread (not just while a
+# correction is pending) -- that presence is what tells handle_message()
+# "this is a thread I'm already part of, not unrelated channel chatter."
 # ---------------------------------------------------------------------------
 _state_lock = threading.Lock()
-_awaiting_correction: dict[str, dict] = {}  # session_id -> {"caller_email": str}
+_thread_sessions: dict[str, dict] = {}  # session_id -> {"caller_email": str, "awaiting_correction": bool}
 
 
 def _caller_email(client, slack_user_id: str) -> str:
@@ -267,23 +292,32 @@ def _run_query(session_id: str, text: str, caller_email: str, on_progress: Calla
     return final_data
 
 
-@app.event("app_mention")
-def handle_mention(event: dict, say, client) -> None:
-    text = _MENTION_RE.sub("", event.get("text", "")).strip()
-    channel = event["channel"]
-    thread_ts = event.get("thread_ts") or event["ts"]
+def _route_thread_message(channel: str, thread_ts: str, session_id: str, text: str, caller_email: str, say, client) -> None:
+    """Shared entry point for both a fresh @mention and a plain follow-up
+    reply in a thread this bot already knows about -- decides query vs.
+    correction from THIS thread's own remembered state, so the same message
+    is handled identically no matter which Slack event carried it in."""
+    with _state_lock:
+        session = _thread_sessions.setdefault(session_id, {"caller_email": caller_email, "awaiting_correction": False})
+        session["caller_email"] = caller_email  # a different teammate may pick up the same thread later
+        awaiting = session["awaiting_correction"]
+
     if not text:
         # Kept as a fixed string deliberately: this relay has no direct path to the AI
         # model (it only ever calls the VM's /query, /hitl, /correction endpoints over
         # the tunnel -- see module docstring), and there's no request content yet to
-        # compose anything about. Reworded to drop the old "audience sizing or a
-        # campaign" framing, which assumed this tool only ever does one kind of thing.
+        # compose anything about.
         say(text="Hi! Ask me anything and I'll figure out who can help.", thread_ts=thread_ts)
         return
 
+    if awaiting:
+        _handle_correction_turn(thread_ts, session_id, text, say)
+    else:
+        _handle_query_turn(channel, thread_ts, session_id, text, caller_email, say, client)
+
+
+def _handle_query_turn(channel: str, thread_ts: str, session_id: str, text: str, caller_email: str, say, client) -> None:
     ack = say(text="Working on it...", thread_ts=thread_ts)
-    caller_email = _caller_email(client, event["user"])
-    session_id = f"slack:{channel}:{thread_ts}"
 
     progress_lines: list[str] = []
 
@@ -315,6 +349,48 @@ def handle_mention(event: dict, say, client) -> None:
         client.chat_update(channel=channel, ts=ack["ts"], text=answer_text, blocks=_result_blocks(answer_text, session_id))
     else:
         client.chat_update(channel=channel, ts=ack["ts"], text=answer_text)
+
+
+def _handle_correction_turn(thread_ts: str, session_id: str, text: str, say) -> None:
+    """The free-text reply to "Something looks wrong" / "let me re-explain" --
+    same /correction call handle_message() used to make directly, now shared
+    so a correction can arrive via a plain reply OR an @mention either way."""
+    with _state_lock:
+        session = _thread_sessions.get(session_id, {})
+        caller_email = session.get("caller_email", "")
+    try:
+        data = _vm_post("/correction", session_id, caller_email, text=text)
+    except Exception:
+        _log.exception("correction call to VM failed.")
+        say(text="I had trouble processing that. Could you try again?", thread_ts=thread_ts)
+        return
+
+    result_type = data.get("type")
+    if result_type == "correction_clarifying":
+        # Still needs a free-text reply -- leave awaiting_correction as is.
+        say(text=data.get("question", ""), thread_ts=thread_ts)
+        return
+
+    with _state_lock:
+        session = _thread_sessions.get(session_id)
+        if session is not None:
+            session["awaiting_correction"] = False
+
+    if result_type == "correction_interpreted":
+        blocks = _correction_confirm_blocks(data.get("interpretation", ""), session_id)
+        say(text=data.get("message", "Here is what I understood:"), thread_ts=thread_ts, blocks=blocks)
+    else:
+        say(text=data.get("message", "Got it."), thread_ts=thread_ts)
+
+
+@app.event("app_mention")
+def handle_mention(event: dict, say, client) -> None:
+    text = _MENTION_RE.sub("", event.get("text", "")).strip()
+    channel = event["channel"]
+    thread_ts = event.get("thread_ts") or event["ts"]
+    session_id = f"slack:{channel}:{thread_ts}"
+    caller_email = _caller_email(client, event["user"])
+    _route_thread_message(channel, thread_ts, session_id, text, caller_email, say, client)
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +437,9 @@ def handle_hitl_no(ack, body, client) -> None:
         return
 
     with _state_lock:
-        _awaiting_correction[session_id] = {"caller_email": caller_email}
+        session = _thread_sessions.setdefault(session_id, {"caller_email": caller_email, "awaiting_correction": False})
+        session["caller_email"] = caller_email
+        session["awaiting_correction"] = True
     message = data.get("message") or "No problem! Please describe what looks wrong in your own words -- no need to be technical."
     client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=message)
 
@@ -434,18 +512,30 @@ def handle_confirm_no(ack, body, client) -> None:
     channel, thread_ts = _parse_session_id(session_id)
     caller_email = _caller_email(client, body["user"]["id"])
     with _state_lock:
-        _awaiting_correction[session_id] = {"caller_email": caller_email}
+        session = _thread_sessions.setdefault(session_id, {"caller_email": caller_email, "awaiting_correction": False})
+        session["caller_email"] = caller_email
+        session["awaiting_correction"] = True
     client.chat_postMessage(channel=channel, thread_ts=thread_ts, text="No problem -- go ahead and describe it again, in your own words.")
 
 
 @app.event("message")
-def handle_message(event: dict, client) -> None:
-    """Only acts when a thread is in _awaiting_correction (set by hitl_no or
-    confirm_no above) -- otherwise ignores channel chatter, exactly as the
-    previous no-op handler did. Bolt requires every subscribed event type to
-    have a handler; this one now does real work instead of discarding everything."""
+def handle_message(event: dict, say, client) -> None:
+    """Handles every plain (no-mention) reply in a thread this bot already
+    knows about, so a conversation can keep going without re-mentioning it --
+    the same routing handle_mention() uses (query vs. correction, decided by
+    this thread's own remembered state), just reached from a different event.
+
+    Skips: the bot's own messages/edits/deletes (bot_id/subtype set); any
+    message outside a thread (a thread is what "known" means here); a thread
+    this bot was never actually part of (not in _thread_sessions -- ordinary
+    channel chatter, left alone); and a message that mentions this bot, since
+    Slack delivers that one as an app_mention event too and handle_mention()
+    already answers it -- handling it here as well would answer it twice."""
     if event.get("bot_id") or event.get("subtype"):
         return
+    if f"<@{_BOT_USER_ID}>" in event.get("text", ""):
+        return
+
     thread_ts = event.get("thread_ts")
     if not thread_ts:
         return
@@ -453,40 +543,16 @@ def handle_message(event: dict, client) -> None:
     channel = event["channel"]
     session_id = f"slack:{channel}:{thread_ts}"
     with _state_lock:
-        pending = _awaiting_correction.get(session_id)
-    if pending is None:
+        known = session_id in _thread_sessions
+    if not known:
         return
 
     text = event.get("text", "").strip()
     if not text:
         return
 
-    caller_email = pending.get("caller_email") or _caller_email(client, event.get("user", ""))
-    try:
-        data = _vm_post("/correction", session_id, caller_email, text=text)
-    except Exception:
-        _log.exception("correction call to VM failed.")
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text="I had trouble processing that. Could you try again?")
-        return
-
-    result_type = data.get("type")
-    if result_type == "correction_clarifying":
-        # Still needs a free-text reply -- leave _awaiting_correction as is.
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=data.get("question", ""))
-        return
-
-    with _state_lock:
-        _awaiting_correction.pop(session_id, None)
-
-    if result_type == "correction_interpreted":
-        blocks = _correction_confirm_blocks(data.get("interpretation", ""), session_id)
-        client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts,
-            text=data.get("message", "Here is what I understood:"),
-            blocks=blocks,
-        )
-    else:
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=data.get("message", "Got it."))
+    caller_email = _caller_email(client, event.get("user", ""))
+    _route_thread_message(channel, thread_ts, session_id, text, caller_email, say, client)
 
 
 _diag_state: dict = {"stage": "not started"}

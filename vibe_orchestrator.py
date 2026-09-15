@@ -382,7 +382,7 @@ def process_core_request(
         for agent in rt.agents.values():
             agent.set_session_context(ctx)
 
-        intent = rt.router.classify(query)
+        intent = rt.router.classify(query, context=ctx)
         if intent.needs_clarification and intent.clarifying_question:
             # The router itself isn't confident which specialist fits -- ask, don't
             # guess. Forced to "general_question" shape and surfaced as a plain

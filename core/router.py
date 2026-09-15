@@ -47,17 +47,21 @@ _ROUTER_SYSTEM = (
     "task just because that's the most common one -- read what's actually being asked."
 )
 
-_ROUTER_PROMPT = """A person submitted this request:
+_ROUTER_PROMPT = """{context_block}A person submitted this request:
   "{query}"
 
 Here is the real, current list of specialists available, and what each one is for:
 
 {capability_menu}
 
-Classify this request into exactly one of the intent types listed above. If you are not
-at least {confidence_pct}% confident which specialist genuinely fits, say so honestly
-instead of guessing -- set needs_clarification to true and write one specific, friendly
-question that would resolve the ambiguity.
+Classify this request into exactly one of the intent types listed above. If recent
+conversation is given above, use it to resolve a request that only makes sense as a
+follow-up (e.g. "what about Quebec instead?" after a prior sizing question is itself a
+sizing request, not an ambiguous one -- don't treat it as unclassifiable just because it
+has no meaning standing alone). If you are not at least {confidence_pct}% confident which
+specialist genuinely fits even after considering that context, say so honestly instead of
+guessing -- set needs_clarification to true and write one specific, friendly question that
+would resolve the ambiguity.
 
 Also write one short, warm, plain-English sentence telling the person what you understood
 them to be asking and that you're getting started -- tailored to what THIS request
@@ -91,14 +95,26 @@ class IntentRouter:
                 lines.append(f'  "{cap.intent_type}" -- {cap.description}{example_text}')
         return "\n".join(lines) if lines else '  "general_question" -- (no specialists registered)'
 
-    def classify(self, query: str) -> IntentClassification:
+    def classify(self, query: str, context: str = "") -> IntentClassification:
         """Never raises -- falls back to a safe, low-confidence default (routed to
         whichever specialist looks most like a general-purpose fallback) if the
         classification call itself fails, so one broken call never crashes the
-        whole request."""
+        whole request.
+
+        context is this session's recent conversation (and any confirmed
+        corrections), the same string vibe_orchestrator.process_core_request()
+        already builds via KnowledgeContext.get_dynamic_context() and hands to
+        every agent -- without it, a follow-up like "what about Quebec
+        instead?" is classified with no idea a prior sizing question exists,
+        looks ambiguous in isolation, and gets misrouted to a clarifying
+        question instead of the specialist that could actually have answered
+        it using that same context.
+        """
         menu = self._capability_menu()
+        context_block = f"{context}\n\n" if context else ""
         prompt = _ROUTER_PROMPT.format(
-            query=query, capability_menu=menu, confidence_pct=int(_CONFIDENCE_FLOOR * 100),
+            context_block=context_block, query=query, capability_menu=menu,
+            confidence_pct=int(_CONFIDENCE_FLOOR * 100),
         )
         try:
             raw = ask_ai(prompt, system=_ROUTER_SYSTEM, temperature=0, max_tokens=600, thinking_budget=0)
